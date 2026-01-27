@@ -1,4 +1,6 @@
+# =========================
 # Python
+# =========================
 __pycache__/
 *.py[cod]
 *.pyo
@@ -7,21 +9,66 @@ __pycache__/
 dist/
 build/
 
-# Venvs
+# =========================
+# Python virtualenvs
+# =========================
 .venv/
 venv/
 
+# =========================
+# Secrets & environment
+# =========================
+secrets/
+.env
+.env.*
+*.key
+*.pem
+
+# =========================
 # OS
+# =========================
 .DS_Store
 
-# Results/artifacts
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# Results / artifacts
+# (keep folder structure via .keep)
+# =========================
 results/runs/*
 !results/runs/.keep
+
+# =========================
+# Assets (keep folders via .keep)
+# =========================
 assets/audio/*
 !assets/audio/.keep
+
 assets/images/*
 !assets/images/.keep
 
-# IDE
-.vscode/
-.idea/
+# =========================
+# Models & large ML assets
+# =========================
+
+# Ollama (if ever stored locally in repo tree)
+models/
+ollama/
+
+# Whisper / faster-whisper
+whisper_models/
+
+# ComfyUI / Stable Diffusion
+ComfyUI/
+comfyui/
+checkpoints/
+loras/
+vae/
+embeddings/
+outputs/
+sdxl_models/
+
