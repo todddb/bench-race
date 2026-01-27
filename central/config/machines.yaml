@@ -1,5 +1,5 @@
 machines:
   - machine_id: "macbook"
     label: "MacBook"
-    agent_base_url: "http://192.168.11.22:9001"
+    agent_base_url: "http://127.0.0.1:9001"
     notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"

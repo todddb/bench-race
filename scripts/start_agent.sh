@@ -12,6 +12,7 @@ AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
 AGENT_PORT="${AGENT_PORT:-9001}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 OLLAMA_URL="http://${OLLAMA_HOST}:${OLLAMA_PORT}"
 
 ensure_ollama() {
@@ -35,11 +36,11 @@ ensure_ollama() {
   else
     log "Starting Ollama (ollama serve) ..."
     if "${is_daemon}"; then
-      nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
+      OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE}" nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
       write_pid "${OLLAMA_PIDFILE}" "$!"
     else
       # In non-daemon mode, run ollama in background so this script can continue
-      nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
+      OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE}" nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
       write_pid "${OLLAMA_PIDFILE}" "$!"
     fi
   fi
