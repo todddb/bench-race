@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -27,6 +27,7 @@ if str(ROOT_DIR) not in sys.path:
 
 # now import shared pydantic schemas
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
+from backends.ollama_backend import check_ollama_available, stream_ollama_generate
 
 # ---------------------------
 # Logging
@@ -101,85 +102,6 @@ async def capabilities():
 # ---------------------------
 # Background job: LLM streaming
 # ---------------------------
-async def _run_ollama_stream(job_id: str, model: str, prompt: str, max_tokens: int, temperature: float, num_ctx: int):
-    """
-    Attempt to stream from local Ollama daemon (http://127.0.0.1:11434/api/generate) using streaming NDJSON.
-    If Ollama is not reachable or streaming fails, raise an exception so caller can fallback to mock stream.
-    """
-    import httpx
-
-    url = CFG.get("ollama_base_url", "http://127.0.0.1:11434").rstrip("/") + "/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": True,
-        "options": {
-            "num_predict": max_tokens,
-            "temperature": temperature,
-            "num_ctx": num_ctx,
-        },
-    }
-
-    ttft: Optional[float] = None
-    gen_tokens = 0
-    start_time = time.perf_counter()
-
-    async with httpx.AsyncClient(timeout=60 * 60) as client:
-        resp = await client.post(url, json=payload, timeout=60 * 60, stream=True)
-        resp.raise_for_status()
-        async for line in resp.aiter_lines():
-            if not line:
-                continue
-            # Ollama streaming emits NDJSON lines. Parse each line if possible.
-            try:
-                chunk = json.loads(line)
-            except Exception:
-                # Some lines might be plain text; treat it as chunk
-                chunk = {"response": line}
-
-            # Ollama uses "response" or "token" fields; try common ones
-            text = ""
-            if isinstance(chunk, dict):
-                # Many Ollama stream lines contain {'response': '...'} or {'id':..., 'response':'...'}
-                # Some lines might include 'delta' tokens; try to get text fields
-                if "response" in chunk and isinstance(chunk["response"], str):
-                    text = chunk["response"]
-                elif "token" in chunk and isinstance(chunk["token"], str):
-                    text = chunk["token"]
-                elif "delta" in chunk and isinstance(chunk["delta"], str):
-                    text = chunk["delta"]
-                else:
-                    # fallback: stringify the chunk small preview
-                    text = chunk.get("text", "") or chunk.get("content", "") or ""
-            else:
-                text = str(chunk)
-
-            if text:
-                now = time.perf_counter()
-                if ttft is None:
-                    ttft = (now - start_time) * 1000.0  # ms
-                # crude token count = whitespace split
-                toks = len(text.split())
-                gen_tokens += toks
-
-                # emit token event
-                ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": now})
-                await _broadcast_event(ev)
-
-    total_ms = (time.perf_counter() - start_time) * 1000.0
-    gen_tps = (gen_tokens / (total_ms / 1000.0)) if total_ms > 0 else None
-
-    result = {
-        "ttft_ms": ttft,
-        "gen_tokens": gen_tokens,
-        "gen_tokens_per_s": gen_tps,
-        "total_ms": total_ms,
-        "model": model,
-        "engine": "ollama",
-    }
-    return result
-
-
 async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int, temperature: float, num_ctx: int):
     """
     Fallback streaming for development when Ollama isn't available.
@@ -188,6 +110,7 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
     ttft = None
     gen_tokens = 0
     start_time = time.perf_counter()
+    t_first = None
 
     # Simple deterministic split: break prompt into sentences or words
     chunks = []
@@ -217,13 +140,15 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
         now = time.perf_counter()
         if ttft is None:
             ttft = (now - start_time) * 1000.0
+            t_first = now
         toks = len(chunk.split())
         gen_tokens += toks
         ev = Event(job_id=job_id, type="llm_token", payload={"text": chunk, "timestamp_s": now})
         await _broadcast_event(ev)
 
-    total_ms = (time.perf_counter() - start_time) * 1000.0
-    gen_tps = gen_tokens / (total_ms / 1000.0) if total_ms > 0 else None
+    end_time = time.perf_counter()
+    total_ms = (end_time - start_time) * 1000.0
+    gen_tps = gen_tokens / (end_time - t_first) if t_first and end_time > t_first else None
     result = {
         "ttft_ms": ttft,
         "gen_tokens": gen_tokens,
@@ -248,11 +173,30 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     num_ctx = req.num_ctx
 
     log.info("Starting job %s model=%s", job_id, model)
+    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
     try:
-        # Prefer Ollama if configured; this function will throw on network errors
-        result = await _run_ollama_stream(job_id, model, prompt, max_tokens, temperature, num_ctx)
+        available = await check_ollama_available(base_url)
+        if not available:
+            log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
+            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx)
+        else:
+            log.info("Using Ollama backend for job %s", job_id)
+            async def _on_token(text: str, timestamp_s: float) -> None:
+                ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
+                await _broadcast_event(ev)
+
+            result = await stream_ollama_generate(
+                job_id=job_id,
+                model=model,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                base_url=base_url,
+                on_token=_on_token,
+            )
     except Exception as e:
-        log.info("Ollama stream failed (%s) — falling back to mock stream", e)
+        log.warning("Ollama stream failed (%s); falling back to mock stream", e)
         result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx)
 
     # Emit final metrics event
@@ -334,4 +278,3 @@ async def _shutdown():
         except Exception:
             pass
     WS_CLIENTS.clear()
-
