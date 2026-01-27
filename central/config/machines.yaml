@@ -1,7 +1,7 @@
 machines:
-  - machine_id: "rtx5090"
-    label: "RTX 5090 (32GB)"
-    agent_base_url: "http://10.0.0.10:9001"
+  - machine_id: "local-dev"
+    label: "Local Dev Agent"
+    agent_base_url: "http://127.0.0.1:9001"
   - machine_id: "m4mbp"
     label: "Apple M4 (128GB)"
     agent_base_url: "http://10.0.0.11:9001"
