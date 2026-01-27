@@ -4,3 +4,4 @@ eventlet==0.35.2
 requests==2.31.0
 pydantic==2.6.4
 pyyaml==6.0.1
+websockets==12.0
