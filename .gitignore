@@ -72,3 +72,9 @@ embeddings/
 outputs/
 sdxl_models/
 
+
+# Runtime
+run/*.pid
+logs/*.log
+!run/.keep
+!logs/.keep
