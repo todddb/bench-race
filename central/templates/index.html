@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>bench-race</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <h1>bench-race</h1>
+
+      <div class="controls card">
+        <div class="row">
+          <label>Model</label>
+          <select id="model">
+            <option value="llama3.1:8b-instruct-q8_0">llama3.1:8b-instruct-q8_0</option>
+            <option value="llama3.1:70b-instruct-q4_K_M">llama3.1:70b-instruct-q4_K_M</option>
+          </select>
+
+          <label>Max tokens</label>
+          <input id="max_tokens" type="number" value="256" />
+
+          <label>Context</label>
+          <input id="num_ctx" type="number" value="4096" />
+
+          <label>Temp</label>
+          <input id="temperature" type="number" step="0.1" value="0.2" />
+
+          <label>Repeat</label>
+          <input id="repeat" type="number" value="1" />
+        </div>
+
+        <div class="row">
+          <label>Prompt</label>
+          <textarea id="prompt" rows="4">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+        </div>
+
+        <button id="run">Run (LLM)</button>
+        <div id="status"></div>
+      </div>
+
+      <div class="grid">
+        {% for m in machines %}
+        <div class="pane card">
+          <div class="pane-title">{{ m.label }}</div>
+          <pre class="output" id="out-{{ m.machine_id }}"></pre>
+          <div class="metrics" id="metrics-{{ m.machine_id }}">
+            <span class="muted">Waiting…</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>

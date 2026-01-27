@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Venvs
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Results/artifacts
+results/runs/*
+!results/runs/.keep
+assets/audio/*
+!assets/audio/.keep
+assets/images/*
+!assets/images/.keep
+
+# IDE
+.vscode/
+.idea/
