@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>bench-race admin</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <h1>bench-race admin</h1>
+
+      <div class="service-controls">
+        <div class="service-card card" id="service-agent">
+          <div class="card-header">
+            <h3 class="card-title">Agent</h3>
+            <div class="status-indicator">
+              <span class="status-dot stopped" id="agent-status-dot"></span>
+              <span class="status-text" id="agent-status-text">Checking...</span>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-start" id="agent-start" disabled>Start</button>
+            <button class="btn btn-stop" id="agent-stop" disabled>Stop</button>
+            <button class="btn btn-details" id="agent-details-btn">Details</button>
+          </div>
+          <div class="details" id="agent-details">
+            <div>PID: <span id="agent-pid">-</span></div>
+            <div>Info: <span id="agent-info">-</span></div>
+          </div>
+        </div>
+
+        <div class="service-card card" id="service-central">
+          <div class="card-header">
+            <h3 class="card-title">Central</h3>
+            <div class="status-indicator">
+              <span class="status-dot stopped" id="central-status-dot"></span>
+              <span class="status-text" id="central-status-text">Checking...</span>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-start" id="central-start" disabled>Start</button>
+            <button class="btn btn-stop" id="central-stop" disabled>Stop</button>
+            <button class="btn btn-details" id="central-details-btn">Details</button>
+          </div>
+          <div class="details" id="central-details">
+            <div>PID: <span id="central-pid">-</span></div>
+            <div>Info: <span id="central-info">-</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/service-control.js"></script>
+  </body>
+</html>

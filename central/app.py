@@ -7,7 +7,8 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import re
 
 import os
 import requests
@@ -23,6 +24,7 @@ from flask_socketio import SocketIO, emit
 CENTRAL_DIR = Path(__file__).resolve().parent          # .../bench-race/central
 ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
 CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
+MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
 
 import sys
 if str(ROOT_DIR) not in sys.path:
@@ -65,6 +67,65 @@ def load_machines() -> List[Dict[str, Any]]:
 
 
 MACHINES: List[Dict[str, Any]] = load_machines()
+
+
+def load_model_policy() -> Dict[str, Any]:
+    if not MODEL_POLICY_PATH.exists():
+        return {"required": {"llm": []}, "optional": {}, "optional_profiles": {}}
+    with open(MODEL_POLICY_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+MODEL_POLICY: Dict[str, Any] = load_model_policy()
+
+MODEL_PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)b", re.IGNORECASE)
+
+
+def _required_models() -> Dict[str, List[str]]:
+    required = MODEL_POLICY.get("required") or {}
+    return {
+        "llm": list(required.get("llm") or []),
+        "whisper": list(required.get("whisper") or []),
+        "sdxl_profiles": list(required.get("sdxl_profiles") or []),
+    }
+
+
+def _available_llm_models(cap: Dict[str, Any]) -> List[str]:
+    if cap.get("ollama_models"):
+        return list(cap.get("ollama_models") or [])
+    return list(cap.get("llm_models") or [])
+
+
+def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
+    match = MODEL_PARAM_RE.search(model_name or "")
+    if not match:
+        return None
+    params_b = float(match.group(1))
+    name = model_name.lower()
+    if "q4" in name:
+        bytes_per_param = 0.5
+    elif "q5" in name:
+        bytes_per_param = 0.625
+    elif "q6" in name:
+        bytes_per_param = 0.75
+    elif "q8" in name:
+        bytes_per_param = 1.0
+    else:
+        bytes_per_param = 1.0
+    overhead_gb = 2.0 + (float(num_ctx) / 4096.0) * 4.0
+    return params_b * bytes_per_param + overhead_gb
+
+
+def classify_model_fit(available_gb: Optional[float], needed_gb: Optional[float]) -> Dict[str, Any]:
+    if available_gb is None or needed_gb is None:
+        return {"status": "unknown", "needed_gb": needed_gb, "available_gb": available_gb}
+    if needed_gb <= 0.75 * available_gb:
+        status = "good"
+    elif needed_gb <= 1.05 * available_gb:
+        status = "average"
+    else:
+        status = "bad"
+    return {"status": status, "needed_gb": needed_gb, "available_gb": available_gb}
 
 # -----------------------------------------------------------------------------
 # Agent WS connectors
@@ -157,7 +218,13 @@ def stop_ws_connectors():
 @app.get("/")
 def index():
     # Your templates/index.html should already render panes based on MACHINES
-    return render_template("index.html", machines=MACHINES)
+    model_options = _required_models().get("llm") or []
+    return render_template("index.html", machines=MACHINES, model_options=model_options)
+
+
+@app.get("/admin")
+def admin():
+    return render_template("admin.html")
 
 
 @app.get("/api/machines")
@@ -188,6 +255,102 @@ def api_capabilities():
                 }
             )
     return jsonify(caps)
+
+
+@app.get("/api/status")
+def api_status():
+    selected_model = request.args.get("model")
+    num_ctx = int(request.args.get("num_ctx", 4096))
+    required = _required_models()
+    statuses = []
+    for m in MACHINES:
+        last_checked = time.time()
+        try:
+            r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+            r.raise_for_status()
+            cap = r.json()
+            cap["agent_reachable"] = True
+            available_llm = _available_llm_models(cap)
+            has_selected_model = bool(selected_model and selected_model in available_llm)
+            missing_required = {
+                "llm": [model for model in required["llm"] if model not in available_llm],
+                "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
+                "sdxl_profiles": [
+                    profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
+                ],
+            }
+            available_memory = cap.get("accelerator_memory_gb") or cap.get("system_memory_gb")
+            fit = classify_model_fit(available_memory, estimate_model_size_gb(selected_model or "", num_ctx))
+            memory_label = "RAM"
+            if cap.get("accelerator_type") == "cuda":
+                memory_label = "VRAM"
+            elif cap.get("accelerator_type") == "metal":
+                memory_label = "Unified"
+            statuses.append(
+                {
+                    "machine_id": cap.get("machine_id") or m.get("machine_id"),
+                    "label": cap.get("label") or m.get("label"),
+                    "reachable": True,
+                    "selected_model": selected_model,
+                    "has_selected_model": has_selected_model,
+                    "available_llm_models": available_llm,
+                    "missing_required": missing_required,
+                    "last_checked": last_checked,
+                    "error": None,
+                    "model_fit": {
+                        **fit,
+                        "memory_label": memory_label,
+                    },
+                }
+            )
+        except Exception as e:
+            statuses.append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "reachable": False,
+                    "selected_model": selected_model,
+                    "has_selected_model": False,
+                    "available_llm_models": [],
+                    "missing_required": required,
+                    "last_checked": last_checked,
+                    "error": str(e),
+                    "model_fit": {"status": "unknown", "needed_gb": None, "available_gb": None, "memory_label": "RAM"},
+                }
+            )
+    return jsonify({"model": selected_model, "required": required, "machines": statuses})
+
+
+@app.post("/api/machines/<machine_id>/sync")
+def api_sync_models(machine_id: str):
+    required = _required_models()
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    try:
+        r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+        r.raise_for_status()
+        cap = r.json()
+        available_llm = _available_llm_models(cap)
+        missing = {
+            "llm": [model for model in required["llm"] if model not in available_llm],
+            "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
+            "sdxl_profiles": [
+                profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
+            ],
+        }
+        if not any(missing.values()):
+            return jsonify({"sync_id": None, "message": "No missing required models"})
+        sync_resp = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/models/sync",
+            json=missing,
+            timeout=5,
+        )
+        sync_resp.raise_for_status()
+        return jsonify(sync_resp.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.post("/api/start_llm")
@@ -356,4 +519,3 @@ if __name__ == "__main__":
         socketio.run(app, host="0.0.0.0", port=8080)
     finally:
         stop_ws_connectors()
-

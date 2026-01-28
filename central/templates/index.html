@@ -10,53 +10,13 @@
     <div class="container">
       <h1>bench-race</h1>
 
-      <!-- Service Control Cards -->
-      <div class="service-controls">
-        <div class="service-card card" id="service-agent">
-          <div class="card-header">
-            <h3 class="card-title">Agent</h3>
-            <div class="status-indicator">
-              <span class="status-dot stopped" id="agent-status-dot"></span>
-              <span class="status-text" id="agent-status-text">Checking...</span>
-            </div>
-          </div>
-          <div class="btn-group">
-            <button class="btn btn-start" id="agent-start" disabled>Start</button>
-            <button class="btn btn-stop" id="agent-stop" disabled>Stop</button>
-            <button class="btn btn-details" id="agent-details-btn">Details</button>
-          </div>
-          <div class="details" id="agent-details">
-            <div>PID: <span id="agent-pid">-</span></div>
-            <div>Info: <span id="agent-info">-</span></div>
-          </div>
-        </div>
-
-        <div class="service-card card" id="service-central">
-          <div class="card-header">
-            <h3 class="card-title">Central</h3>
-            <div class="status-indicator">
-              <span class="status-dot stopped" id="central-status-dot"></span>
-              <span class="status-text" id="central-status-text">Checking...</span>
-            </div>
-          </div>
-          <div class="btn-group">
-            <button class="btn btn-start" id="central-start" disabled>Start</button>
-            <button class="btn btn-stop" id="central-stop" disabled>Stop</button>
-            <button class="btn btn-details" id="central-details-btn">Details</button>
-          </div>
-          <div class="details" id="central-details">
-            <div>PID: <span id="central-pid">-</span></div>
-            <div>Info: <span id="central-info">-</span></div>
-          </div>
-        </div>
-      </div>
-
       <div class="controls card">
         <div class="row">
           <label>Model</label>
           <select id="model">
-            <option value="llama3.1:8b-instruct-q8_0">llama3.1:8b-instruct-q8_0</option>
-            <option value="llama3.1:70b-instruct-q4_K_M">llama3.1:70b-instruct-q4_K_M</option>
+            {% for model in model_options %}
+            <option value="{{ model }}">{{ model }}</option>
+            {% endfor %}
           </select>
 
           <label>Max tokens</label>
@@ -93,8 +53,22 @@
         {% for m in machines %}
         <div class="pane card" id="pane-{{ m.machine_id }}">
           <div class="pane-header">
-            <div class="pane-title">{{ m.label }}</div>
-            <span class="status-pill checking" id="status-pill-{{ m.machine_id }}" title="Checking...">Checking...</span>
+            <div class="pane-header-main">
+              <div class="pane-title">{{ m.label }}</div>
+              <div class="model-fit" id="model-fit-{{ m.machine_id }}">Model Fit: --</div>
+            </div>
+            <div class="pane-status">
+              <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
+              <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
+              <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
+            </div>
+          </div>
+          <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
+            <div class="progress-bar">
+              <div class="progress-fill" id="sync-progress-fill-{{ m.machine_id }}"></div>
+            </div>
+            <div class="progress-text" id="sync-progress-text-{{ m.machine_id }}">Preparing sync…</div>
+            <ul class="progress-log" id="sync-progress-log-{{ m.machine_id }}"></ul>
           </div>
           <pre class="output" id="out-{{ m.machine_id }}"></pre>
           <div class="metrics" id="metrics-{{ m.machine_id }}">
@@ -109,6 +83,5 @@
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/app.js"></script>
-    <script src="/static/js/service-control.js"></script>
   </body>
 </html>
