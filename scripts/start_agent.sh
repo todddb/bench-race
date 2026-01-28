@@ -22,30 +22,46 @@ ensure_ollama() {
     return 0
   fi
 
-  # Is the API already up?
-  if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
-    log "Ollama is reachable at ${OLLAMA_URL}"
+  # Step 1: Check if port is already listening (most reliable check)
+  # Use lsof to detect any process listening on the Ollama port
+  if lsof -nP -iTCP:"${OLLAMA_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    log "Ollama already listening on port ${OLLAMA_PORT}"
+    # Wait for API to be ready (it might be starting up)
+    for i in {1..30}; do
+      if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+        log "Ollama is reachable at ${OLLAMA_URL}"
+        return 0
+      fi
+      sleep 0.2
+    done
+    log "WARN: Port ${OLLAMA_PORT} is listening but API not responding. Continuing anyway."
     return 0
   fi
 
-  # If we have a pidfile, check it
-  local opid
-  opid="$(read_pid "${OLLAMA_PIDFILE}")"
-  if [[ -n "${opid}" ]] && pid_is_running "${opid}"; then
-    log "Ollama pid ${opid} appears running, waiting for API..."
-  else
-    log "Starting Ollama (ollama serve) ..."
-    if "${is_daemon}"; then
-      OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE}" nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
-      write_pid "${OLLAMA_PIDFILE}" "$!"
-    else
-      # In non-daemon mode, run ollama in background so this script can continue
-      OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE}" nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
-      write_pid "${OLLAMA_PIDFILE}" "$!"
-    fi
+  # Step 2: Check if an 'ollama serve' process exists (may be starting up)
+  local existing_pid
+  existing_pid="$(pgrep -f 'ollama serve' 2>/dev/null | head -1 || true)"
+  if [[ -n "${existing_pid}" ]]; then
+    log "Found existing ollama serve process (pid ${existing_pid}), waiting for API..."
+    # Don't start another instance, just wait for this one to come up
+    for i in {1..30}; do
+      if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+        log "Ollama is now reachable at ${OLLAMA_URL}"
+        return 0
+      fi
+      sleep 0.2
+    done
+    log "WARN: Existing ollama process found but API not responding at ${OLLAMA_URL}."
+    return 0
   fi
 
-  # Wait briefly for API
+  # Step 3: No listener and no process - safe to start Ollama
+  log "Starting Ollama (ollama serve) ..."
+  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE}" nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
+  write_pid "${OLLAMA_PIDFILE}" "$!"
+  log "Ollama started (pid $!)"
+
+  # Wait for API to come up
   for i in {1..30}; do
     if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
       log "Ollama is now reachable at ${OLLAMA_URL}"

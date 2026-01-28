@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Any, Awaitable, Callable, Dict
 
@@ -22,6 +23,12 @@ import httpx
 
 # tune as needed
 OLLAMA_TIMEOUT = 5.0  # seconds for tags check
+
+# Token buffering configuration for smoother WebSocket streaming
+# Buffer small fragments and flush when buffer reaches N chars, contains newline,
+# or time threshold elapses.
+STREAM_FLUSH_CHARS = int(os.getenv("BENCH_STREAM_FLUSH_CHARS", "64"))
+STREAM_FLUSH_SECONDS = float(os.getenv("BENCH_STREAM_FLUSH_SECONDS", "0.10"))
 
 
 async def check_ollama_available(base_url: str) -> bool:
@@ -50,6 +57,12 @@ async def stream_ollama_generate(
     for each incremental text chunk. Returns final metrics dict.
 
     This expects Ollama to stream NDJSON lines (each a JSON object).
+
+    Token buffering: small fragments are buffered and flushed when:
+    - Buffer reaches STREAM_FLUSH_CHARS characters, OR
+    - Buffer contains a newline, OR
+    - STREAM_FLUSH_SECONDS have elapsed since last flush, OR
+    - Stream is done.
     """
     url = base_url.rstrip("/") + "/api/generate"
     payload = {
@@ -59,13 +72,30 @@ async def stream_ollama_generate(
         "options": {
             "temperature": float(temperature),
             "num_ctx": int(num_ctx),
-            "max_tokens": int(max_tokens),
+            "num_predict": int(max_tokens),  # Ollama uses num_predict, not max_tokens
         },
     }
 
     gen_tokens = 0
     t0 = time.perf_counter()
     t_first = None
+
+    # Token buffering state
+    buf = ""
+    last_flush_time = t0
+
+    async def flush_buffer() -> None:
+        """Flush accumulated buffer to on_token callback."""
+        nonlocal buf, last_flush_time, gen_tokens, t_first
+        if not buf:
+            return
+        now = time.perf_counter()
+        if t_first is None:
+            t_first = now
+        await on_token(buf, now)
+        gen_tokens += len(buf.split())
+        buf = ""
+        last_flush_time = now
 
     # Use a long timeout for streaming; httpx will keep connection open
     async with httpx.AsyncClient(timeout=None) as client:
@@ -98,19 +128,32 @@ async def stream_ollama_generate(
                         text = obj["content"]
 
                     if text:
-                        now = time.perf_counter()
+                        # Record t_first on very first text received
                         if t_first is None:
-                            t_first = now
-                        # call the callback (caller will broadcast)
-                        await on_token(text, now)
-                        gen_tokens += len(text.split())
+                            t_first = time.perf_counter()
+                        # Accumulate into buffer
+                        buf += text
+
+                        # Decide whether to flush
+                        now = time.perf_counter()
+                        should_flush = (
+                            len(buf) >= STREAM_FLUSH_CHARS
+                            or "\n" in buf
+                            or (now - last_flush_time) >= STREAM_FLUSH_SECONDS
+                        )
+                        if should_flush:
+                            await flush_buffer()
 
                     # detect done markers if Ollama includes them
                     if obj.get("done") is True or obj.get("type") == "done":
                         break
 
+            # Final flush for any remaining buffered text
+            await flush_buffer()
+
         except Exception as exc:
-            # bubble up so caller can fallback
+            # Flush any remaining buffer before raising
+            await flush_buffer()
             raise
 
     tend = time.perf_counter()
