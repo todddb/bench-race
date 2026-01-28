@@ -1,0 +1,10 @@
+required:
+  llm:
+    - "llama3.1:8b-instruct-q8_0"
+    - "llama3.1:70b-instruct-q4_K_M"
+optional:
+  whisper:
+    - "large-v3"
+optional_profiles:
+  sdxl:
+    - "sdxl_1024_30steps"

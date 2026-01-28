@@ -7,12 +7,13 @@ import time
 import uuid
 from pathlib import Path
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import yaml
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------
 # Path and import robustness
@@ -58,6 +59,13 @@ WS_CLIENTS: Dict[str, WebSocket] = {}
 
 # Track running jobs (job_id -> asyncio.Task)
 RUNNING_JOBS: Dict[str, asyncio.Task] = {}
+SYNC_TASKS: Dict[str, asyncio.Task] = {}
+
+
+class SyncRequest(BaseModel):
+    llm: List[str] = Field(default_factory=list)
+    whisper: List[str] = Field(default_factory=list)
+    sdxl_profiles: List[str] = Field(default_factory=list)
 
 
 # ---------------------------
@@ -103,6 +111,10 @@ async def capabilities():
         llm_models=CFG.get("llm_models", []),
         whisper_models=CFG.get("whisper_models", []),
         sdxl_profiles=CFG.get("sdxl_profiles", []),
+        accelerator_type=CFG.get("accelerator_type"),
+        accelerator_memory_gb=CFG.get("accelerator_memory_gb"),
+        system_memory_gb=CFG.get("system_memory_gb"),
+        gpu_name=CFG.get("gpu_name"),
         ollama_reachable=ollama_reachable,
         ollama_models=ollama_models,
     )
@@ -225,6 +237,92 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     log.info("Job %s done. result=%s", job_id, result)
 
 
+async def _broadcast_sync_event(sync_id: str, event_type: str, payload: Dict) -> None:
+    ev = Event(job_id=sync_id, type=event_type, payload=payload)
+    await _broadcast_event(ev)
+
+
+async def _pull_ollama_model(sync_id: str, model: str, base_url: str) -> None:
+    url = base_url.rstrip("/") + "/api/pull"
+    payload = {"name": model, "stream": True}
+    timeout = httpx.Timeout(connect=5.0, read=None, write=60.0, pool=60.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    data = {"status": line}
+                status = data.get("status") or "pulling"
+                completed = data.get("completed")
+                total = data.get("total")
+                percent: Optional[float] = None
+                if completed is not None and total:
+                    try:
+                        percent = min(100.0, (float(completed) / float(total)) * 100.0)
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        percent = None
+                await _broadcast_sync_event(
+                    sync_id,
+                    "sync_progress",
+                    {
+                        "model": model,
+                        "phase": "pulling",
+                        "percent": percent,
+                        "bytes_downloaded": completed,
+                        "bytes_total": total,
+                        "message": status,
+                    },
+                )
+                if status == "success":
+                    break
+
+
+async def _sync_models(sync_id: str, req: SyncRequest) -> None:
+    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    try:
+        await _broadcast_sync_event(
+            sync_id,
+            "sync_started",
+            {
+                "models": {
+                    "llm": req.llm,
+                    "whisper": req.whisper,
+                    "sdxl_profiles": req.sdxl_profiles,
+                }
+            },
+        )
+
+        for model in req.llm:
+            await _broadcast_sync_event(
+                sync_id,
+                "sync_progress",
+                {"model": model, "phase": "queued", "percent": None, "message": "Queued"},
+            )
+            await _pull_ollama_model(sync_id, model, base_url)
+
+        for model in req.whisper:
+            await _broadcast_sync_event(
+                sync_id,
+                "sync_progress",
+                {"model": model, "phase": "complete", "percent": 100, "message": "Whisper sync not configured"},
+            )
+
+        for profile in req.sdxl_profiles:
+            await _broadcast_sync_event(
+                sync_id,
+                "sync_progress",
+                {"model": profile, "phase": "complete", "percent": 100, "message": "SDXL sync not configured"},
+            )
+
+        await _broadcast_sync_event(sync_id, "sync_done", {"message": "Sync complete"})
+    except Exception as exc:
+        await _broadcast_sync_event(sync_id, "sync_error", {"message": str(exc)})
+
+
 # ---------------------------
 # Jobs endpoint
 # ---------------------------
@@ -254,6 +352,21 @@ async def start_job(req: LLMRequest):
     task.add_done_callback(_on_done)
 
     return JobStartResponse(job_id=job_id)
+
+
+@app.post("/models/sync")
+async def sync_models(req: SyncRequest):
+    sync_id = str(uuid.uuid4())
+    task = asyncio.create_task(_sync_models(sync_id, req))
+    SYNC_TASKS[sync_id] = task
+
+    def _on_done(t: asyncio.Task):
+        SYNC_TASKS.pop(sync_id, None)
+        if t.exception():
+            log.exception("Sync %s terminated with exception", sync_id)
+
+    task.add_done_callback(_on_done)
+    return {"sync_id": sync_id}
 
 
 # ---------------------------
@@ -290,6 +403,8 @@ async def ws_endpoint(ws: WebSocket):
 async def _shutdown():
     log.info("Shutting down: cancelling %d running jobs", len(RUNNING_JOBS))
     for job_id, t in list(RUNNING_JOBS.items()):
+        t.cancel()
+    for sync_id, t in list(SYNC_TASKS.items()):
         t.cancel()
     # close websockets
     for cid, ws in list(WS_CLIENTS.items()):

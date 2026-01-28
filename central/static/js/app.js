@@ -1,6 +1,8 @@
 const socket = io();
 const paneMap = new Map();
-let capabilitiesCache = new Map();
+const statusCache = new Map();
+const syncState = new Map();
+const STATUS_POLL_MS = 12000;
 
 // Fallback reason display strings
 const FALLBACK_REASONS = {
@@ -27,88 +29,112 @@ const handleJobResults = (results) => {
   });
 };
 
-// Fetch and update capabilities for all machines
-async function fetchCapabilities() {
-  try {
-    const response = await fetch("/api/capabilities");
-    const caps = await response.json();
-    capabilitiesCache.clear();
-    caps.forEach((cap) => {
-      if (cap.machine_id) {
-        capabilitiesCache.set(cap.machine_id, cap);
-        updateStatusPill(cap);
-      }
-    });
-    return caps;
-  } catch (error) {
-    console.error("Failed to fetch capabilities", error);
-    return [];
-  }
-}
+const formatGb = (value) => (value == null ? "n/a" : `${value.toFixed(1)}GB`);
 
-// Update status pill for a machine based on capabilities
-function updateStatusPill(cap) {
-  const pill = document.getElementById(`status-pill-${cap.machine_id}`);
-  if (!pill) return;
+function updateMachineStatus(machine) {
+  const dot = document.getElementById(`status-dot-${machine.machine_id}`);
+  const text = document.getElementById(`status-text-${machine.machine_id}`);
+  if (!dot || !text) return;
 
-  // Remove all status classes
-  pill.classList.remove("ready", "missing-model", "agent-unreachable", "ollama-unreachable", "checking");
-
-  if (cap.agent_reachable === false) {
-    pill.textContent = "Agent unreachable";
-    pill.title = cap.error || "Cannot connect to agent";
-    pill.classList.add("agent-unreachable");
-  } else if (cap.ollama_reachable === false) {
-    pill.textContent = "Ollama unreachable";
-    pill.title = "Ollama API is not responding";
-    pill.classList.add("ollama-unreachable");
+  dot.classList.remove("ready", "missing", "offline", "checking");
+  if (!machine.reachable) {
+    dot.classList.add("offline");
+    dot.title = machine.error || "Agent offline";
+    text.textContent = "Offline";
+  } else if (!machine.has_selected_model) {
+    dot.classList.add("missing");
+    dot.title = `Missing model: ${machine.selected_model || "unknown"}`;
+    text.textContent = "Missing model";
   } else {
-    // Check if selected model is available
-    const selectedModel = document.getElementById("model")?.value;
-    const ollamaModels = cap.ollama_models || [];
-    if (selectedModel && !ollamaModels.includes(selectedModel)) {
-      pill.textContent = "Missing model";
-      pill.title = `Model "${selectedModel}" not installed. Available: ${ollamaModels.join(", ") || "none"}`;
-      pill.classList.add("missing-model");
-    } else {
-      pill.textContent = "Ready";
-      pill.title = "Agent and Ollama ready";
-      pill.classList.add("ready");
-    }
+    dot.classList.add("ready");
+    dot.title = "Ready";
+    text.textContent = "Ready";
   }
 }
 
-// Update all status pills (e.g., when model selection changes)
-function updateAllStatusPills() {
-  capabilitiesCache.forEach((cap) => updateStatusPill(cap));
+function updateModelFit(machine) {
+  const fitEl = document.getElementById(`model-fit-${machine.machine_id}`);
+  if (!fitEl) return;
+  const fit = machine.model_fit || {};
+  const status = fit.status || "unknown";
+  fitEl.classList.remove("good", "average", "bad", "unknown");
+  fitEl.classList.add(status);
+  if (status === "unknown") {
+    fitEl.textContent = "Model Fit: --";
+    return;
+  }
+  const memoryLabel = fit.memory_label ? ` ${fit.memory_label}` : "";
+  fitEl.textContent = `Model Fit: ${status.charAt(0).toUpperCase() + status.slice(1)} (est ${formatGb(
+    fit.needed_gb,
+  )} / ${formatGb(fit.available_gb)}${memoryLabel})`;
+}
+
+function updateSyncButton(machine) {
+  const btn = document.getElementById(`sync-${machine.machine_id}`);
+  if (!btn) return;
+  const missingRequired = machine.missing_required || {};
+  const missingCount = Object.values(missingRequired)
+    .flat()
+    .filter(Boolean).length;
+  const syncing = syncState.get(machine.machine_id)?.active;
+  if (missingCount > 0) {
+    btn.classList.remove("hidden");
+    btn.disabled = Boolean(syncing);
+    btn.title = `Missing required models: ${Object.values(missingRequired).flat().join(", ")}`;
+  } else {
+    btn.classList.add("hidden");
+  }
+}
+
+function applyStatusResponse(data) {
+  statusCache.clear();
+  (data.machines || []).forEach((machine) => {
+    statusCache.set(machine.machine_id, machine);
+    updateMachineStatus(machine);
+    updateModelFit(machine);
+    updateSyncButton(machine);
+  });
   updatePreflightBanner();
 }
 
-// Check preflight status and return blocked machines
-function getPreflightStatus() {
+async function fetchStatus() {
   const selectedModel = document.getElementById("model")?.value;
+  const numCtx = document.getElementById("num_ctx")?.value;
+  const params = new URLSearchParams();
+  if (selectedModel) params.set("model", selectedModel);
+  if (numCtx) params.set("num_ctx", numCtx);
+  try {
+    const response = await fetch(`/api/status?${params.toString()}`);
+    const data = await response.json();
+    applyStatusResponse(data);
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch status", error);
+    return null;
+  }
+}
+
+function getPreflightStatus() {
   const blocked = [];
   const ready = [];
 
-  capabilitiesCache.forEach((cap, machineId) => {
-    if (cap.agent_reachable === false) {
-      blocked.push({ machine_id: machineId, label: cap.label, reason: "agent unreachable" });
-    } else if (cap.ollama_reachable === false) {
-      blocked.push({ machine_id: machineId, label: cap.label, reason: "Ollama unreachable" });
+  statusCache.forEach((machine, machineId) => {
+    if (!machine.reachable) {
+      blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
+    } else if (!machine.has_selected_model) {
+      blocked.push({
+        machine_id: machineId,
+        label: machine.label,
+        reason: `missing model ${machine.selected_model}`,
+      });
     } else {
-      const ollamaModels = cap.ollama_models || [];
-      if (selectedModel && !ollamaModels.includes(selectedModel)) {
-        blocked.push({ machine_id: machineId, label: cap.label, reason: `missing model ${selectedModel}` });
-      } else {
-        ready.push({ machine_id: machineId, label: cap.label });
-      }
+      ready.push({ machine_id: machineId, label: machine.label });
     }
   });
 
   return { blocked, ready };
 }
 
-// Update preflight warning banner
 function updatePreflightBanner() {
   const banner = document.getElementById("preflight-banner");
   if (!banner) return;
@@ -124,6 +150,81 @@ function updatePreflightBanner() {
     banner.textContent = `${blocked.length} machine(s) blocked: ${reasons}`;
     banner.classList.toggle("error", ready.length === 0);
   }
+}
+
+function updateSyncUI(machineId, payload) {
+  const progress = document.getElementById(`sync-progress-${machineId}`);
+  const fill = document.getElementById(`sync-progress-fill-${machineId}`);
+  const text = document.getElementById(`sync-progress-text-${machineId}`);
+  const log = document.getElementById(`sync-progress-log-${machineId}`);
+  if (!progress || !fill || !text || !log) return;
+
+  progress.classList.remove("hidden");
+  const state = syncState.get(machineId) || { logs: [], active: true };
+  state.active = true;
+  if (payload?.percent != null) {
+    progress.querySelector(".progress-bar")?.classList.remove("indeterminate");
+    fill.style.width = `${payload.percent}%`;
+  } else {
+    progress.querySelector(".progress-bar")?.classList.add("indeterminate");
+    fill.style.width = "40%";
+  }
+
+  const message = payload?.message || payload?.phase || "Syncing";
+  const model = payload?.model ? ` ${payload.model}` : "";
+  text.textContent = `${message}${model}`;
+
+  if (payload?.message) {
+    state.logs.unshift(`${payload.message}${model}`);
+    state.logs = state.logs.slice(0, 3);
+    log.innerHTML = state.logs.map((entry) => `<li>${entry}</li>`).join("");
+  }
+  syncState.set(machineId, state);
+}
+
+function completeSyncUI(machineId, message, isError = false) {
+  const progress = document.getElementById(`sync-progress-${machineId}`);
+  const fill = document.getElementById(`sync-progress-fill-${machineId}`);
+  const text = document.getElementById(`sync-progress-text-${machineId}`);
+  const log = document.getElementById(`sync-progress-log-${machineId}`);
+  if (!progress || !fill || !text || !log) return;
+
+  progress.classList.remove("hidden");
+  progress.querySelector(".progress-bar")?.classList.remove("indeterminate");
+  fill.style.width = "100%";
+  text.textContent = message || (isError ? "Sync failed" : "Up to date");
+  const state = syncState.get(machineId) || { logs: [], active: false };
+  state.active = false;
+  syncState.set(machineId, state);
+  if (isError) {
+    log.innerHTML = `<li>${message || "Sync failed"}</li>`;
+  }
+}
+
+function initSyncButtons(machines) {
+  machines.forEach((machine) => {
+    const btn = document.getElementById(`sync-${machine.machine_id}`);
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      updateSyncUI(machine.machine_id, { message: "Starting sync..." });
+      try {
+        const response = await fetch(`/api/machines/${machine.machine_id}/sync`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Sync request failed");
+        }
+        if (!data.sync_id) {
+          completeSyncUI(machine.machine_id, data.message || "Up to date");
+          await fetchStatus();
+        }
+      } catch (error) {
+        completeSyncUI(machine.machine_id, error.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 socket.on("status", (msg) => {
@@ -142,8 +243,8 @@ socket.on("connect", async () => {
         paneMap.set(machine.machine_id, { out, metrics });
       }
     });
-    // Fetch capabilities after loading machines
-    await fetchCapabilities();
+    initSyncButtons(machines);
+    await fetchStatus();
   } catch (error) {
     console.error("Failed to load machines", error);
   }
@@ -188,6 +289,20 @@ socket.on("agent_event", (evt) => {
       paneEl.classList.toggle("mock-warning", isMock);
     }
   }
+
+  if (evt.type === "sync_started") {
+    updateSyncUI(evt.machine_id, { message: "Sync started" });
+  }
+  if (evt.type === "sync_progress") {
+    updateSyncUI(evt.machine_id, evt.payload || {});
+  }
+  if (evt.type === "sync_done") {
+    completeSyncUI(evt.machine_id, evt.payload?.message || "Up to date");
+    fetchStatus();
+  }
+  if (evt.type === "sync_error") {
+    completeSyncUI(evt.machine_id, evt.payload?.message || "Sync failed", true);
+  }
 });
 
 socket.on("llm_jobs_started", (results) => {
@@ -209,7 +324,7 @@ document.getElementById("run").addEventListener("click", async () => {
   }
 
   if (ready.length === 0) {
-    alert("No machines are ready to run. Check agent and Ollama status.");
+    alert("No machines are ready to run. Check agent status or model availability.");
     return;
   }
 
@@ -252,15 +367,19 @@ document.getElementById("run").addEventListener("click", async () => {
   }
 });
 
-// Refresh capabilities button
+// Refresh status button
 document.getElementById("refresh-caps")?.addEventListener("click", async () => {
   const btn = document.getElementById("refresh-caps");
   if (btn) btn.disabled = true;
-  await fetchCapabilities();
+  await fetchStatus();
   if (btn) btn.disabled = false;
 });
 
-// Update status pills when model selection changes
+// Update status when model selection changes
 document.getElementById("model")?.addEventListener("change", () => {
-  updateAllStatusPills();
+  fetchStatus();
 });
+
+setInterval(() => {
+  fetchStatus();
+}, STATUS_POLL_MS);

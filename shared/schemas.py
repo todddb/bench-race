@@ -18,6 +18,10 @@ class Capabilities(BaseModel):
     llm_models: List[str] = Field(default_factory=list)
     whisper_models: List[str] = Field(default_factory=list)
     sdxl_profiles: List[str] = Field(default_factory=list)
+    accelerator_type: Optional[str] = None
+    accelerator_memory_gb: Optional[float] = None
+    system_memory_gb: Optional[float] = None
+    gpu_name: Optional[str] = None
     # Extended capability fields for preflight checks
     ollama_reachable: Optional[bool] = None
     ollama_models: List[str] = Field(default_factory=list)  # Actually available on Ollama
