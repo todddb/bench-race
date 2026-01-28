@@ -10,89 +10,117 @@
     <div class="container">
       <h1>bench-race</h1>
 
-      <div class="controls card">
-        <div class="controls-grid">
-          <div class="prompt-column">
-            <label for="prompt">Prompt</label>
-            <textarea id="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+      <div class="main-layout">
+        <div class="main-content">
+          <div class="controls card">
+            <div class="controls-grid">
+              <div class="prompt-column">
+                <label for="prompt">Prompt</label>
+                <textarea id="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+              </div>
+
+              <div class="options-column">
+                <div class="control-group">
+                  <label for="model">Model</label>
+                  <select id="model">
+                    {% for model in model_options %}
+                    <option value="{{ model }}">{{ model }}</option>
+                    {% endfor %}
+                  </select>
+                  <div class="help-text">Which model to run on each machine.</div>
+                </div>
+
+                <div class="control-group">
+                  <label for="max_tokens">Max tokens</label>
+                  <input id="max_tokens" type="number" value="256" />
+                  <div class="help-text">Limits how long the response can be.</div>
+                </div>
+
+                <div class="control-group">
+                  <label for="num_ctx">Context</label>
+                  <input id="num_ctx" type="number" value="4096" />
+                  <div class="help-text">How much conversation/prompt can fit. Larger uses more memory.</div>
+                </div>
+
+                <div class="control-group">
+                  <label for="temperature">Temperature</label>
+                  <input id="temperature" type="number" step="0.1" value="0.2" />
+                  <div class="help-text">Higher = more creative, lower = more deterministic.</div>
+                </div>
+
+                <div class="control-group">
+                  <label for="repeat">Repeats</label>
+                  <input id="repeat" type="number" value="1" />
+                  <div class="help-text">Run multiple times; first run may be slower due to cold cache.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="run-row">
+              <button id="run">Run (LLM)</button>
+              <button id="refresh-caps" class="btn-secondary" title="Refresh capabilities">↻ Refresh</button>
+              <label class="toggle-label">
+                <input type="checkbox" id="run-only-ready" checked />
+                Run only ready machines
+              </label>
+            </div>
+            <div id="preflight-banner" class="preflight-banner hidden"></div>
+            <div id="status"></div>
           </div>
 
-          <div class="options-column">
-            <div class="control-group">
-              <label for="model">Model</label>
-              <select id="model">
-                {% for model in model_options %}
-                <option value="{{ model }}">{{ model }}</option>
-                {% endfor %}
-              </select>
-              <div class="help-text">Which model to run on each machine.</div>
+          <div id="run-view-banner" class="run-view-banner hidden">
+            <div class="run-view-main">
+              <div class="run-view-title" id="run-view-title"></div>
+              <div class="run-view-subtitle" id="run-view-subtitle"></div>
+              <div id="run-warning-banner" class="run-warning-banner hidden">Mock engine used on one or more machines.</div>
             </div>
+            <div class="run-view-actions">
+              <button id="run-view-return" class="btn-secondary btn-small">Return to live</button>
+              <button id="run-view-pin" class="btn-secondary btn-small">Pin as baseline</button>
+              <button id="run-view-export-csv" class="btn-secondary btn-small">Export CSV</button>
+              <button id="run-view-export-json" class="btn-secondary btn-small">Export JSON</button>
+            </div>
+          </div>
 
-            <div class="control-group">
-              <label for="max_tokens">Max tokens</label>
-              <input id="max_tokens" type="number" value="256" />
-              <div class="help-text">Limits how long the response can be.</div>
+          <div class="grid">
+            {% for m in machines %}
+            <div class="pane card" id="pane-{{ m.machine_id }}">
+              <div class="pane-header">
+                <div class="pane-header-main">
+                  <div class="pane-title">{{ m.label }}</div>
+                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">Model Fit: --</div>
+                </div>
+                <div class="pane-status">
+                  <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
+                  <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
+                  <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
+                </div>
+              </div>
+              <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
+                <div class="progress-bar">
+                  <div class="progress-fill" id="sync-progress-fill-{{ m.machine_id }}"></div>
+                </div>
+                <div class="progress-text" id="sync-progress-text-{{ m.machine_id }}">Preparing sync…</div>
+                <ul class="progress-log" id="sync-progress-log-{{ m.machine_id }}"></ul>
+              </div>
+              <pre class="output" id="out-{{ m.machine_id }}"></pre>
+              <div class="metrics" id="metrics-{{ m.machine_id }}">
+                <span class="muted">Waiting…</span>
+              </div>
             </div>
-
-            <div class="control-group">
-              <label for="num_ctx">Context</label>
-              <input id="num_ctx" type="number" value="4096" />
-              <div class="help-text">How much conversation/prompt can fit. Larger uses more memory.</div>
-            </div>
-
-            <div class="control-group">
-              <label for="temperature">Temperature</label>
-              <input id="temperature" type="number" step="0.1" value="0.2" />
-              <div class="help-text">Higher = more creative, lower = more deterministic.</div>
-            </div>
-
-            <div class="control-group">
-              <label for="repeat">Repeats</label>
-              <input id="repeat" type="number" value="1" />
-              <div class="help-text">Run multiple times; first run may be slower due to cold cache.</div>
-            </div>
+            {% endfor %}
           </div>
         </div>
 
-        <div class="run-row">
-          <button id="run">Run (LLM)</button>
-          <button id="refresh-caps" class="btn-secondary" title="Refresh capabilities">↻ Refresh</button>
-          <label class="toggle-label">
-            <input type="checkbox" id="run-only-ready" checked />
-            Run only ready machines
-          </label>
-        </div>
-        <div id="preflight-banner" class="preflight-banner hidden"></div>
-        <div id="status"></div>
-      </div>
-
-      <div class="grid">
-        {% for m in machines %}
-        <div class="pane card" id="pane-{{ m.machine_id }}">
-          <div class="pane-header">
-            <div class="pane-header-main">
-              <div class="pane-title">{{ m.label }}</div>
-              <div class="model-fit" id="model-fit-{{ m.machine_id }}">Model Fit: --</div>
-            </div>
-            <div class="pane-status">
-              <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
-              <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
-              <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
+        <aside class="side-panel card">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Recent Runs</div>
+              <div class="panel-subtitle">Click a run to view results.</div>
             </div>
           </div>
-          <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
-            <div class="progress-bar">
-              <div class="progress-fill" id="sync-progress-fill-{{ m.machine_id }}"></div>
-            </div>
-            <div class="progress-text" id="sync-progress-text-{{ m.machine_id }}">Preparing sync…</div>
-            <ul class="progress-log" id="sync-progress-log-{{ m.machine_id }}"></ul>
-          </div>
-          <pre class="output" id="out-{{ m.machine_id }}"></pre>
-          <div class="metrics" id="metrics-{{ m.machine_id }}">
-            <span class="muted">Waiting…</span>
-          </div>
-        </div>
-        {% endfor %}
+          <div id="recent-runs-list" class="recent-runs-list"></div>
+        </aside>
       </div>
     </div>
 

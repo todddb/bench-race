@@ -2,7 +2,20 @@ const socket = io();
 const paneMap = new Map();
 const statusCache = new Map();
 const syncState = new Map();
+const liveOutput = new Map();
+const liveMetrics = new Map();
+const liveState = new Map();
 const STATUS_POLL_MS = 12000;
+const RUN_LIST_LIMIT = 20;
+const BASELINE_KEY = "bench-race-baseline-run";
+
+let baselineRunId = localStorage.getItem(BASELINE_KEY);
+let baselineRun = null;
+let viewingMode = "live";
+let viewingRunId = null;
+let currentRunData = null;
+let liveRunId = null;
+let recentRuns = [];
 
 // Fallback reason display strings
 const FALLBACK_REASONS = {
@@ -23,13 +36,85 @@ const handleJobResults = (results) => {
     if (r.error) {
       out.textContent = `Error starting job: ${r.error}`;
       metrics.innerHTML = `<span class="muted">Failed to start</span>`;
+      updateLivePane(r.machine_id, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
+    } else if (r.skipped) {
+      out.textContent = "Skipped (not ready)";
+      metrics.innerHTML = `<span class="muted">Machine not ready</span>`;
+      updateLivePane(r.machine_id, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
     } else {
       metrics.innerHTML = `<span class="muted">Job started…</span>`;
+      updateLivePane(r.machine_id, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
     }
   });
 };
 
 const formatGb = (value) => (value == null ? "n/a" : `${value.toFixed(1)}GB`);
+
+const formatTimestamp = (isoString) => {
+  if (!isoString) return "";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return isoString;
+  return date.toLocaleString();
+};
+
+const formatMetric = (value, unit, decimals = 1) => {
+  if (value == null || Number.isNaN(value)) return "n/a";
+  return `${value.toFixed(decimals)}${unit}`;
+};
+
+const formatDelta = (value, baselineValue, higherIsBetter, unit, decimals = 1) => {
+  if (value == null || baselineValue == null) return "";
+  const delta = value - baselineValue;
+  if (Number.isNaN(delta) || delta === 0) {
+    return `<span class="delta neutral">Δ 0${unit}</span>`;
+  }
+  const isGood = higherIsBetter ? delta > 0 : delta < 0;
+  const sign = delta > 0 ? "+" : "-";
+  return `<span class="delta ${isGood ? "good" : "bad"}">Δ ${sign}${Math.abs(delta).toFixed(decimals)}${unit}</span>`;
+};
+
+const renderEngineBadge = (engine, fallbackReason) => {
+  const engineValue = engine ?? "n/a";
+  const isMock = engineValue === "mock";
+  let badge = `<span class="engine-badge ${isMock ? "mock" : "ollama"}">${engineValue}</span>`;
+  if (isMock && fallbackReason) {
+    const reasonText = FALLBACK_REASONS[fallbackReason] || fallbackReason;
+    badge += `<div class="fallback-reason">Fallback: ${reasonText}</div>`;
+  }
+  return badge;
+};
+
+const buildMetricsHtml = (metrics, baselineMetrics) => {
+  if (!metrics) return `<span class="muted">No data</span>`;
+  const ttft = formatMetric(metrics.ttft_ms, " ms");
+  const tokS = formatMetric(metrics.tok_s, " tok/s");
+  const total = formatMetric(metrics.total_ms, " ms");
+  const tokens = metrics.tokens ?? "n/a";
+  const ttftDelta = formatDelta(metrics.ttft_ms, baselineMetrics?.ttft_ms, false, " ms");
+  const tokSDelta = formatDelta(metrics.tok_s, baselineMetrics?.tok_s, true, " tok/s");
+  const totalDelta = formatDelta(metrics.total_ms, baselineMetrics?.total_ms, false, " ms");
+  const engine = renderEngineBadge(metrics.engine, metrics.fallback_reason);
+  return `
+    <div><strong>Model:</strong> ${metrics.model ?? "n/a"}</div>
+    <div><strong>Engine:</strong> ${engine}</div>
+    <div><strong>TTFT:</strong> ${ttft} ${ttftDelta}</div>
+    <div><strong>Gen tokens:</strong> ${tokens}</div>
+    <div><strong>Tokens/s:</strong> ${tokS} ${tokSDelta}</div>
+    <div><strong>Total:</strong> ${total} ${totalDelta}</div>
+  `;
+};
 
 function updateMachineStatus(machine) {
   const dot = document.getElementById(`status-dot-${machine.machine_id}`);
@@ -227,6 +312,253 @@ function initSyncButtons(machines) {
   });
 }
 
+const setPaneContent = (machineId, { outText, metricsHtml, isMock }) => {
+  const pane = paneMap.get(machineId);
+  if (!pane) return;
+  pane.out.textContent = outText;
+  pane.metrics.innerHTML = metricsHtml;
+  const paneEl = document.getElementById(`pane-${machineId}`);
+  if (paneEl) {
+    paneEl.classList.toggle("mock-warning", Boolean(isMock));
+  }
+};
+
+const updateLivePane = (machineId, { outText, metricsHtml, isMock }) => {
+  liveState.set(machineId, { outText, metricsHtml, isMock });
+  if (viewingMode !== "live") return;
+  setPaneContent(machineId, { outText, metricsHtml, isMock });
+};
+
+const refreshLiveDisplay = () => {
+  paneMap.forEach((_, machineId) => {
+    const state = liveState.get(machineId);
+    if (!state) return;
+    updateLivePane(machineId, state);
+  });
+};
+
+const setBaselineRunId = async (runId) => {
+  baselineRunId = runId;
+  if (runId) {
+    localStorage.setItem(BASELINE_KEY, runId);
+  } else {
+    localStorage.removeItem(BASELINE_KEY);
+  }
+  await loadBaselineRun();
+  renderRecentRuns();
+  if (viewingMode === "history" && currentRunData) {
+    renderRunToPanes(currentRunData);
+  } else {
+    refreshLiveDisplay();
+  }
+};
+
+const loadBaselineRun = async () => {
+  if (!baselineRunId) {
+    baselineRun = null;
+    return;
+  }
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(baselineRunId)}`);
+    if (!response.ok) {
+      baselineRun = null;
+      return;
+    }
+    baselineRun = await response.json();
+  } catch (error) {
+    console.error("Failed to load baseline run", error);
+    baselineRun = null;
+  }
+};
+
+const getBaselineMachine = (machineId) => {
+  if (!baselineRun || !Array.isArray(baselineRun.machines)) return null;
+  return baselineRun.machines.find((machine) => machine.machine_id === machineId) || null;
+};
+
+const renderRunBanner = (run) => {
+  const banner = document.getElementById("run-view-banner");
+  const title = document.getElementById("run-view-title");
+  const subtitle = document.getElementById("run-view-subtitle");
+  const warning = document.getElementById("run-warning-banner");
+  if (!banner || !title || !subtitle || !warning) return;
+
+  if (!run) {
+    banner.classList.add("hidden");
+    return;
+  }
+
+  banner.classList.remove("hidden");
+  title.textContent = `Viewing past run ${run.run_id}`;
+  subtitle.textContent = `${formatTimestamp(run.timestamp)} · ${run.model ?? "n/a"}`;
+  const hasMock = (run.machines || []).some((machine) => machine.engine === "mock");
+  warning.classList.toggle("hidden", !hasMock);
+};
+
+const renderRunToPanes = (run) => {
+  if (!run) return;
+  currentRunData = run;
+  renderRunBanner(run);
+  viewingMode = "history";
+  viewingRunId = run.run_id;
+
+  paneMap.forEach(({ out, metrics }, machineId) => {
+    const entry = (run.machines || []).find((machine) => machine.machine_id === machineId);
+    if (!entry) {
+      out.textContent = "No output stored for past runs.";
+      metrics.innerHTML = `<span class="muted">No data</span>`;
+      setPaneContent(machineId, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
+      return;
+    }
+
+    if (entry.status === "skipped") {
+      out.textContent = "Skipped for this run.";
+      metrics.innerHTML = `<span class="muted">Skipped</span>`;
+      setPaneContent(machineId, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
+      return;
+    }
+
+    if (entry.status === "error") {
+      out.textContent = entry.error || "Failed to start.";
+      metrics.innerHTML = `<span class="muted">Failed to start</span>`;
+      setPaneContent(machineId, {
+        outText: out.textContent,
+        metricsHtml: metrics.innerHTML,
+        isMock: false,
+      });
+      return;
+    }
+
+    const metricsData = {
+      model: entry.model ?? run.model,
+      engine: entry.engine,
+      fallback_reason: entry.fallback_reason,
+      ttft_ms: entry.ttft_ms,
+      tok_s: entry.tok_s,
+      total_ms: entry.total_ms,
+      tokens: entry.tokens,
+    };
+    const baselineMetrics = getBaselineMachine(machineId);
+    const metricsHtml = buildMetricsHtml(metricsData, baselineMetrics);
+    out.textContent = "Output not stored for past runs.";
+    setPaneContent(machineId, {
+      outText: out.textContent,
+      metricsHtml,
+      isMock: entry.engine === "mock",
+    });
+  });
+};
+
+const returnToLive = () => {
+  viewingMode = "live";
+  viewingRunId = null;
+  currentRunData = null;
+  const banner = document.getElementById("run-view-banner");
+  if (banner) banner.classList.add("hidden");
+  refreshLiveDisplay();
+};
+
+const fetchRecentRuns = async () => {
+  try {
+    const response = await fetch(`/api/runs?limit=${RUN_LIST_LIMIT}`);
+    if (!response.ok) return;
+    recentRuns = await response.json();
+    renderRecentRuns();
+  } catch (error) {
+    console.error("Failed to fetch runs", error);
+  }
+};
+
+const renderRecentRuns = () => {
+  const list = document.getElementById("recent-runs-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!recentRuns.length) {
+    const empty = document.createElement("div");
+    empty.className = "recent-empty";
+    empty.textContent = "No runs yet.";
+    list.appendChild(empty);
+    return;
+  }
+
+  recentRuns.forEach((run) => {
+    const item = document.createElement("div");
+    item.className = "recent-run-item";
+    item.dataset.runId = run.run_id;
+
+    const badges = [];
+    if (run.has_mock) {
+      badges.push('<span class="run-badge warning">Mock engine</span>');
+    }
+    if (baselineRunId && baselineRunId === run.run_id) {
+      badges.push('<span class="run-badge baseline">Baseline</span>');
+    }
+    const warningText = run.has_mock
+      ? '<div class="run-warning-text">Mock engine used on at least one machine.</div>'
+      : "";
+
+    item.innerHTML = `
+      <div class="recent-run-header">
+        <div>
+          <div class="recent-run-title">${run.model ?? "n/a"}</div>
+          <div class="recent-run-meta">${formatTimestamp(run.timestamp)}</div>
+        </div>
+        <div class="recent-run-badges">${badges.join(" ")}</div>
+      </div>
+      <div class="recent-run-prompt">${run.prompt_preview ?? ""}</div>
+      ${warningText}
+      <div class="recent-run-actions">
+        <button class="btn-secondary btn-small" data-action="view">View</button>
+        <button class="btn-secondary btn-small" data-action="pin">Pin baseline</button>
+        <button class="btn-secondary btn-small" data-action="csv">CSV</button>
+        <button class="btn-secondary btn-small" data-action="json">JSON</button>
+      </div>
+    `;
+
+    item.querySelectorAll("button").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const action = button.dataset.action;
+        if (action === "view") {
+          await loadRun(run.run_id);
+        } else if (action === "pin") {
+          await setBaselineRunId(run.run_id);
+        } else if (action === "csv") {
+          window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.csv`;
+        } else if (action === "json") {
+          window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.json`;
+        }
+      });
+    });
+
+    item.addEventListener("click", async () => {
+      await loadRun(run.run_id);
+    });
+
+    list.appendChild(item);
+  });
+};
+
+const loadRun = async (runId) => {
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+    if (!response.ok) return;
+    const run = await response.json();
+    renderRunToPanes(run);
+  } catch (error) {
+    console.error("Failed to load run", error);
+  }
+};
+
 socket.on("status", (msg) => {
   document.getElementById("status").innerText = msg.ok ? "Connected" : "Not connected";
 });
@@ -245,6 +577,8 @@ socket.on("connect", async () => {
     });
     initSyncButtons(machines);
     await fetchStatus();
+    await loadBaselineRun();
+    await fetchRecentRuns();
   } catch (error) {
     console.error("Failed to load machines", error);
   }
@@ -254,12 +588,17 @@ socket.on("agent_event", (evt) => {
   if (!evt || !evt.machine_id) return;
   const pane = paneMap.get(evt.machine_id);
   if (!pane) return;
-  const { out, metrics } = pane;
 
   if (evt.type === "llm_token") {
     const text = evt.payload?.text ?? "";
-    out.textContent += text;
-    out.scrollTop = out.scrollHeight;
+    const current = liveOutput.get(evt.machine_id) || "";
+    const updated = current + text;
+    liveOutput.set(evt.machine_id, updated);
+    updateLivePane(evt.machine_id, {
+      outText: updated,
+      metricsHtml: pane.metrics.innerHTML,
+      isMock: false,
+    });
   }
 
   if (evt.type === "job_done") {
@@ -267,27 +606,26 @@ socket.on("agent_event", (evt) => {
     const engine = payload.engine ?? "n/a";
     const isMock = engine === "mock";
 
-    // Build engine display with badge
-    let engineDisplay = `<span class="engine-badge ${isMock ? "mock" : "ollama"}">${engine}</span>`;
-    if (isMock && payload.fallback_reason) {
-      const reasonText = FALLBACK_REASONS[payload.fallback_reason] || payload.fallback_reason;
-      engineDisplay += `<div class="fallback-reason">Fallback: ${reasonText}</div>`;
-    }
+    const metricsData = {
+      model: payload.model,
+      engine,
+      fallback_reason: payload.fallback_reason,
+      ttft_ms: payload.ttft_ms,
+      tok_s: payload.gen_tokens_per_s,
+      total_ms: payload.total_ms,
+      tokens: payload.gen_tokens,
+    };
+    liveMetrics.set(evt.machine_id, metricsData);
 
-    metrics.innerHTML = `
-      <div><strong>Model:</strong> ${payload.model ?? "n/a"}</div>
-      <div><strong>Engine:</strong> ${engineDisplay}</div>
-      <div><strong>TTFT:</strong> ${payload.ttft_ms != null ? payload.ttft_ms.toFixed(1) : "n/a"} ms</div>
-      <div><strong>Gen tokens:</strong> ${payload.gen_tokens ?? "n/a"}</div>
-      <div><strong>Tokens/s:</strong> ${payload.gen_tokens_per_s != null ? payload.gen_tokens_per_s.toFixed(1) : "n/a"}</div>
-      <div><strong>Total:</strong> ${payload.total_ms != null ? payload.total_ms.toFixed(1) : "n/a"} ms</div>
-    `;
+    const baselineMetrics = getBaselineMachine(evt.machine_id);
+    const metricsHtml = buildMetricsHtml(metricsData, baselineMetrics);
+    updateLivePane(evt.machine_id, {
+      outText: liveOutput.get(evt.machine_id) || pane.out.textContent,
+      metricsHtml,
+      isMock,
+    });
 
-    // Highlight the pane if mock was used
-    const paneEl = document.getElementById(`pane-${evt.machine_id}`);
-    if (paneEl) {
-      paneEl.classList.toggle("mock-warning", isMock);
-    }
+    fetchRecentRuns();
   }
 
   if (evt.type === "sync_started") {
@@ -305,8 +643,8 @@ socket.on("agent_event", (evt) => {
   }
 });
 
-socket.on("llm_jobs_started", (results) => {
-  console.log("Jobs started", results);
+socket.on("llm_jobs_started", (payload) => {
+  const results = Array.isArray(payload) ? payload : payload?.results;
   handleJobResults(results);
 });
 
@@ -349,10 +687,17 @@ const startRun = async () => {
     if (runOnlyReady && isBlocked) {
       out.textContent = "Skipped (not ready)";
       metrics.innerHTML = `<span class="muted">Machine not ready</span>`;
+      liveOutput.set(machineId, out.textContent);
     } else {
       out.textContent = "Starting job…";
       metrics.innerHTML = `<span class="muted">Queued…</span>`;
+      liveOutput.set(machineId, "");
     }
+    updateLivePane(machineId, {
+      outText: out.textContent,
+      metricsHtml: metrics.innerHTML,
+      isMock: false,
+    });
   });
 
   try {
@@ -361,8 +706,11 @@ const startRun = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const results = await response.json();
-    handleJobResults(results);
+    const data = await response.json();
+    liveRunId = data.run_id;
+    handleJobResults(data.results || data);
+    fetchRecentRuns();
+    returnToLive();
   } catch (error) {
     console.error("Failed to start jobs", error);
   }
@@ -394,6 +742,26 @@ document.getElementById("refresh-caps")?.addEventListener("click", async () => {
 // Update status when model selection changes
 document.getElementById("model")?.addEventListener("change", () => {
   fetchStatus();
+});
+
+// Run view banner actions
+document.getElementById("run-view-return")?.addEventListener("click", () => {
+  returnToLive();
+});
+
+document.getElementById("run-view-pin")?.addEventListener("click", async () => {
+  if (!viewingRunId) return;
+  await setBaselineRunId(viewingRunId);
+});
+
+document.getElementById("run-view-export-csv")?.addEventListener("click", () => {
+  if (!viewingRunId) return;
+  window.location.href = `/api/runs/${encodeURIComponent(viewingRunId)}/export.csv`;
+});
+
+document.getElementById("run-view-export-json")?.addEventListener("click", () => {
+  if (!viewingRunId) return;
+  window.location.href = `/api/runs/${encodeURIComponent(viewingRunId)}/export.json`;
 });
 
 setInterval(() => {

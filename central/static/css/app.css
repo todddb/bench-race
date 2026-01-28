@@ -18,6 +18,9 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 .control-group input { width: 100%; }
 .help-text { font-size: 11px; color: #6b7280; line-height: 1.3; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; }
+.main-layout { display: flex; gap: 16px; align-items: flex-start; }
+.main-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.side-panel { width: 320px; align-self: flex-start; position: sticky; top: 16px; }
 .pane { overflow: hidden; }
 .pane-title { font-weight: 700; margin-bottom: 8px; }
 .output { min-height: 200px; max-height: 320px; background: #0b1020; color: #d7e1ff; padding: 10px; border-radius: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
@@ -47,6 +50,7 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 .run-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .btn-secondary { background: #e5e7eb; color: #374151; }
 .btn-secondary:hover { background: #d1d5db; }
+.btn-small { padding: 6px 10px; font-size: 12px; border-radius: 8px; }
 .toggle-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #374151; cursor: pointer; }
 .toggle-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
 
@@ -64,6 +68,40 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 /* Pane warning state when mock was used */
 .pane.mock-warning { border: 2px solid #fca5a5; background: #fef2f2; }
 .pane.mock-warning .pane-title { color: #991b1b; }
+
+/* Run view banner */
+.run-view-banner { display: flex; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 10px; background: #eef2ff; border: 1px solid #c7d2fe; align-items: center; flex-wrap: wrap; }
+.run-view-banner.hidden { display: none; }
+.run-view-title { font-weight: 600; color: #1e1b4b; }
+.run-view-subtitle { font-size: 12px; color: #4338ca; margin-top: 2px; }
+.run-view-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.run-warning-banner { margin-top: 6px; font-size: 12px; color: #991b1b; background: #fee2e2; padding: 6px 8px; border-radius: 6px; }
+.run-warning-banner.hidden { display: none; }
+
+/* Recent runs panel */
+.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.panel-title { font-weight: 700; font-size: 14px; }
+.panel-subtitle { font-size: 11px; color: #6b7280; }
+.recent-runs-list { display: flex; flex-direction: column; gap: 10px; }
+.recent-run-item { border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; cursor: pointer; transition: background 0.2s ease; }
+.recent-run-item:hover { background: #f9fafb; }
+.recent-run-header { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.recent-run-title { font-weight: 600; font-size: 13px; color: #111827; }
+.recent-run-meta { font-size: 11px; color: #6b7280; margin-top: 2px; }
+.recent-run-prompt { margin: 8px 0; font-size: 12px; color: #374151; }
+.run-warning-text { margin-bottom: 8px; font-size: 11px; color: #991b1b; background: #fee2e2; padding: 6px 8px; border-radius: 6px; }
+.recent-run-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.recent-run-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.run-badge { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 999px; }
+.run-badge.warning { background: #fee2e2; color: #991b1b; }
+.run-badge.baseline { background: #dcfce7; color: #166534; }
+.recent-empty { font-size: 12px; color: #6b7280; padding: 8px; text-align: center; }
+
+/* Deltas */
+.delta { font-size: 11px; margin-left: 6px; font-weight: 600; }
+.delta.good { color: #166534; }
+.delta.bad { color: #991b1b; }
+.delta.neutral { color: #6b7280; }
 
 /* Sync progress */
 .sync-progress { margin: 8px 0 12px; }
@@ -111,8 +149,12 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 @media (max-width: 560px) {
   .grid { grid-template-columns: 1fr; }
   .service-controls { flex-direction: column; }
+  .side-panel { position: static; width: 100%; }
+  .main-layout { flex-direction: column; }
 }
 
 @media (max-width: 980px) {
   .controls-grid { grid-template-columns: 1fr; }
+  .main-layout { flex-direction: column; }
+  .side-panel { position: static; width: 100%; }
 }
