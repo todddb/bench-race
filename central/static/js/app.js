@@ -649,6 +649,9 @@ socket.on("llm_jobs_started", (payload) => {
 });
 
 const runButton = document.getElementById("run");
+const generateSampleButton = document.getElementById("generate-sample");
+const SAMPLE_PROMPT_COOLDOWN_MS = 10000;
+let samplePromptCooldownUntil = 0;
 
 const startRun = async () => {
   const runOnlyReady = document.getElementById("run-only-ready")?.checked ?? true;
@@ -719,6 +722,50 @@ const startRun = async () => {
 // Run button with preflight validation
 runButton?.addEventListener("click", async () => {
   await startRun();
+});
+
+generateSampleButton?.addEventListener("click", async (event) => {
+  const btn = event.currentTarget;
+  if (!(btn instanceof HTMLButtonElement)) return;
+  const now = Date.now();
+  if (now < samplePromptCooldownUntil || btn.disabled) {
+    return;
+  }
+  samplePromptCooldownUntil = now + SAMPLE_PROMPT_COOLDOWN_MS;
+  btn.disabled = true;
+  btn.innerText = "Generating…";
+  try {
+    const modelValue = document.getElementById("model")?.value;
+    const res = await fetch("/api/generate_sample_prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: modelValue }),
+    });
+    let data = null;
+    if (res.ok) {
+      data = await res.json();
+    } else {
+      try {
+        data = await res.json();
+      } catch (error) {
+        data = null;
+      }
+      if (!data?.prompt) {
+        throw new Error("failed");
+      }
+    }
+    const promptBox = document.querySelector(".prompt");
+    if (promptBox) {
+      promptBox.value = data.prompt;
+      promptBox.focus();
+      promptBox.selectionStart = promptBox.selectionEnd = promptBox.value.length;
+    }
+  } catch (error) {
+    alert("Could not generate a sample prompt. Try again.");
+  } finally {
+    btn.disabled = false;
+    btn.innerText = "Generate Sample";
+  }
 });
 
 const promptEl = document.getElementById("prompt");
