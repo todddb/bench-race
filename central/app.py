@@ -2,19 +2,25 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import hashlib
+import io
 import json
 import logging
+import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import re
+import uuid
 
 import os
 import requests
 import yaml
 import websockets
-from flask import Flask, jsonify, render_template, request, abort
+from flask import Flask, Response, jsonify, render_template, request
 from flask_socketio import SocketIO, emit
 
 
@@ -45,6 +51,140 @@ log = logging.getLogger("bench-central")
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["SECRET_KEY"] = "dev"
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+# -----------------------------------------------------------------------------
+# Run persistence
+# -----------------------------------------------------------------------------
+RUNS_DIR = CENTRAL_DIR / "runs"
+RUN_HISTORY_LIMIT = 200
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
+RUN_LOCK = threading.Lock()
+RUN_CACHE: Dict[str, Dict[str, Any]] = {}
+JOB_RUN_MAP: Dict[str, Dict[str, str]] = {}
+
+
+def _current_git_sha() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT_DIR), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        sha = result.stdout.strip()
+        return sha or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _new_run_id(ts: datetime) -> str:
+    return f"{ts.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+
+def _run_path(run_id: str) -> Path:
+    return RUNS_DIR / f"{run_id}.json"
+
+
+def _write_run_record(record: Dict[str, Any]) -> None:
+    path = _run_path(record["run_id"])
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+
+
+def _load_run_record(run_id: str) -> Optional[Dict[str, Any]]:
+    path = _run_path(run_id)
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _prune_old_runs() -> None:
+    files = sorted(RUNS_DIR.glob("*.json"))
+    if len(files) <= RUN_HISTORY_LIMIT:
+        return
+    for path in files[: len(files) - RUN_HISTORY_LIMIT]:
+        try:
+            path.unlink()
+        except OSError:
+            log.warning("Failed to delete old run file %s", path)
+
+
+def _prompt_preview(prompt: str, limit: int = 120) -> str:
+    preview = " ".join((prompt or "").strip().split())
+    if len(preview) > limit:
+        return preview[: limit - 3] + "..."
+    return preview
+
+
+def _run_summary(record: Dict[str, Any]) -> Dict[str, Any]:
+    machines = record.get("machines") or []
+    has_mock = any(m.get("engine") == "mock" for m in machines)
+    return {
+        "run_id": record.get("run_id"),
+        "timestamp": record.get("timestamp"),
+        "model": record.get("model"),
+        "prompt_preview": _prompt_preview(record.get("prompt_text", "")),
+        "has_mock": has_mock,
+    }
+
+
+def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Optional[Dict[str, Any]]:
+    try:
+        r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+        r.raise_for_status()
+        cap = r.json()
+        available_memory = cap.get("accelerator_memory_gb") or cap.get("system_memory_gb")
+        fit = classify_model_fit(available_memory, estimate_model_size_gb(model, num_ctx))
+        memory_label = "RAM"
+        if cap.get("accelerator_type") == "cuda":
+            memory_label = "VRAM"
+        elif cap.get("accelerator_type") == "metal":
+            memory_label = "Unified"
+        return {**fit, "memory_label": memory_label}
+    except Exception:
+        return None
+
+
+def _update_run_from_event(event: Dict[str, Any]) -> None:
+    if event.get("type") != "job_done":
+        return
+    job_id = event.get("job_id")
+    if not job_id:
+        return
+    with RUN_LOCK:
+        job_info = JOB_RUN_MAP.get(job_id)
+        if not job_info:
+            return
+        run_id = job_info["run_id"]
+        record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+        if not record:
+            return
+        machine_id = job_info["machine_id"]
+        payload = event.get("payload") or {}
+        machine_entry = next(
+            (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+            None,
+        )
+        if not machine_entry:
+            machine_entry = {"machine_id": machine_id, "label": job_info.get("label")}
+            record.setdefault("machines", []).append(machine_entry)
+        machine_entry.update(
+            {
+                "status": "complete",
+                "ttft_ms": payload.get("ttft_ms"),
+                "tok_s": payload.get("gen_tokens_per_s"),
+                "total_ms": payload.get("total_ms"),
+                "tokens": payload.get("gen_tokens"),
+                "engine": payload.get("engine"),
+                "model": payload.get("model"),
+                "fallback_reason": payload.get("fallback_reason"),
+            }
+        )
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        RUN_CACHE[run_id] = record
+        _write_run_record(record)
+        JOB_RUN_MAP.pop(job_id, None)
 
 # -----------------------------------------------------------------------------
 # Load machines config
@@ -165,6 +305,7 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
 
                     # attach machine_id and forward to all browsers
                     evt["machine_id"] = machine_id
+                    _update_run_from_event(evt)
                     socketio.emit("agent_event", evt)
 
         except Exception as exc:
@@ -321,6 +462,88 @@ def api_status():
     return jsonify({"model": selected_model, "required": required, "machines": statuses})
 
 
+@app.get("/api/runs")
+def api_runs():
+    limit = int(request.args.get("limit", 20))
+    files = sorted(RUNS_DIR.glob("*.json"), reverse=True)
+    summaries = []
+    for path in files[:limit]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                record = json.load(f)
+            summaries.append(_run_summary(record))
+        except Exception as exc:
+            log.warning("Failed to read run %s: %s", path, exc)
+    return jsonify(summaries)
+
+
+@app.get("/api/runs/<run_id>")
+def api_run_detail(run_id: str):
+    record = _load_run_record(run_id)
+    if not record:
+        return jsonify({"error": "Run not found"}), 404
+    return jsonify(record)
+
+
+@app.get("/api/runs/<run_id>/export.json")
+def api_run_export_json(run_id: str):
+    record = _load_run_record(run_id)
+    if not record:
+        return jsonify({"error": "Run not found"}), 404
+    payload = json.dumps(record, indent=2)
+    return Response(
+        payload,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}.json"'},
+    )
+
+
+@app.get("/api/runs/<run_id>/export.csv")
+def api_run_export_csv(run_id: str):
+    record = _load_run_record(run_id)
+    if not record:
+        return jsonify({"error": "Run not found"}), 404
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "run_id",
+            "timestamp",
+            "model",
+            "machine_id",
+            "label",
+            "ttft_ms",
+            "tok_s",
+            "total_ms",
+            "tokens",
+            "engine",
+            "model_fit_status",
+        ]
+    )
+    for machine in record.get("machines") or []:
+        model_fit = machine.get("model_fit") or {}
+        writer.writerow(
+            [
+                record.get("run_id"),
+                record.get("timestamp"),
+                record.get("model"),
+                machine.get("machine_id"),
+                machine.get("label"),
+                machine.get("ttft_ms"),
+                machine.get("tok_s"),
+                machine.get("total_ms"),
+                machine.get("tokens"),
+                machine.get("engine"),
+                model_fit.get("status"),
+            ]
+        )
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}.csv"'},
+    )
+
+
 @app.post("/api/machines/<machine_id>/sync")
 def api_sync_models(machine_id: str):
     required = _required_models()
@@ -367,10 +590,39 @@ def api_start_llm():
     # Optional: only run on specific machines (for preflight filtering)
     machine_ids = payload.get("machine_ids")  # None means all machines
 
+    run_timestamp = datetime.now(timezone.utc)
+    run_id = _new_run_id(run_timestamp)
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+    run_record: Dict[str, Any] = {
+        "run_id": run_id,
+        "timestamp": run_timestamp.isoformat(),
+        "model": model,
+        "prompt_text": prompt,
+        "prompt_hash": prompt_hash,
+        "settings": {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "num_ctx": num_ctx,
+            "repeat": repeat,
+            "machine_ids": machine_ids,
+        },
+        "central_git_sha": _current_git_sha(),
+        "machines": [],
+    }
+
     results = []
     for m in MACHINES:
         # Skip machines not in the list (if list is provided)
         if machine_ids is not None and m.get("machine_id") not in machine_ids:
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "skipped",
+                    "reason": "not in ready list",
+                }
+            )
             results.append({
                 "machine_id": m.get("machine_id"),
                 "skipped": True,
@@ -379,6 +631,7 @@ def api_start_llm():
             continue
 
         try:
+            model_fit = _machine_model_fit(m, model, num_ctx)
             r = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/jobs",
                 json={
@@ -394,11 +647,41 @@ def api_start_llm():
                 timeout=5,
             )
             r.raise_for_status()
-            results.append({"machine_id": m["machine_id"], "job": r.json()})
+            job = r.json()
+            results.append({"machine_id": m["machine_id"], "job": job})
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "pending",
+                    "job_id": job.get("job_id"),
+                    "model_fit": model_fit,
+                }
+            )
+            if job.get("job_id"):
+                with RUN_LOCK:
+                    JOB_RUN_MAP[job["job_id"]] = {
+                        "run_id": run_id,
+                        "machine_id": m.get("machine_id"),
+                        "label": m.get("label", ""),
+                    }
         except Exception as e:
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "error",
+                    "error": str(e),
+                }
+            )
             results.append({"machine_id": m.get("machine_id"), "error": str(e)})
 
-    return jsonify(results)
+    with RUN_LOCK:
+        RUN_CACHE[run_id] = run_record
+        _write_run_record(run_record)
+        _prune_old_runs()
+
+    return jsonify({"run_id": run_id, "results": results})
 
 
 # -----------------------------------------------------------------------------
