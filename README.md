@@ -170,67 +170,96 @@ machines:
 
 ---
 
-## Scripts & Process Management
+## Service Control
 
-Management scripts are located in `scripts/`:
+bench-race provides a unified CLI (`bin/control`) for managing all services, plus compatibility wrapper scripts.
 
-### Agent Management
+### Unified Control CLI
+
+The primary way to manage services:
 
 ```bash
-# Start agent (also ensures Ollama is running)
-./scripts/agents start
+# Agent control
+bin/control agent start          # Start agent in daemon mode
+bin/control agent start --fg     # Start agent in foreground (for debugging)
+bin/control agent stop           # Stop agent
+bin/control agent status         # Show agent status
+bin/control agent status --json  # Show agent status as JSON
 
-# Start agent in daemon mode (background)
-./scripts/agents start --daemon
+# Central control
+bin/control central start        # Start central in daemon mode
+bin/control central start --fg   # Start central in foreground
+bin/control central stop         # Stop central
+bin/control central status       # Show central status
+```
 
-# Stop agent
+**Exit codes:**
+- `0` - Success (or running for status)
+- `1` - Failure (or not running for status)
+- `2` - Invalid arguments
+
+### Legacy Scripts (Compatibility)
+
+The original scripts remain functional as thin wrappers:
+
+```bash
+# Agent management (wraps bin/control)
+./scripts/agents start [--daemon]
 ./scripts/agents stop
-
-# Check status
 ./scripts/agents status
-
-# Restart agent
 ./scripts/agents restart
-
-# Tail logs
 ./scripts/agents logs
+
+# Central management
+./scripts/central start [--daemon]
+./scripts/central stop
+./scripts/central status
+./scripts/central restart
+./scripts/central logs
+
+# Individual wrapper scripts
+./scripts/start_agent
+./scripts/stop_agent
+./scripts/status_agent
+./scripts/start_central
+./scripts/stop_central
+./scripts/status_central
 ```
 
-### Central Management
+### Web UI Controls
+
+The web UI at http://127.0.0.1:8080 includes service control cards for Agent and Central:
+- Green/gray status indicator
+- Start/Stop buttons
+- PID and connection info
+
+### Service Control API
+
+Backend endpoints for programmatic control:
 
 ```bash
-# Start central server
-./scripts/central start
+# Get status
+curl http://127.0.0.1:8080/api/service/agent/status
+curl http://127.0.0.1:8080/api/service/central/status
 
-# Start in daemon mode
-./scripts/central start --daemon
-
-# Stop central
-./scripts/central stop
-
-# Check status
-./scripts/central status
-
-# Restart
-./scripts/central restart
-
-# Tail logs
-./scripts/central logs
+# Start/stop (local requests only, or with token)
+curl -X POST http://127.0.0.1:8080/api/service/agent/start
+curl -X POST http://127.0.0.1:8080/api/service/agent/stop
 ```
 
-### What the Scripts Do
+**Response format:**
+```json
+{
+  "component": "agent",
+  "running": true,
+  "pid": 12345,
+  "info": "listening on 127.0.0.1:9001"
+}
+```
 
-**`scripts/agents start`**:
-1. Checks if Ollama is already running (port 11434)
-2. Starts `ollama serve` if needed
-3. Activates `agent/.venv`
-4. Runs: `uvicorn agent.agent_app:app --host 0.0.0.0 --port 9001`
-5. Writes PID to `run/agent.pid`, logs to `logs/agent.log`
-
-**`scripts/central start`**:
-1. Activates `central/.venv`
-2. Runs: `python central/app.py`
-3. Writes PID to `run/central.pid`, logs to `logs/central.log`
+**Security:** Service control endpoints require either:
+- Local access (127.0.0.1, localhost)
+- Valid token: `Authorization: Bearer <token>` (set via `SERVICE_CONTROL_TOKEN` env var)
 
 ### Environment Variables
 
@@ -242,6 +271,54 @@ Management scripts are located in `scripts/`:
 | `OLLAMA_PORT` | `11434` | Ollama port |
 | `CENTRAL_HOST` | `0.0.0.0` | Central bind host |
 | `CENTRAL_PORT` | `8080` | Central bind port |
+| `SERVICE_CONTROL_TOKEN` | (none) | Optional auth token for remote API access |
+
+### systemd Deployment
+
+For production deployment, use the provided systemd units:
+
+```bash
+# Copy unit files
+sudo cp deploy/bench-agent.service /etc/systemd/system/
+sudo cp deploy/bench-central.service /etc/systemd/system/
+
+# Create bench user (optional)
+sudo useradd -r -s /bin/false bench
+
+# Adjust paths in unit files (default: /opt/bench-race)
+sudo vim /etc/systemd/system/bench-agent.service
+
+# Enable and start services
+sudo systemctl daemon-reload
+sudo systemctl enable bench-agent bench-central
+sudo systemctl start bench-agent bench-central
+
+# Check status
+sudo systemctl status bench-agent bench-central
+journalctl -u bench-agent -f
+```
+
+### Docker Deployment
+
+For containerized deployment:
+
+```bash
+# Build images
+docker build -f deploy/Dockerfile.agent -t bench-race-agent .
+docker build -f deploy/Dockerfile.central -t bench-race-central .
+
+# Run with docker-compose
+cd deploy
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+See `deploy/docker-compose.yml` and `deploy/docker-compose.override.yml` for configuration options.
 
 ---
 
@@ -583,12 +660,42 @@ bench-race/
 # Activate venv
 source agent/.venv/bin/activate
 
-# Run any tests (if present)
-pytest tests/
+# Run all unit tests
+pytest tests/ -v
+
+# Run service control CLI tests
+pytest tests/test_control_cli.py -v
+
+# Run integration smoke tests
+bash tests/integration/test_smoke_service_control.sh
 
 # Type checking (if configured)
 mypy agent/ central/
 ```
+
+#### Service Control Test Coverage
+
+The test suite includes:
+
+**Unit tests** (`tests/test_control_cli.py`):
+- `test_start_when_not_running_starts_process` - Verifies start creates PID file
+- `test_start_when_already_running_is_idempotent` - Safe to start twice
+- `test_status_reports_running_and_pid` - Status shows correct info
+- `test_stop_terminates_process_and_cleans_pid` - Stop cleans up properly
+
+**Integration smoke test** (`tests/integration/test_smoke_service_control.sh`):
+- Full start → status → stop cycle for agent and central
+- Port listening verification
+- API endpoint validation
+
+#### Manual Testing Checklist
+
+- [ ] `bin/control agent start` starts the agent, `status` shows running + PID
+- [ ] `bin/control agent stop` stops the agent, `status` shows stopped
+- [ ] `scripts/start_agent` / `scripts/stop_agent` work as wrappers
+- [ ] UI shows correct status (green dot = running, gray = stopped)
+- [ ] UI Start/Stop buttons function correctly
+- [ ] API endpoints return proper JSON and HTTP status codes
 
 ### Code Style
 

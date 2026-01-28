@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""
+Unified service control CLI for bench-race.
+
+Usage:
+    control agent start|stop|status [--foreground] [--json]
+    control central start|stop|status [--foreground] [--json]
+
+Exit codes:
+    0 - success
+    1 - generic failure
+    2 - invalid arguments
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+# Resolve paths relative to repo root
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+RUN_DIR = REPO_ROOT / "run"
+PIDS_DIR = RUN_DIR / "pids"
+LOG_DIR = REPO_ROOT / "logs"
+
+# Ensure directories exist
+PIDS_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Service configurations
+SERVICES = {
+    "agent": {
+        "pidfile": PIDS_DIR / "agent.pid",
+        "logfile": LOG_DIR / "agent.log",
+        "venv": REPO_ROOT / "agent" / ".venv",
+        "host_env": "AGENT_HOST",
+        "port_env": "AGENT_PORT",
+        "default_host": "0.0.0.0",
+        "default_port": 9001,
+        "start_cmd": ["uvicorn", "agent.agent_app:app"],
+        "requires_ollama": True,
+    },
+    "central": {
+        "pidfile": PIDS_DIR / "central.pid",
+        "logfile": LOG_DIR / "central.log",
+        "venv": REPO_ROOT / "central" / ".venv",
+        "host_env": "CENTRAL_HOST",
+        "port_env": "CENTRAL_PORT",
+        "default_host": "0.0.0.0",
+        "default_port": 8080,
+        "start_cmd": ["python", "central/app.py"],
+        "requires_ollama": False,
+    },
+}
+
+# Ollama config
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1")
+OLLAMA_PORT = int(os.environ.get("OLLAMA_PORT", "11434"))
+OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+OLLAMA_PIDFILE = PIDS_DIR / "ollama.pid"
+OLLAMA_LOGFILE = LOG_DIR / "ollama.log"
+
+
+def log(msg: str) -> None:
+    """Print timestamped log message."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
+
+
+def pid_is_running(pid: int) -> bool:
+    """Check if a process with given PID is running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def read_pid(pidfile: Path) -> Optional[int]:
+    """Read PID from file."""
+    if pidfile.exists():
+        try:
+            return int(pidfile.read_text().strip())
+        except (ValueError, IOError):
+            return None
+    return None
+
+
+def write_pid(pidfile: Path, pid: int) -> None:
+    """Write PID to file."""
+    pidfile.write_text(str(pid))
+
+
+def remove_pid(pidfile: Path) -> None:
+    """Remove PID file."""
+    try:
+        pidfile.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def get_process_info(pid: int) -> Dict[str, Any]:
+    """Get process information (start time, etc.)."""
+    info = {"pid": pid}
+
+    system = platform.system()
+    if system == "Linux":
+        try:
+            # Get process start time from /proc
+            stat_file = Path(f"/proc/{pid}/stat")
+            if stat_file.exists():
+                # Get system boot time and uptime for calculation
+                with open("/proc/uptime") as f:
+                    uptime = float(f.read().split()[0])
+                with open(f"/proc/{pid}/stat") as f:
+                    fields = f.read().split()
+                    start_ticks = int(fields[21])
+                    hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+                    start_seconds = start_ticks / hz
+                    running_seconds = uptime - start_seconds
+                    info["uptime_seconds"] = int(running_seconds)
+        except Exception:
+            pass
+    elif system == "Darwin":  # macOS
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "etime=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                etime = result.stdout.strip()
+                info["elapsed"] = etime
+        except Exception:
+            pass
+
+    return info
+
+
+def is_port_listening(port: int) -> bool:
+    """Check if a port is being listened on."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def check_ollama_available() -> bool:
+    """Check if Ollama API is reachable."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def ensure_ollama() -> bool:
+    """Ensure Ollama is running and reachable."""
+    # Check if ollama command exists
+    try:
+        subprocess.run(
+            ["which", "ollama"],
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        log("WARN: 'ollama' not found in PATH. Agent will fallback to mock backend.")
+        return True
+
+    # Check if already reachable
+    if check_ollama_available():
+        log(f"Ollama reachable at {OLLAMA_URL}")
+        return True
+
+    # Check if port is already listening
+    if is_port_listening(OLLAMA_PORT):
+        log(f"Ollama already listening on {OLLAMA_HOST}:{OLLAMA_PORT}; waiting for API...")
+    else:
+        # Check for existing ollama process
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "ollama serve"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                log(f"Ollama serve already running; waiting for API...")
+            else:
+                log("Starting Ollama (ollama serve)...")
+                with open(OLLAMA_LOGFILE, "a") as logf:
+                    proc = subprocess.Popen(
+                        ["ollama", "serve"],
+                        stdout=logf,
+                        stderr=logf,
+                        start_new_session=True,
+                    )
+                    write_pid(OLLAMA_PIDFILE, proc.pid)
+        except Exception as e:
+            log(f"WARN: Could not start Ollama: {e}")
+
+    # Wait for API to become available
+    for _ in range(50):
+        if check_ollama_available():
+            log(f"Ollama is now reachable at {OLLAMA_URL}")
+            return True
+        time.sleep(0.2)
+
+    log(f"WARN: Ollama still not reachable at {OLLAMA_URL}. Agent may fallback to mock.")
+    return True
+
+
+def get_venv_python(venv_path: Path) -> str:
+    """Get path to Python executable in venv."""
+    if platform.system() == "Windows":
+        return str(venv_path / "Scripts" / "python.exe")
+    return str(venv_path / "bin" / "python")
+
+
+def get_venv_bin(venv_path: Path) -> str:
+    """Get path to venv bin directory."""
+    if platform.system() == "Windows":
+        return str(venv_path / "Scripts")
+    return str(venv_path / "bin")
+
+
+def start_service(
+    component: str,
+    foreground: bool = False,
+    output_json: bool = False,
+) -> Dict[str, Any]:
+    """Start a service component."""
+    config = SERVICES[component]
+    pidfile = config["pidfile"]
+    logfile = config["logfile"]
+    venv = config["venv"]
+
+    # Check if already running
+    pid = read_pid(pidfile)
+    if pid and pid_is_running(pid):
+        result = {
+            "component": component,
+            "action": "start",
+            "result": "already_running",
+            "pid": pid,
+            "message": f"{component.capitalize()} already running (pid {pid}).",
+        }
+        if output_json:
+            print(json.dumps(result))
+        else:
+            log(result["message"])
+        return result
+
+    # Check venv exists
+    if not venv.exists():
+        result = {
+            "component": component,
+            "action": "start",
+            "result": "error",
+            "message": f"venv not found: {venv}. Run: ./scripts/setup_venv_{component}.sh",
+        }
+        if output_json:
+            print(json.dumps(result))
+        else:
+            log(f"ERROR: {result['message']}")
+        return result
+
+    # Ensure Ollama if needed
+    if config.get("requires_ollama"):
+        ensure_ollama()
+
+    # Get host and port
+    host = os.environ.get(config["host_env"], config["default_host"])
+    port = int(os.environ.get(config["port_env"], config["default_port"]))
+
+    # Build command
+    venv_bin = get_venv_bin(venv)
+    env = os.environ.copy()
+    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    env["VIRTUAL_ENV"] = str(venv)
+
+    if component == "agent":
+        cmd = ["uvicorn", "agent.agent_app:app", "--host", host, "--port", str(port)]
+    else:
+        cmd = ["python", "central/app.py"]
+
+    log(f"Starting {component} on {host}:{port}...")
+
+    if foreground:
+        # Run in foreground - write PID and exec
+        write_pid(pidfile, os.getpid())
+        log(f"Logs: {logfile}")
+        try:
+            with open(logfile, "a") as logf:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(REPO_ROOT),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                # Stream output to both console and log file
+                for line in iter(proc.stdout.readline, b""):
+                    decoded = line.decode("utf-8", errors="replace")
+                    sys.stdout.write(decoded)
+                    logf.write(decoded)
+                    logf.flush()
+                proc.wait()
+        except KeyboardInterrupt:
+            log(f"{component.capitalize()} stopped by user.")
+        finally:
+            remove_pid(pidfile)
+        return {
+            "component": component,
+            "action": "start",
+            "result": "stopped",
+            "message": f"{component.capitalize()} stopped.",
+        }
+    else:
+        # Run as daemon
+        with open(logfile, "a") as logf:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=logf,
+                stderr=logf,
+                start_new_session=True,
+            )
+            write_pid(pidfile, proc.pid)
+
+        # Wait a moment and verify it started
+        time.sleep(0.5)
+        if pid_is_running(proc.pid):
+            result = {
+                "component": component,
+                "action": "start",
+                "result": "started",
+                "pid": proc.pid,
+                "message": f"{component.capitalize()} started (pid {proc.pid}). Logs: {logfile}",
+            }
+        else:
+            result = {
+                "component": component,
+                "action": "start",
+                "result": "error",
+                "message": f"{component.capitalize()} failed to start. Check logs: {logfile}",
+            }
+            remove_pid(pidfile)
+
+        if output_json:
+            print(json.dumps(result))
+        else:
+            log(result["message"])
+        return result
+
+
+def stop_service(component: str, output_json: bool = False) -> Dict[str, Any]:
+    """Stop a service component."""
+    config = SERVICES[component]
+    pidfile = config["pidfile"]
+
+    pid = read_pid(pidfile)
+
+    if not pid:
+        result = {
+            "component": component,
+            "action": "stop",
+            "result": "not_running",
+            "message": f"{component.capitalize()} not running (no pidfile).",
+        }
+        if output_json:
+            print(json.dumps(result))
+        else:
+            log(result["message"])
+        return result
+
+    if not pid_is_running(pid):
+        remove_pid(pidfile)
+        result = {
+            "component": component,
+            "action": "stop",
+            "result": "not_running",
+            "message": f"{component.capitalize()} pidfile exists but process not running (stale pid {pid}).",
+        }
+        if output_json:
+            print(json.dumps(result))
+        else:
+            log(result["message"])
+        return result
+
+    log(f"Stopping {component} (pid {pid})...")
+
+    # Send SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+    # Wait for graceful shutdown
+    for _ in range(30):
+        if not pid_is_running(pid):
+            break
+        time.sleep(0.2)
+
+    # Force kill if still running
+    if pid_is_running(pid):
+        log(f"{component.capitalize()} still running; sending SIGKILL...")
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        time.sleep(0.1)
+
+    remove_pid(pidfile)
+
+    result = {
+        "component": component,
+        "action": "stop",
+        "result": "stopped",
+        "pid": pid,
+        "message": f"{component.capitalize()} stopped.",
+    }
+
+    if output_json:
+        print(json.dumps(result))
+    else:
+        log(result["message"])
+    return result
+
+
+def status_service(component: str, output_json: bool = False) -> Dict[str, Any]:
+    """Get status of a service component."""
+    config = SERVICES[component]
+    pidfile = config["pidfile"]
+    logfile = config["logfile"]
+    port = int(os.environ.get(config["port_env"], config["default_port"]))
+
+    pid = read_pid(pidfile)
+
+    result = {
+        "component": component,
+        "running": False,
+        "pid": None,
+        "info": None,
+    }
+
+    if pid and pid_is_running(pid):
+        result["running"] = True
+        result["pid"] = pid
+
+        # Get additional info
+        process_info = get_process_info(pid)
+        if "uptime_seconds" in process_info:
+            result["info"] = f"uptime {process_info['uptime_seconds']}s"
+        elif "elapsed" in process_info:
+            result["info"] = f"elapsed {process_info['elapsed']}"
+
+        # Check if listening on expected port
+        if is_port_listening(port):
+            result["info"] = f"listening on 127.0.0.1:{port}"
+            if "uptime_seconds" in process_info:
+                result["info"] += f", uptime {process_info['uptime_seconds']}s"
+
+    # Add extra info for agent
+    if component == "agent" and not output_json:
+        ollama_info = "REACHABLE" if check_ollama_available() else "NOT REACHABLE"
+
+    if output_json:
+        print(json.dumps(result))
+    else:
+        status_str = "RUNNING" if result["running"] else "STOPPED"
+        pid_str = f" (pid {result['pid']})" if result["pid"] else ""
+        info_str = f" - {result['info']}" if result["info"] else ""
+        log(f"{component.capitalize()}: {status_str}{pid_str}{info_str}")
+
+        if component == "agent":
+            ollama_status = "REACHABLE" if check_ollama_available() else "STOPPED"
+            log(f"Ollama: {ollama_status} ({OLLAMA_URL})")
+
+        log(f"Log file: {logfile}")
+
+    return result
+
+
+def main():
+    """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Unified service control for bench-race",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    control agent start          Start agent in daemon mode
+    control agent start --fg     Start agent in foreground
+    control agent stop           Stop agent
+    control agent status         Show agent status
+    control agent status --json  Show agent status as JSON
+
+    control central start        Start central in daemon mode
+    control central stop         Stop central
+    control central status       Show central status
+        """,
+    )
+
+    parser.add_argument(
+        "component",
+        choices=["agent", "central"],
+        help="Service component to control",
+    )
+    parser.add_argument(
+        "action",
+        choices=["start", "stop", "status"],
+        help="Action to perform",
+    )
+    parser.add_argument(
+        "--foreground", "--fg", "-f",
+        action="store_true",
+        dest="foreground",
+        help="Run in foreground (start only)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    args = parser.parse_args()
+
+    # Change to repo root
+    os.chdir(REPO_ROOT)
+
+    try:
+        if args.action == "start":
+            result = start_service(args.component, args.foreground, args.json)
+            if result["result"] in ("started", "already_running"):
+                sys.exit(0)
+            else:
+                sys.exit(1)
+        elif args.action == "stop":
+            result = stop_service(args.component, args.json)
+            if result["result"] in ("stopped", "not_running"):
+                sys.exit(0)
+            else:
+                sys.exit(1)
+        elif args.action == "status":
+            result = status_service(args.component, args.json)
+            # Exit 0 if running, 1 if not running
+            sys.exit(0 if result["running"] else 1)
+    except Exception as e:
+        if args.json:
+            print(json.dumps({
+                "component": args.component,
+                "action": args.action,
+                "result": "error",
+                "message": str(e),
+            }))
+        else:
+            log(f"ERROR: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

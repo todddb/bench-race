@@ -1,0 +1,42 @@
+# Dockerfile for bench-race central
+#
+# Build:
+#   docker build -f deploy/Dockerfile.central -t bench-race-central .
+#
+# Run:
+#   docker run -p 8080:8080 --name bench-central bench-race-central
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY central/requirements.txt /app/central/requirements.txt
+RUN pip install --no-cache-dir -r central/requirements.txt
+
+# Copy application code
+COPY central/ /app/central/
+COPY bin/control /app/bin/control
+
+# Create directories
+RUN mkdir -p /app/run/pids /app/logs
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV CENTRAL_HOST=0.0.0.0
+ENV CENTRAL_PORT=8080
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Run the central server
+CMD ["python", "central/app.py"]

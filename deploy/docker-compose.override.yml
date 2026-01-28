@@ -1,0 +1,43 @@
+# Docker Compose override for local development
+#
+# This override is automatically picked up when running docker-compose
+# in the deploy/ directory. It configures services for local development.
+#
+# Usage:
+#   cd deploy
+#   docker-compose up -d
+#
+# Or explicitly:
+#   docker-compose -f docker-compose.yml -f docker-compose.override.yml up -d
+
+version: '3.8'
+
+services:
+  agent:
+    # For local dev, mount source code for hot reload
+    volumes:
+      - ../agent:/app/agent:ro
+      - ../backends:/app/backends:ro
+      - ../shared:/app/shared:ro
+      - ../bin:/app/bin:ro
+    environment:
+      # Enable debug logging
+      - LOG_LEVEL=DEBUG
+      # Use local Ollama
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+
+  central:
+    # For local dev, mount source code for hot reload
+    volumes:
+      - ../central:/app/central:ro
+      - ../bin:/app/bin:ro
+    environment:
+      # Enable debug logging
+      - LOG_LEVEL=DEBUG
+      # No auth token required for local dev
+      - SERVICE_CONTROL_TOKEN=
+    # Expose additional ports for debugging
+    ports:
+      - "8080:8080"
+      - "5678:5678"  # debugpy port

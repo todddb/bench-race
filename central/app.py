@@ -9,11 +9,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+import os
 import requests
 import yaml
 import websockets
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, abort
 from flask_socketio import SocketIO, emit
+
+from central.services import controller as service_controller
 
 # -----------------------------------------------------------------------------
 # Paths (robust regardless of cwd)
@@ -210,6 +213,97 @@ def api_start_llm():
             results.append({"machine_id": m.get("machine_id"), "error": str(e)})
 
     return jsonify(results)
+
+
+# -----------------------------------------------------------------------------
+# Service Control API
+# Security: Check for local requests or valid token
+# -----------------------------------------------------------------------------
+SERVICE_CONTROL_TOKEN = os.environ.get("SERVICE_CONTROL_TOKEN")
+
+
+def _check_service_auth():
+    """
+    Check if request is authorized for service control.
+    Allows:
+    - Local requests (127.0.0.1, localhost, ::1)
+    - Requests with valid Authorization header if SERVICE_CONTROL_TOKEN is set
+    """
+    # Check if request is from localhost
+    remote_addr = request.remote_addr or ""
+    is_local = remote_addr in ("127.0.0.1", "localhost", "::1", "")
+
+    if is_local:
+        return True
+
+    # Check for token auth if configured
+    if SERVICE_CONTROL_TOKEN:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if token == SERVICE_CONTROL_TOKEN:
+                return True
+
+    return False
+
+
+@app.get("/api/service/<component>/status")
+def api_service_status(component: str):
+    """
+    Get status of a service component.
+
+    GET /api/service/agent/status
+    GET /api/service/central/status
+
+    Returns:
+        {
+            "component": "agent",
+            "running": true,
+            "pid": 12345,
+            "info": "listening on 127.0.0.1:9001"
+        }
+    """
+    if component not in ("agent", "central"):
+        return jsonify({"error": f"Unknown component: {component}"}), 400
+
+    result = service_controller.get_status(component)
+    return jsonify(result)
+
+
+@app.post("/api/service/<component>/<action>")
+def api_service_action(component: str, action: str):
+    """
+    Perform an action on a service component.
+
+    POST /api/service/agent/start
+    POST /api/service/agent/stop
+    POST /api/service/central/start
+    POST /api/service/central/stop
+
+    Returns:
+        {
+            "component": "agent",
+            "action": "start",
+            "result": "started",
+            "pid": 12345
+        }
+    """
+    if component not in ("agent", "central"):
+        return jsonify({"error": f"Unknown component: {component}"}), 400
+
+    if action not in ("start", "stop"):
+        return jsonify({"error": f"Unknown action: {action}"}), 400
+
+    # Check authorization
+    if not _check_service_auth():
+        return jsonify({"error": "Unauthorized. Use local access or provide valid token."}), 403
+
+    result = service_controller.perform_action(component, action)
+
+    # Determine HTTP status code
+    if result.get("result") == "error":
+        return jsonify(result), 500
+    return jsonify(result)
 
 
 # -----------------------------------------------------------------------------

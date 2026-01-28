@@ -1,0 +1,72 @@
+# Docker Compose configuration for bench-race
+#
+# This provides containerized deployment of agent and central services.
+# For local development, using the control CLI directly is recommended.
+#
+# Usage:
+#   docker-compose -f deploy/docker-compose.yml up -d
+#   docker-compose -f deploy/docker-compose.yml logs -f
+#   docker-compose -f deploy/docker-compose.yml down
+#
+# Note: This requires building the Docker images first.
+# See deploy/Dockerfile.agent and deploy/Dockerfile.central
+
+version: '3.8'
+
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    container_name: bench-race-agent
+    ports:
+      - "9001:9001"
+    environment:
+      - AGENT_HOST=0.0.0.0
+      - AGENT_PORT=9001
+      - OLLAMA_HOST=host.docker.internal
+      - OLLAMA_PORT=11434
+    volumes:
+      - ../agent/config:/app/agent/config:ro
+      - agent-logs:/app/logs
+      - agent-run:/app/run
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  central:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.central
+    container_name: bench-race-central
+    ports:
+      - "8080:8080"
+    environment:
+      - CENTRAL_HOST=0.0.0.0
+      - CENTRAL_PORT=8080
+      - SERVICE_CONTROL_TOKEN=${SERVICE_CONTROL_TOKEN:-}
+    volumes:
+      - ../central/config:/app/central/config:ro
+      - central-logs:/app/logs
+      - central-run:/app/run
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      - agent
+
+volumes:
+  agent-logs:
+  agent-run:
+  central-logs:
+  central-run:
