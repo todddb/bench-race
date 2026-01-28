@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=scripts/_common.sh
+source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+CMD="${1:-}"
+shift || true
+
+PIDFILE="${RUN_DIR}/central.pid"
+LOGFILE="${LOG_DIR}/central.log"
+CENTRAL_HOST="${CENTRAL_HOST:-0.0.0.0}"
+CENTRAL_PORT="${CENTRAL_PORT:-8080}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [--daemon]
+
+Commands:
+  start       Start central
+  stop        Stop central
+  status      Show status
+  restart     Stop then start
+  logs        Tail central log
+
+Env:
+  CENTRAL_HOST, CENTRAL_PORT
+EOF
+}
+
+start_central() {
+  local pid
+  pid="$(read_pid "${PIDFILE}")"
+  if [[ -n "${pid}" ]] && pid_is_running "${pid}"; then
+    log "Central already running (pid ${pid})."
+    return 0
+  fi
+
+  activate_venv "central"
+
+  log "Starting central on ${CENTRAL_HOST}:${CENTRAL_PORT} ..."
+  if "${is_daemon}"; then
+    # Keep using your existing central/app.py entrypoint
+    nohup python central/app.py >> "${LOGFILE}" 2>&1 &
+    write_pid "${PIDFILE}" "$!"
+    log "Central started (pid $(read_pid "${PIDFILE}")). Logs: ${LOGFILE}"
+  else
+    log "Logs: ${LOGFILE}"
+    python central/app.py 2>&1 | tee -a "${LOGFILE}"
+  fi
+}
+
+stop_central() {
+  local pid
+  pid="$(read_pid "${PIDFILE}")"
+  if [[ -z "${pid}" ]]; then
+    log "Central not running (no pidfile)."
+  elif pid_is_running "${pid}"; then
+    log "Stopping central (pid ${pid})..."
+    kill "${pid}" || true
+
+    for _ in {1..30}; do
+      if ! pid_is_running "${pid}"; then
+        break
+      fi
+      sleep 0.2
+    done
+
+    if pid_is_running "${pid}"; then
+      log "Central still running; sending SIGKILL..."
+      kill -9 "${pid}" || true
+    fi
+  else
+    log "Central pidfile exists but process not running (stale pid ${pid})."
+  fi
+
+  rm -f "${PIDFILE}" || true
+  log "Central stopped."
+}
+
+status_central() {
+  local pid
+  pid="$(read_pid "${PIDFILE}")"
+  if [[ -n "${pid}" ]] && pid_is_running "${pid}"; then
+    log "Central: RUNNING (pid ${pid})"
+  else
+    log "Central: STOPPED"
+  fi
+  log "Central log: ${LOGFILE}"
+}
+
+tail_logs() {
+  touch "${LOGFILE}"
+  tail -n 100 -f "${LOGFILE}"
+}
+
+case "${CMD}" in
+  start) start_central ;;
+  stop) stop_central ;;
+  status) status_central ;;
+  restart) stop_central; start_central ;;
+  logs) tail_logs ;;
+  ""|help|-h|--help) usage; exit 0 ;;
+  *) log "Unknown command: ${CMD}"; usage; exit 2 ;;
+esac

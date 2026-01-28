@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=scripts/_common.sh
+source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+CMD="${1:-}"
+shift || true
+
+PIDFILE="${RUN_DIR}/agent.pid"
+LOGFILE="${LOG_DIR}/agent.log"
+OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
+OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
+
+AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
+AGENT_PORT="${AGENT_PORT:-9001}"
+OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+OLLAMA_URL="http://${OLLAMA_HOST}:${OLLAMA_PORT}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [--daemon]
+
+Commands:
+  start       Start agent (and ensure Ollama)
+  stop        Stop agent (and optionally stop Ollama if we started it)
+  status      Show status of agent + ollama
+  restart     Stop then start
+  logs        Tail agent log
+
+Env:
+  AGENT_HOST, AGENT_PORT
+  OLLAMA_HOST, OLLAMA_PORT
+EOF
+}
+
+is_listening() {
+  local port="$1"
+  lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+ensure_ollama() {
+  if ! command -v ollama >/dev/null 2>&1; then
+    log "WARN: 'ollama' not found in PATH. Agent will fallback to mock backend."
+    return 0
+  fi
+
+  if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+    log "Ollama reachable at ${OLLAMA_URL}"
+    return 0
+  fi
+
+  # Port already listening? Don't start another.
+  if is_listening "${OLLAMA_PORT}"; then
+    log "Ollama already listening on ${OLLAMA_HOST}:${OLLAMA_PORT}; waiting for API..."
+  else
+    # Existing process?
+    local existing
+    existing="$(pgrep -f "ollama serve" || true)"
+    if [[ -n "${existing}" ]]; then
+      log "Ollama serve already running (pid(s) ${existing}); waiting for API..."
+    else
+      log "Starting Ollama (ollama serve) ..."
+      nohup ollama serve >> "${OLLAMA_LOGFILE}" 2>&1 &
+      write_pid "${OLLAMA_PIDFILE}" "$!"
+    fi
+  fi
+
+  for _ in {1..50}; do
+    if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+      log "Ollama is now reachable at ${OLLAMA_URL}"
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  log "WARN: Ollama still not reachable at ${OLLAMA_URL}. Agent may fallback to mock."
+  return 0
+}
+
+start_agent() {
+  local pid
+  pid="$(read_pid "${PIDFILE}")"
+  if [[ -n "${pid}" ]] && pid_is_running "${pid}"; then
+    log "Agent already running (pid ${pid})."
+    return 0
+  fi
+
+  ensure_ollama
+  activate_venv "agent"
+
+  log "Starting agent on ${AGENT_HOST}:${AGENT_PORT} ..."
+  if "${is_daemon}"; then
+    nohup uvicorn agent.agent_app:app --host "${AGENT_HOST}" --port "${AGENT_PORT}" >> "${LOGFILE}" 2>&1 &
+    write_pid "${PIDFILE}" "$!"
+    log "Agent started (pid $(read_pid "${PIDFILE}")). Logs: ${LOGFILE}"
+  else
+    log "Logs: ${LOGFILE}"
+    uvicorn agent.agent_app:app --host "${AGENT_HOST}" --port "${AGENT_PORT}" 2>&1 | tee -a "${LOGFILE}"
+  fi
+}
+
+stop_agent() {
+  local pid
+  pid="$(read_pid "${PIDFILE}")"
+  if [[ -z "${pid}" ]]; then
+    log "Agent not running (no pidfile)."
+  elif pid_is_running "${pid}"; then
+    log "Stopping agent (pid ${pid})..."
+    kill "${pid}" || true
+
+    for _ in {1..30}; do
+      if ! pid_is_running "${pid}"; then
+        break
+      fi
+      sleep 0.2
+    done
+
+    if pid_is_running "${pid}"; then
+      log "Agent still running; sending SIGKILL..."
+      kill -9 "${pid}" || true
+    fi
+  else
+    log "Agent pidfile exists but process not running (stale pid ${pid})."
+  fi
+
+  rm -f "${PIDFILE}" || true
+  log "Agent stopped."
+}
+
+status_agent() {
+  local apid opid
+  apid="$(read_pid "${PIDFILE}")"
+  opid="$(read_pid "${OLLAMA_PIDFILE}")"
+
+  if [[ -n "${apid}" ]] && pid_is_running "${apid}"; then
+    log "Agent: RUNNING (pid ${apid})"
+  else
+    log "Agent: STOPPED"
+  fi
+
+  if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+    log "Ollama: REACHABLE (${OLLAMA_URL})"
+  else
+    if [[ -n "${opid}" ]] && pid_is_running "${opid}"; then
+      log "Ollama: RUNNING (pid ${opid}) but API not reachable yet"
+    else
+      if is_listening "${OLLAMA_PORT}"; then
+        log "Ollama: LISTENING on ${OLLAMA_HOST}:${OLLAMA_PORT} (not in our pidfile)"
+      else
+        log "Ollama: STOPPED"
+      fi
+    fi
+  fi
+
+  log "Agent log: ${LOGFILE}"
+  log "Ollama log: ${OLLAMA_LOGFILE}"
+}
+
+tail_logs() {
+  touch "${LOGFILE}"
+  tail -n 100 -f "${LOGFILE}"
+}
+
+case "${CMD}" in
+  start) start_agent ;;
+  stop) stop_agent ;;
+  status) status_agent ;;
+  restart) stop_agent; start_agent ;;
+  logs) tail_logs ;;
+  ""|help|-h|--help) usage; exit 0 ;;
+  *) log "Unknown command: ${CMD}"; usage; exit 2 ;;
+esac
+
