@@ -41,6 +41,7 @@ secrets/
 # =========================
 results/runs/*
 !results/runs/.keep
+export
 
 # =========================
 # Assets (keep folders via .keep)
