@@ -14,45 +14,52 @@
         <div class="main-content">
           <div class="controls card">
             <div class="controls-grid">
-              <div class="prompt-column">
-                <label for="prompt">Prompt</label>
-                <textarea id="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+              <div class="model-row control-field">
+                <label for="model" class="control-label">Model</label>
+                <select id="model">
+                  {% for model in model_options %}
+                  <option value="{{ model }}">{{ model }}</option>
+                  {% endfor %}
+                </select>
+                <div class="helper">Which model to run on each machine.</div>
               </div>
 
-              <div class="options-column">
-                <div class="control-group">
-                  <label for="model">Model</label>
-                  <select id="model">
-                    {% for model in model_options %}
-                    <option value="{{ model }}">{{ model }}</option>
-                    {% endfor %}
-                  </select>
-                  <div class="help-text">Which model to run on each machine.</div>
-                </div>
-
-                <div class="control-group">
-                  <label for="max_tokens">Max tokens</label>
+              <div class="controls-right">
+                <div class="control-field">
+                  <label for="max_tokens" class="control-label">Max tokens</label>
                   <input id="max_tokens" type="number" value="256" />
-                  <div class="help-text">Limits how long the response can be.</div>
+                  <div class="helper">Limits how long the response can be.</div>
                 </div>
 
-                <div class="control-group">
-                  <label for="num_ctx">Context</label>
+                <div class="control-field">
+                  <label for="num_ctx" class="control-label">Context</label>
                   <input id="num_ctx" type="number" value="4096" />
-                  <div class="help-text">How much conversation/prompt can fit. Larger uses more memory.</div>
+                  <div class="helper">How much conversation/prompt can fit. Larger uses more memory.</div>
                 </div>
 
-                <div class="control-group">
-                  <label for="temperature">Temperature</label>
+                <div class="control-field">
+                  <label for="temperature" class="control-label">Temperature</label>
                   <input id="temperature" type="number" step="0.1" value="0.2" />
-                  <div class="help-text">Higher = more creative, lower = more deterministic.</div>
+                  <div class="helper">Higher = more creative, lower = more deterministic.</div>
                 </div>
 
-                <div class="control-group">
-                  <label for="repeat">Repeats</label>
+                <div class="control-field">
+                  <label for="repeat" class="control-label">Repeats</label>
                   <input id="repeat" type="number" value="1" />
-                  <div class="help-text">Run multiple times; first run may be slower due to cold cache.</div>
+                  <div class="helper">Run multiple times; first run may be slower due to cold cache.</div>
                 </div>
+              </div>
+
+              <div class="prompt-column">
+                <label for="prompt" class="control-label">Prompt</label>
+                <div class="prompt-desc">
+                  Enter a real-world prompt. Prefer multi-part tasks that require reasoning or code generation — these take longer and stress performance.
+                </div>
+                <div class="prompt-actions">
+                  <button id="generate-sample" class="btn btn-secondary" type="button">Generate Sample</button>
+                  <span class="helper">Creates a unique, realistic prompt intended to take some time to process.</span>
+                </div>
+                <textarea id="prompt" class="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
               </div>
             </div>
 

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import random
 import subprocess
 import threading
 import time
@@ -61,6 +62,12 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOCK = threading.Lock()
 RUN_CACHE: Dict[str, Dict[str, Any]] = {}
 JOB_RUN_MAP: Dict[str, Dict[str, str]] = {}
+SAMPLE_PROMPT_RATE_LIMIT_S = 10
+SAMPLE_PROMPT_TIMEOUT_S = 20
+_sample_prompt_last_request: Dict[str, float] = {}
+_sample_job_lock = threading.Lock()
+_sample_job_events: Dict[str, threading.Event] = {}
+_sample_job_buffers: Dict[str, List[str]] = {}
 
 
 def _current_git_sha() -> str:
@@ -186,6 +193,122 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
         _write_run_record(record)
         JOB_RUN_MAP.pop(job_id, None)
 
+
+def _sample_prompt_rate_limited(remote_addr: str) -> bool:
+    now = time.time()
+    last = _sample_prompt_last_request.get(remote_addr)
+    if last and (now - last) < SAMPLE_PROMPT_RATE_LIMIT_S:
+        return True
+    _sample_prompt_last_request[remote_addr] = now
+    return False
+
+
+def _track_sample_job(job_id: str) -> threading.Event:
+    event = threading.Event()
+    with _sample_job_lock:
+        _sample_job_events[job_id] = event
+        _sample_job_buffers[job_id] = []
+    return event
+
+
+def _finalize_sample_job(job_id: str) -> str:
+    with _sample_job_lock:
+        chunks = _sample_job_buffers.pop(job_id, [])
+        _sample_job_events.pop(job_id, None)
+    return "".join(chunks)
+
+
+def _record_sample_event(event: Dict[str, Any]) -> None:
+    job_id = event.get("job_id")
+    if not job_id:
+        return
+    event_type = event.get("type")
+    if event_type == "llm_token":
+        payload = event.get("payload") or {}
+        text = payload.get("text") or ""
+        if not text:
+            return
+        with _sample_job_lock:
+            if job_id in _sample_job_buffers:
+                _sample_job_buffers[job_id].append(text)
+    elif event_type == "job_done":
+        with _sample_job_lock:
+            ev = _sample_job_events.get(job_id)
+        if ev:
+            ev.set()
+
+
+def _wait_for_sample_prompt(job_id: str, timeout_s: int) -> Optional[str]:
+    event = _track_sample_job(job_id)
+    if not event.wait(timeout_s):
+        _finalize_sample_job(job_id)
+        return None
+    text = _finalize_sample_job(job_id)
+    return text or None
+
+
+def _strip_prompt_fences(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"```(?:[a-zA-Z0-9_-]+)?\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+def _heuristic_sample_prompt(seed: str) -> str:
+    topics = [
+        "distributed cache invalidation strategy",
+        "multi-tenant billing audit pipeline",
+        "observability for streaming data pipelines",
+        "feature-flag rollout with safety checks",
+        "LLM-driven code review automation",
+    ]
+    constraints = [
+        "Include edge cases and failure modes.",
+        "Provide pseudo-code and a reference implementation.",
+        "Describe metrics to validate correctness and performance.",
+        "Explain tradeoffs between at least two approaches.",
+        "Outline a staged rollout plan with rollback criteria.",
+    ]
+    topic = random.choice(topics)
+    extra = " ".join(random.sample(constraints, k=3))
+    return (
+        f"Design a detailed plan for {topic}. "
+        f"Use the seed {seed} to name the example project and any identifiers. "
+        "Your response should include multiple steps: requirements, architecture, implementation details, "
+        "data models, and a test strategy. "
+        f"{extra} "
+        "Provide code snippets (with comments) in one language of your choice, and explain how to handle "
+        "edge cases, retries, and data consistency. Finish with a checklist of acceptance criteria."
+    )
+
+
+def _select_agent_for_sample(selected_model: Optional[str]) -> Optional[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for machine in MACHINES:
+        try:
+            r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+            r.raise_for_status()
+            cap = r.json()
+            available = _available_llm_models(cap)
+            if not available:
+                continue
+            candidates.append({"machine": machine, "available": available})
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    if selected_model:
+        for candidate in candidates:
+            if selected_model in candidate["available"]:
+                return {"machine": candidate["machine"], "model": selected_model}
+
+    candidate = candidates[0]
+    return {"machine": candidate["machine"], "model": candidate["available"][0]}
+
 # -----------------------------------------------------------------------------
 # Load machines config
 # -----------------------------------------------------------------------------
@@ -306,6 +429,7 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
                     # attach machine_id and forward to all browsers
                     evt["machine_id"] = machine_id
                     _update_run_from_event(evt)
+                    _record_sample_event(evt)
                     socketio.emit("agent_event", evt)
 
         except Exception as exc:
@@ -682,6 +806,62 @@ def api_start_llm():
         _prune_old_runs()
 
     return jsonify({"run_id": run_id, "results": results})
+
+
+@app.post("/api/generate_sample_prompt")
+def api_generate_sample_prompt():
+    remote_addr = request.remote_addr or "unknown"
+    if _sample_prompt_rate_limited(remote_addr):
+        return jsonify({"error": "Rate limited. Try again shortly."}), 429
+
+    payload = request.get_json(silent=True) or {}
+    selected_model = payload.get("model") or request.args.get("model")
+    seed = uuid.uuid4().hex[:8]
+    candidate = _select_agent_for_sample(selected_model)
+
+    if not candidate:
+        return jsonify({"prompt": _heuristic_sample_prompt(seed), "fallback": True})
+
+    machine = candidate["machine"]
+    model = candidate["model"]
+    sample_instruction = (
+        "You are a prompt generation assistant. Produce a unique, realistic, and moderately long prompt for a "
+        "code/analysis task that will take non-trivial compute to answer. Include several steps and ask the model "
+        "to produce code with explanations and edge-case handling. Use a random topic seed: "
+        f"{seed}. Output only the prompt text inside triple backticks."
+    )
+
+    try:
+        r = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/jobs",
+            json={
+                "test_type": "llm_generate",
+                "model": model,
+                "prompt": sample_instruction,
+                "max_tokens": 512,
+                "temperature": 0.7,
+                "num_ctx": 4096,
+                "repeat": 1,
+                "stream": True,
+            },
+            timeout=5,
+        )
+        r.raise_for_status()
+        job = r.json()
+        job_id = job.get("job_id")
+        if not job_id:
+            raise ValueError("No job_id returned from agent")
+        generated = _wait_for_sample_prompt(job_id, SAMPLE_PROMPT_TIMEOUT_S)
+        if not generated:
+            raise TimeoutError("No sample prompt returned in time")
+        prompt_text = _strip_prompt_fences(generated)
+        if not prompt_text:
+            raise ValueError("Empty prompt returned from agent")
+        return jsonify({"prompt": prompt_text})
+    except Exception as exc:
+        log.warning("Sample prompt generation failed: %s", exc)
+        fallback = _heuristic_sample_prompt(seed)
+        return jsonify({"prompt": fallback, "fallback": True, "error": "agent_generation_failed"}), 503
 
 
 # -----------------------------------------------------------------------------
