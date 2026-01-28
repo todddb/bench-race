@@ -79,3 +79,4 @@ run/*.pid
 logs/*.log
 !run/.keep
 !logs/.keep
+agent/config/agent.yaml
