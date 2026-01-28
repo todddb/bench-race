@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Compatibility wrapper: calls bin/control central status
+# Usage: ./scripts/status_central [--json]
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+exec "${REPO_ROOT}/bin/control" central status "$@"

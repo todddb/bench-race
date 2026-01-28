@@ -1,0 +1,39 @@
+[Unit]
+Description=Bench Race Agent - Local LLM inference agent
+Documentation=https://github.com/todddb/bench-race
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=bench
+Group=bench
+WorkingDirectory=/opt/bench-race
+ExecStart=/opt/bench-race/bin/control agent start --foreground
+ExecStop=/opt/bench-race/bin/control agent stop
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Environment variables
+Environment=AGENT_HOST=0.0.0.0
+Environment=AGENT_PORT=9001
+Environment=OLLAMA_HOST=127.0.0.1
+Environment=OLLAMA_PORT=11434
+# Optional: SERVICE_CONTROL_TOKEN for API authentication
+# Environment=SERVICE_CONTROL_TOKEN=changeme
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/bench-race/run /opt/bench-race/logs /opt/bench-race/results
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bench-agent
+
+[Install]
+WantedBy=multi-user.target
