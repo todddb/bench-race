@@ -11,30 +11,47 @@
       <h1>bench-race</h1>
 
       <div class="controls card">
-        <div class="row">
-          <label>Model</label>
-          <select id="model">
-            {% for model in model_options %}
-            <option value="{{ model }}">{{ model }}</option>
-            {% endfor %}
-          </select>
+        <div class="controls-grid">
+          <div class="prompt-column">
+            <label for="prompt">Prompt</label>
+            <textarea id="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+          </div>
 
-          <label>Max tokens</label>
-          <input id="max_tokens" type="number" value="256" />
+          <div class="options-column">
+            <div class="control-group">
+              <label for="model">Model</label>
+              <select id="model">
+                {% for model in model_options %}
+                <option value="{{ model }}">{{ model }}</option>
+                {% endfor %}
+              </select>
+              <div class="help-text">Which model to run on each machine.</div>
+            </div>
 
-          <label>Context</label>
-          <input id="num_ctx" type="number" value="4096" />
+            <div class="control-group">
+              <label for="max_tokens">Max tokens</label>
+              <input id="max_tokens" type="number" value="256" />
+              <div class="help-text">Limits how long the response can be.</div>
+            </div>
 
-          <label>Temp</label>
-          <input id="temperature" type="number" step="0.1" value="0.2" />
+            <div class="control-group">
+              <label for="num_ctx">Context</label>
+              <input id="num_ctx" type="number" value="4096" />
+              <div class="help-text">How much conversation/prompt can fit. Larger uses more memory.</div>
+            </div>
 
-          <label>Repeat</label>
-          <input id="repeat" type="number" value="1" />
-        </div>
+            <div class="control-group">
+              <label for="temperature">Temperature</label>
+              <input id="temperature" type="number" step="0.1" value="0.2" />
+              <div class="help-text">Higher = more creative, lower = more deterministic.</div>
+            </div>
 
-        <div class="row">
-          <label>Prompt</label>
-          <textarea id="prompt" rows="4">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+            <div class="control-group">
+              <label for="repeat">Repeats</label>
+              <input id="repeat" type="number" value="1" />
+              <div class="help-text">Run multiple times; first run may be slower due to cold cache.</div>
+            </div>
+          </div>
         </div>
 
         <div class="run-row">

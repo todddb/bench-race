@@ -2,16 +2,17 @@
 set -euo pipefail
 
 # =============================================================================
-# pull_models.sh - Pull models from agent/config/agent.yaml
+# pull_models.sh - Pull models from central model policy
 #
-# Reads agent.yaml and pulls all required models:
+# Reads central/config/model_policy.yaml and pulls all required models:
 # - LLM models via ollama pull
 # - Whisper models (logs message if not implemented)
 # - SDXL profiles (logs message if not implemented)
 #
 # Usage:
-#   ./scripts/pull_models.sh              # Read from default agent/config/agent.yaml
-#   AGENT_CONFIG=/path/to/agent.yaml ./scripts/pull_models.sh
+#   ./scripts/pull_models.sh                              # Read from default central/config/model_policy.yaml
+#   MODEL_POLICY=/path/to/model_policy.yaml ./scripts/pull_models.sh
+#   ./scripts/pull_models.sh --policy /path/to/model_policy.yaml
 #   ./scripts/pull_models.sh --skip-70b   # Skip 70B models
 #   ./scripts/pull_models.sh --legacy     # Use hardcoded model list (old behavior)
 # =============================================================================
@@ -41,36 +42,46 @@ fi
 skip_70b=false
 legacy_mode=false
 custom_models=()
+policy_path="${MODEL_POLICY:-$REPO_ROOT/central/config/model_policy.yaml}"
 
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --skip-70b)
       skip_70b=true
+      shift
       ;;
     --legacy)
       legacy_mode=true
+      shift
+      ;;
+    --policy)
+      policy_path="$2"
+      shift 2
       ;;
     --help|-h)
       echo "Usage: $0 [OPTIONS] [MODELS...]"
       echo ""
-      echo "Pull models specified in agent/config/agent.yaml"
+      echo "Pull models specified in central/config/model_policy.yaml"
       echo ""
       echo "Options:"
       echo "  --skip-70b     Skip models containing '70b' in the name"
       echo "  --legacy       Use hardcoded model list (old behavior)"
+      echo "  --policy PATH  Path to model_policy.yaml"
       echo "  --help, -h     Show this help message"
       echo ""
       echo "Environment:"
-      echo "  AGENT_CONFIG   Path to agent.yaml (default: agent/config/agent.yaml)"
+      echo "  MODEL_POLICY  Path to model_policy.yaml (default: central/config/model_policy.yaml)"
       echo ""
       echo "Examples:"
-      echo "  $0                                  # Pull models from agent.yaml"
-      echo "  $0 --skip-70b                       # Skip large 70B models"
-      echo "  AGENT_CONFIG=/path/to/agent.yaml $0 # Use custom config path"
+      echo "  $0                                          # Pull models from model policy"
+      echo "  $0 --skip-70b                               # Skip large 70B models"
+      echo "  MODEL_POLICY=/path/to/model_policy.yaml $0  # Use custom policy path"
+      echo "  $0 --policy /path/to/model_policy.yaml      # Use custom policy path"
       exit 0
       ;;
     *)
-      custom_models+=("$arg")
+      custom_models+=("$1")
+      shift
       ;;
   esac
 done
@@ -89,32 +100,41 @@ if [ "$legacy_mode" = true ] || [ ${#custom_models[@]} -gt 0 ]; then
   fi
   log "Using $([ ${#custom_models[@]} -gt 0 ] && echo "command-line models" || echo "legacy hardcoded models")"
 else
-  # Read from agent.yaml using Python helper
-  CONFIG_HELPER="$SCRIPT_DIR/_read_agent_config.py"
-
-  if [ ! -f "$CONFIG_HELPER" ]; then
-    log_error "Config helper not found: $CONFIG_HELPER"
-    exit 1
-  fi
-
-  # Try to use agent venv's Python if available
+  # Try to use central venv's Python if available
   PYTHON="python3"
-  if [ -f "$REPO_ROOT/agent/.venv/bin/python" ]; then
+  if [ -f "$REPO_ROOT/central/.venv/bin/python" ]; then
+    PYTHON="$REPO_ROOT/central/.venv/bin/python"
+  elif [ -f "$REPO_ROOT/agent/.venv/bin/python" ]; then
     PYTHON="$REPO_ROOT/agent/.venv/bin/python"
   fi
 
-  log "Reading config from ${AGENT_CONFIG:-agent/config/agent.yaml}"
+  if [ ! -f "$policy_path" ]; then
+    log_error "Model policy not found: $policy_path"
+    log_error "Set MODEL_POLICY or pass --policy to point to your model_policy.yaml"
+    exit 1
+  fi
 
-  # Get config as JSON
-  config_json=$("$PYTHON" "$CONFIG_HELPER" 2>&1) || {
-    log_error "Failed to read agent config: $config_json"
+  log "Reading model policy from $policy_path"
+
+  # Get policy as JSON
+  policy_json=$("$PYTHON" - "$policy_path" <<'PY' 2>&1) || {
+import json
+import sys
+import yaml
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = yaml.safe_load(f) or {}
+print(json.dumps(data))
+PY
+    log_error "Failed to read model policy: $policy_json"
     exit 1
   }
 
   # Parse JSON using Python (portable, no jq dependency)
-  llm_models_str=$("$PYTHON" -c "import json,sys; print('\\n'.join(json.loads(sys.argv[1]).get('llm_models', [])))" "$config_json")
-  whisper_models_str=$("$PYTHON" -c "import json,sys; print('\\n'.join(json.loads(sys.argv[1]).get('whisper_models', [])))" "$config_json")
-  sdxl_profiles_str=$("$PYTHON" -c "import json,sys; print('\\n'.join(json.loads(sys.argv[1]).get('sdxl_profiles', [])))" "$config_json")
+  llm_models_str=$("$PYTHON" -c "import json,sys; required=(json.loads(sys.argv[1]).get('required') or {}); print('\\n'.join(required.get('llm') or []))" "$policy_json")
+  whisper_models_str=$("$PYTHON" -c "import json,sys; required=(json.loads(sys.argv[1]).get('required') or {}); print('\\n'.join(required.get('whisper') or []))" "$policy_json")
+  sdxl_profiles_str=$("$PYTHON" -c "import json,sys; required=(json.loads(sys.argv[1]).get('required') or {}); print('\\n'.join(required.get('sdxl_profiles') or []))" "$policy_json")
 
   # Convert to arrays
   if [ -n "$llm_models_str" ]; then

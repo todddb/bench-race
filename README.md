@@ -122,16 +122,6 @@ bind_host: "0.0.0.0"
 bind_port: 9001
 
 ollama_base_url: "http://127.0.0.1:11434"
-
-llm_models:
-  - "llama3.1:8b-instruct-q8_0"
-  - "llama3.1:70b-instruct-q4_K_M"
-
-whisper_models:
-  - "large-v3"
-
-sdxl_profiles:
-  - "sdxl_1024_30steps"
 ```
 
 | Key | Description |
@@ -141,7 +131,8 @@ sdxl_profiles:
 | `bind_host` | Host to bind agent server (use `0.0.0.0` for network access) |
 | `bind_port` | Port for agent API (default: 9001) |
 | `ollama_base_url` | URL of local Ollama instance |
-| `llm_models` | List of available models (shown in UI dropdown) |
+
+Central model policy (`central/config/model_policy.yaml`) is the single source of truth for required models; agent.yaml only defines networking and local endpoints.
 
 ### Central Configuration
 
@@ -379,9 +370,11 @@ Expected response:
   "machine_id": "macbook",
   "label": "MacBook (M4, 128GB)",
   "tests": ["llm_generate"],
-  "llm_models": ["llama3.1:8b-instruct-q8_0", "llama3.1:70b-instruct-q4_K_M"],
-  "whisper_models": ["large-v3"],
-  "sdxl_profiles": ["sdxl_1024_30steps"]
+  "llm_models": [],
+  "whisper_models": [],
+  "sdxl_profiles": [],
+  "ollama_reachable": true,
+  "ollama_models": ["llama3.1:8b-instruct-q8_0"]
 }
 ```
 
@@ -610,21 +603,22 @@ If benchmark results show `engine: mock` instead of `engine: ollama`, the agent 
 
 ---
 
-## Model Sync via agent.yaml + pull_models.sh
+## Model Sync via central policy + pull_models.sh
 
-The `pull_models.sh` script reads `agent/config/agent.yaml` and automatically pulls all required models on any machine.
+The `pull_models.sh` script reads `central/config/model_policy.yaml` and pulls the required models on any machine.
 
 ### Usage
 
 ```bash
-# Pull all models from agent.yaml (default)
+# Pull all required models from the central policy (default)
 ./scripts/pull_models.sh
 
 # Skip large 70B models
 ./scripts/pull_models.sh --skip-70b
 
-# Use a custom config path
-AGENT_CONFIG=/path/to/agent.yaml ./scripts/pull_models.sh
+# Use a custom policy path
+MODEL_POLICY=/path/to/model_policy.yaml ./scripts/pull_models.sh
+./scripts/pull_models.sh --policy /path/to/model_policy.yaml
 
 # Legacy mode: use hardcoded model list
 ./scripts/pull_models.sh --legacy
@@ -632,40 +626,27 @@ AGENT_CONFIG=/path/to/agent.yaml ./scripts/pull_models.sh
 
 ### How It Works
 
-1. Reads `agent/config/agent.yaml` (or path in `AGENT_CONFIG`)
-2. Extracts model lists:
-   - `llm_models` → Pulled via `ollama pull`
-   - `whisper_models` → Logged (not yet implemented)
-   - `sdxl_profiles` → Logged (not yet implemented)
+1. Reads `central/config/model_policy.yaml` (or path in `MODEL_POLICY`/`--policy`)
+2. Extracts required model lists:
+   - `required.llm` → Pulled via `ollama pull`
+   - `required.whisper` → Logged (not yet implemented)
+   - `required.sdxl_profiles` → Logged (not yet implemented)
 3. Shows planned pulls, executes them, and prints summary
 
-### Example agent.yaml
+### Example model policy
 
 ```yaml
-machine_id: "macbook"
-label: "MacBook Pro (M4, 128GB)"
-
-bind_host: "0.0.0.0"
-bind_port: 9001
-
-ollama_base_url: "http://127.0.0.1:11434"
-
-llm_models:
-  - "llama3.1:8b-instruct-q8_0"
-  - "llama3.1:70b-instruct-q4_K_M"
-
-whisper_models:
-  - "large-v3"
-
-sdxl_profiles:
-  - "sdxl_1024_30steps"
+required:
+  llm:
+    - "llama3.1:8b-instruct-q8_0"
+    - "llama3.1:70b-instruct-q4_K_M"
 ```
 
 ### Multi-Machine Sync
 
 To sync models across multiple machines:
 
-1. Edit each machine's `agent/config/agent.yaml` with desired models
+1. Update the required model lists in `central/config/model_policy.yaml`
 2. SSH to each machine and run:
    ```bash
    cd /path/to/bench-race
@@ -686,10 +667,10 @@ LLM Models (via Ollama):
   - llama3.1:70b-instruct-q4_K_M
 
 Whisper Models:
-  - large-v3
+  (none configured)
 
 SDXL Profiles:
-  - sdxl_1024_30steps
+  (none configured)
 
 ==============================================
 
