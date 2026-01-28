@@ -5,6 +5,25 @@ log() {
   echo "[install_ollama_linux] $*"
 }
 
+# Ensure zstd is installed (required for Ollama model extraction)
+if ! command -v zstd >/dev/null 2>&1; then
+  log "zstd not found. Installing..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update && sudo apt-get install -y zstd
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y zstd
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y zstd
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -Sy --noconfirm zstd
+  else
+    log "WARN: Could not determine package manager. Please install zstd manually."
+  fi
+else
+  log "zstd already installed."
+fi
+
+
 if ! command -v ollama >/dev/null 2>&1; then
   log "Installing Ollama via official install script."
   curl -fsSL https://ollama.com/install.sh | sh
