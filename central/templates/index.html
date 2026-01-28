@@ -77,14 +77,25 @@
           <textarea id="prompt" rows="4">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
         </div>
 
-        <button id="run">Run (LLM)</button>
+        <div class="run-row">
+          <button id="run">Run (LLM)</button>
+          <button id="refresh-caps" class="btn-secondary" title="Refresh capabilities">↻ Refresh</button>
+          <label class="toggle-label">
+            <input type="checkbox" id="run-only-ready" checked />
+            Run only ready machines
+          </label>
+        </div>
+        <div id="preflight-banner" class="preflight-banner hidden"></div>
         <div id="status"></div>
       </div>
 
       <div class="grid">
         {% for m in machines %}
-        <div class="pane card">
-          <div class="pane-title">{{ m.label }}</div>
+        <div class="pane card" id="pane-{{ m.machine_id }}">
+          <div class="pane-header">
+            <div class="pane-title">{{ m.label }}</div>
+            <span class="status-pill checking" id="status-pill-{{ m.machine_id }}" title="Checking...">Checking...</span>
+          </div>
           <pre class="output" id="out-{{ m.machine_id }}"></pre>
           <div class="metrics" id="metrics-{{ m.machine_id }}">
             <span class="muted">Waiting…</span>

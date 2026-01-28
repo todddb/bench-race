@@ -42,6 +42,25 @@ async def check_ollama_available(base_url: str) -> bool:
         return False
 
 
+async def get_ollama_models(base_url: str) -> list[str]:
+    """
+    Fetch list of available model names from Ollama's /api/tags endpoint.
+    Returns empty list if Ollama is unreachable or on error.
+    """
+    try:
+        url = base_url.rstrip("/") + "/api/tags"
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            # Ollama returns {"models": [{"name": "llama3.1:8b-instruct-q8_0", ...}, ...]}
+            models = data.get("models", [])
+            return [m.get("name", "") for m in models if m.get("name")]
+    except Exception:
+        return []
+
+
 async def stream_ollama_generate(
     job_id: str,
     model: str,

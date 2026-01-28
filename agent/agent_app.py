@@ -27,7 +27,7 @@ if str(ROOT_DIR) not in sys.path:
 
 # now import shared pydantic schemas
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
-from backends.ollama_backend import check_ollama_available, stream_ollama_generate
+from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
 
 # ---------------------------
 # Logging
@@ -88,6 +88,14 @@ async def health():
 
 @app.get("/capabilities")
 async def capabilities():
+    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+
+    # Check Ollama reachability and get available models
+    ollama_reachable = await check_ollama_available(base_url)
+    ollama_models = []
+    if ollama_reachable:
+        ollama_models = await get_ollama_models(base_url)
+
     cap = Capabilities(
         machine_id=CFG.get("machine_id"),
         label=CFG.get("label"),
@@ -95,6 +103,8 @@ async def capabilities():
         llm_models=CFG.get("llm_models", []),
         whisper_models=CFG.get("whisper_models", []),
         sdxl_profiles=CFG.get("sdxl_profiles", []),
+        ollama_reachable=ollama_reachable,
+        ollama_models=ollama_models,
     )
     return JSONResponse(cap.model_dump())
 
@@ -102,10 +112,13 @@ async def capabilities():
 # ---------------------------
 # Background job: LLM streaming
 # ---------------------------
-async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int, temperature: float, num_ctx: int):
+async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int, temperature: float, num_ctx: int, fallback_reason: str = "unknown"):
     """
     Fallback streaming for development when Ollama isn't available.
     Produces a few token chunks with small sleeps to simulate behavior.
+
+    Args:
+        fallback_reason: Why mock was used ("ollama_unreachable", "missing_model", "stream_error")
     """
     ttft = None
     gen_tokens = 0
@@ -156,6 +169,7 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
         "total_ms": total_ms,
         "model": model,
         "engine": "mock",
+        "fallback_reason": fallback_reason,
     }
     return result
 
@@ -178,26 +192,32 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
         available = await check_ollama_available(base_url)
         if not available:
             log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
-            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx)
+            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
         else:
-            log.info("Using Ollama backend for job %s", job_id)
-            async def _on_token(text: str, timestamp_s: float) -> None:
-                ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
-                await _broadcast_event(ev)
+            # Check if model is available on Ollama
+            ollama_models = await get_ollama_models(base_url)
+            if model not in ollama_models:
+                log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
+                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
+            else:
+                log.info("Using Ollama backend for job %s", job_id)
+                async def _on_token(text: str, timestamp_s: float) -> None:
+                    ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
+                    await _broadcast_event(ev)
 
-            result = await stream_ollama_generate(
-                job_id=job_id,
-                model=model,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                num_ctx=num_ctx,
-                base_url=base_url,
-                on_token=_on_token,
-            )
+                result = await stream_ollama_generate(
+                    job_id=job_id,
+                    model=model,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    num_ctx=num_ctx,
+                    base_url=base_url,
+                    on_token=_on_token,
+                )
     except Exception as e:
         log.warning("Ollama stream failed (%s); falling back to mock stream", e)
-        result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx)
+        result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")
 
     # Emit final metrics event
     ev = Event(job_id=job_id, type="job_done", payload=result)

@@ -18,6 +18,10 @@ class Capabilities(BaseModel):
     llm_models: List[str] = Field(default_factory=list)
     whisper_models: List[str] = Field(default_factory=list)
     sdxl_profiles: List[str] = Field(default_factory=list)
+    # Extended capability fields for preflight checks
+    ollama_reachable: Optional[bool] = None
+    ollama_models: List[str] = Field(default_factory=list)  # Actually available on Ollama
+    agent_reachable: Optional[bool] = None  # Set by central when aggregating
 
 
 # ----- Job Requests -----
@@ -72,6 +76,7 @@ class LLMResult(BaseModel):
     total_ms: Optional[float] = None
     model: str
     engine: str = "ollama"
+    fallback_reason: Optional[str] = None  # "ollama_unreachable", "missing_model", "stream_error"
 
 
 class WhisperResult(BaseModel):

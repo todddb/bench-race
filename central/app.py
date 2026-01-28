@@ -172,12 +172,18 @@ def api_capabilities():
         try:
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
-            caps.append(r.json())
+            cap = r.json()
+            cap["agent_reachable"] = True
+            caps.append(cap)
         except Exception as e:
             caps.append(
                 {
                     "machine_id": m.get("machine_id"),
                     "label": m.get("label"),
+                    "agent_reachable": False,
+                    "ollama_reachable": None,
+                    "ollama_models": [],
+                    "llm_models": [],
                     "error": str(e),
                 }
             )
@@ -195,8 +201,20 @@ def api_start_llm():
     num_ctx = int(payload.get("num_ctx", 4096))
     repeat = int(payload.get("repeat", 1))
 
+    # Optional: only run on specific machines (for preflight filtering)
+    machine_ids = payload.get("machine_ids")  # None means all machines
+
     results = []
     for m in MACHINES:
+        # Skip machines not in the list (if list is provided)
+        if machine_ids is not None and m.get("machine_id") not in machine_ids:
+            results.append({
+                "machine_id": m.get("machine_id"),
+                "skipped": True,
+                "reason": "not in ready list"
+            })
+            continue
+
         try:
             r = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/jobs",

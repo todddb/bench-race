@@ -593,6 +593,119 @@ If streaming appears jittery, adjust buffering via environment variables:
 BENCH_STREAM_FLUSH_CHARS=32 BENCH_STREAM_FLUSH_SECONDS=0.05 ./scripts/agents start
 ```
 
+### Why Did I Get Mock?
+
+If benchmark results show `engine: mock` instead of `engine: ollama`, the agent fell back to mock streaming. The UI displays a warning badge with the reason:
+
+| Fallback Reason | Meaning | Solution |
+|-----------------|---------|----------|
+| `ollama_unreachable` | Agent cannot connect to Ollama API | Start Ollama: `ollama serve` |
+| `missing_model` | Selected model not installed on Ollama | Run: `ollama pull <model>` or use `pull_models.sh` |
+| `stream_error` | Error occurred during Ollama streaming | Check Ollama logs, restart Ollama |
+
+**Preflight Checks**: The UI performs preflight validation before starting runs:
+- Shows status pills on each machine card: ✓ Ready, ⚠ Missing model, ✗ Agent/Ollama unreachable
+- Blocks machines that aren't ready (configurable with "Run only ready machines" toggle)
+- Shows summary banner listing blocked machines and reasons
+
+---
+
+## Model Sync via agent.yaml + pull_models.sh
+
+The `pull_models.sh` script reads `agent/config/agent.yaml` and automatically pulls all required models on any machine.
+
+### Usage
+
+```bash
+# Pull all models from agent.yaml (default)
+./scripts/pull_models.sh
+
+# Skip large 70B models
+./scripts/pull_models.sh --skip-70b
+
+# Use a custom config path
+AGENT_CONFIG=/path/to/agent.yaml ./scripts/pull_models.sh
+
+# Legacy mode: use hardcoded model list
+./scripts/pull_models.sh --legacy
+```
+
+### How It Works
+
+1. Reads `agent/config/agent.yaml` (or path in `AGENT_CONFIG`)
+2. Extracts model lists:
+   - `llm_models` → Pulled via `ollama pull`
+   - `whisper_models` → Logged (not yet implemented)
+   - `sdxl_profiles` → Logged (not yet implemented)
+3. Shows planned pulls, executes them, and prints summary
+
+### Example agent.yaml
+
+```yaml
+machine_id: "macbook"
+label: "MacBook Pro (M4, 128GB)"
+
+bind_host: "0.0.0.0"
+bind_port: 9001
+
+ollama_base_url: "http://127.0.0.1:11434"
+
+llm_models:
+  - "llama3.1:8b-instruct-q8_0"
+  - "llama3.1:70b-instruct-q4_K_M"
+
+whisper_models:
+  - "large-v3"
+
+sdxl_profiles:
+  - "sdxl_1024_30steps"
+```
+
+### Multi-Machine Sync
+
+To sync models across multiple machines:
+
+1. Edit each machine's `agent/config/agent.yaml` with desired models
+2. SSH to each machine and run:
+   ```bash
+   cd /path/to/bench-race
+   ./scripts/pull_models.sh
+   ```
+
+The script is idempotent - running it multiple times is safe and will only download missing models.
+
+### Script Output
+
+```
+==============================================
+          PLANNED MODEL PULLS
+==============================================
+
+LLM Models (via Ollama):
+  - llama3.1:8b-instruct-q8_0
+  - llama3.1:70b-instruct-q4_K_M
+
+Whisper Models:
+  - large-v3
+
+SDXL Profiles:
+  - sdxl_1024_30steps
+
+==============================================
+
+[pull_models] Pulling 2 LLM model(s)...
+[pull_models] Pulling LLM model: llama3.1:8b-instruct-q8_0
+...
+
+==============================================
+               SUMMARY
+==============================================
+
+LLM Models:
+  Successfully pulled: 2
+  Failed: 0
+```
+
 ---
 
 ## Development Workflow
