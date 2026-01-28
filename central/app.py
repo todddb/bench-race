@@ -16,7 +16,6 @@ import websockets
 from flask import Flask, jsonify, render_template, request, abort
 from flask_socketio import SocketIO, emit
 
-from central.services import controller as service_controller
 
 # -----------------------------------------------------------------------------
 # Paths (robust regardless of cwd)
@@ -24,6 +23,12 @@ from central.services import controller as service_controller
 CENTRAL_DIR = Path(__file__).resolve().parent          # .../bench-race/central
 ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
 CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
+
+import sys
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from central.services import controller as service_controller
 
 # -----------------------------------------------------------------------------
 # Logging
