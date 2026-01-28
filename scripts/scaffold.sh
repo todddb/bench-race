@@ -202,17 +202,6 @@ bind_port: 9001
 # Local engine endpoints (running on the same machine as the agent)
 ollama_base_url: "http://127.0.0.1:11434"
 comfyui_base_url: "http://127.0.0.1:8188"
-
-# Models to advertise for UI dropdowns (you can override per-machine)
-llm_models:
-  - "llama3.1:8b-instruct-q8_0"
-  - "llama3.1:70b-instruct-q4_K_M"
-
-whisper_models:
-  - "large-v3"
-
-sdxl_profiles:
-  - "sdxl_1024_30steps"
 EOF
 
 cat > agent/agent_app.py <<'EOF'
@@ -253,9 +242,9 @@ def capabilities():
         machine_id=CFG["machine_id"],
         label=CFG["label"],
         tests=["llm_generate"],  # add whisper_transcribe, sdxl_generate later
-        llm_models=CFG.get("llm_models", []),
-        whisper_models=CFG.get("whisper_models", []),
-        sdxl_profiles=CFG.get("sdxl_profiles", []),
+        llm_models=[],
+        whisper_models=[],
+        sdxl_profiles=[],
     )
     return JSONResponse(cap.model_dump())
 
@@ -596,4 +585,3 @@ echo "Next:"
 echo "  1) Run: ./scripts/setup_venv_agent.sh   (then start agent)"
 echo "  2) Run: ./scripts/setup_venv_central.sh (then start central UI)"
 echo "  3) Commit & push to GitHub."
-

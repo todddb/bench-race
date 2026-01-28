@@ -39,11 +39,19 @@ log = logging.getLogger("bench-agent")
 # ---------------------------
 # Load config
 # ---------------------------
+DEPRECATED_MODEL_KEYS = ("llm_models", "whisper_models", "sdxl_profiles")
+
+
 def load_config():
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+    if any(key in config for key in DEPRECATED_MODEL_KEYS):
+        log.warning("Model lists in agent.yaml are deprecated; central controls required models now.")
+        for key in DEPRECATED_MODEL_KEYS:
+            config.pop(key, None)
+    return config
 
 
 CFG = load_config()
@@ -108,9 +116,9 @@ async def capabilities():
         machine_id=CFG.get("machine_id"),
         label=CFG.get("label"),
         tests=CFG.get("tests", ["llm_generate"]),
-        llm_models=CFG.get("llm_models", []),
-        whisper_models=CFG.get("whisper_models", []),
-        sdxl_profiles=CFG.get("sdxl_profiles", []),
+        llm_models=[],
+        whisper_models=[],
+        sdxl_profiles=[],
         accelerator_type=CFG.get("accelerator_type"),
         accelerator_memory_gb=CFG.get("accelerator_memory_gb"),
         system_memory_gb=CFG.get("system_memory_gb"),

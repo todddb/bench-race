@@ -310,8 +310,9 @@ socket.on("llm_jobs_started", (results) => {
   handleJobResults(results);
 });
 
-// Run button with preflight validation
-document.getElementById("run").addEventListener("click", async () => {
+const runButton = document.getElementById("run");
+
+const startRun = async () => {
   const runOnlyReady = document.getElementById("run-only-ready")?.checked ?? true;
   const { blocked, ready } = getPreflightStatus();
 
@@ -364,6 +365,21 @@ document.getElementById("run").addEventListener("click", async () => {
     handleJobResults(results);
   } catch (error) {
     console.error("Failed to start jobs", error);
+  }
+};
+
+// Run button with preflight validation
+runButton?.addEventListener("click", async () => {
+  await startRun();
+});
+
+const promptEl = document.getElementById("prompt");
+promptEl?.addEventListener("keydown", async (event) => {
+  if (event.isComposing) return;
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    if (runButton?.disabled) return;
+    await startRun();
   }
 });
 
