@@ -1,16 +1,18 @@
-body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f6f7f9; }
-.container { max-width: 1400px; margin: 0 auto; padding: 18px; }
+*, *::before, *::after { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f6f7f9; overflow-x: hidden; }
+.container { max-width: 1440px; margin: 0 auto; padding: 16px; overflow-x: hidden; }
 h1 { margin: 0 0 12px 0; }
 .card { background: white; border-radius: 12px; padding: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.08); }
-.controls { margin-bottom: 12px; }
+.controls { margin-bottom: 16px; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,.12); border-bottom: 1px solid #e5e7eb; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 label { font-size: 12px; color: #555; }
 select, input, textarea { padding: 8px; border-radius: 10px; border: 1px solid #ddd; }
 textarea { width: 100%; }
 button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827; color: white; cursor: pointer; }
-.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; }
+.pane { overflow: hidden; }
 .pane-title { font-weight: 700; margin-bottom: 8px; }
-.output { height: 280px; background: #0b1020; color: #d7e1ff; padding: 10px; border-radius: 10px; overflow: auto; }
+.output { min-height: 200px; max-height: 320px; background: #0b1020; color: #d7e1ff; padding: 10px; border-radius: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .metrics { margin-top: 8px; font-size: 13px; color: #111; }
 .muted { color: #666; }
 
@@ -41,3 +43,9 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 .toast.error { background: #ef4444; color: white; }
 .toast.info { background: #3b82f6; color: white; }
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* Responsive: single-column grid on narrow screens */
+@media (max-width: 560px) {
+  .grid { grid-template-columns: 1fr; }
+  .service-controls { flex-direction: column; }
+}
