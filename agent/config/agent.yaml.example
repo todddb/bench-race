@@ -1,0 +1,37 @@
+# agent/config/agent.yaml.example
+#
+# Per-machine configuration for a bench-race agent.
+# This file is intentionally NOT tracked when copied to agent.yaml.
+#
+# Central controls required models and policies.
+# This file only configures how the agent runs and connects to Ollama.
+
+# Unique ID for this machine (must match central machines.yaml)
+machine_id: "example-machine"
+
+# Human-friendly label shown in the UI
+label: "Example Machine (GPU / RAM)"
+
+# Address/port the agent HTTP server binds to
+bind_host: "0.0.0.0"
+bind_port: 9001
+
+# Base URL for the local Ollama instance
+# In most cases this should be localhost
+ollama_base_url: "http://127.0.0.1:11434"
+
+# Optional: override if Ollama is remote or non-standard
+# ollama_timeout_s: 2.0
+
+# NOTE:
+# Model lists are no longer defined here.
+# Required models are defined centrally in:
+#   central/config/model_policy.yaml
+#
+# Any model lists found here will be ignored or deprecated.
+
+# Deprecated (kept for reference only)
+# llm_models:
+#   - llama3.1:8b-instruct-q8_0
+#   - llama3.1:70b-instruct-q4_K_M
+
