@@ -76,7 +76,10 @@ sdxl_models/
 
 # Runtime
 run/*.pid
+run/pids/*.pid
 logs/*.log
 !run/.keep
 !logs/.keep
+
+
 agent/config/agent.yaml
