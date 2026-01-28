@@ -1,0 +1,170 @@
+bench-race code export
+Generated: Wed Jan 28 13:42:20 MST 2026
+Root: /Users/todddb/projects/bench-race
+
+----- FILE: .gitignore -----
+SKIPPED: binary file
+
+----- FILE: agent/agent_app.py -----
+SKIPPED: binary file
+
+----- FILE: agent/backends/comfyui_backend.py -----
+SKIPPED: binary file
+
+----- FILE: agent/backends/ollama_backend.py -----
+SKIPPED: binary file
+
+----- FILE: agent/backends/whisper_backend.py -----
+SKIPPED: binary file
+
+----- FILE: agent/config/agent.yaml -----
+SKIPPED: binary file
+
+----- FILE: agent/requirements.txt -----
+SKIPPED: binary file
+
+----- FILE: assets/audio/.keep -----
+Size:        0 bytes
+
+
+
+----- FILE: assets/images/.keep -----
+Size:        0 bytes
+
+
+
+----- FILE: backends/__init__.py -----
+SKIPPED: binary file
+
+----- FILE: backends/ollama_backend.py -----
+SKIPPED: binary file
+
+----- FILE: bin/control -----
+SKIPPED: binary file
+
+----- FILE: central/app.py -----
+SKIPPED: binary file
+
+----- FILE: central/config/machines.yaml -----
+SKIPPED: binary file
+
+----- FILE: central/requirements.txt -----
+SKIPPED: binary file
+
+----- FILE: central/services/__init__.py -----
+SKIPPED: binary file
+
+----- FILE: central/services/controller.py -----
+SKIPPED: binary file
+
+----- FILE: central/static/css/app.css -----
+SKIPPED: binary file
+
+----- FILE: central/static/js/app.js -----
+SKIPPED: binary file
+
+----- FILE: central/static/js/service-control.js -----
+SKIPPED: binary file
+
+----- FILE: central/templates/index.html -----
+SKIPPED: binary file
+
+----- FILE: deploy/bench-agent.service -----
+SKIPPED: binary file
+
+----- FILE: deploy/bench-central.service -----
+SKIPPED: binary file
+
+----- FILE: deploy/docker-compose.override.yml -----
+SKIPPED: binary file
+
+----- FILE: deploy/docker-compose.yml -----
+SKIPPED: binary file
+
+----- FILE: deploy/Dockerfile.agent -----
+SKIPPED: binary file
+
+----- FILE: deploy/Dockerfile.central -----
+SKIPPED: binary file
+
+----- FILE: logs/.keep -----
+Size:        0 bytes
+
+
+
+----- FILE: pyproject.toml -----
+SKIPPED: binary file
+
+----- FILE: README.md -----
+SKIPPED: binary file
+
+----- FILE: results/runs/.keep -----
+Size:        0 bytes
+
+
+
+----- FILE: run/.keep -----
+Size:        0 bytes
+
+
+
+----- FILE: scripts/_common.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/_python_pick.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/agents -----
+SKIPPED: binary file
+
+----- FILE: scripts/central -----
+SKIPPED: binary file
+
+----- FILE: scripts/install_ollama_linux.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/install_ollama_macos.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/pull_models.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/scaffold.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/setup_venv_agent.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/setup_venv_central.sh -----
+SKIPPED: binary file
+
+----- FILE: scripts/start_agent -----
+SKIPPED: binary file
+
+----- FILE: scripts/start_central -----
+SKIPPED: binary file
+
+----- FILE: scripts/status_agent -----
+SKIPPED: binary file
+
+----- FILE: scripts/status_central -----
+SKIPPED: binary file
+
+----- FILE: scripts/stop_agent -----
+SKIPPED: binary file
+
+----- FILE: scripts/stop_central -----
+SKIPPED: binary file
+
+----- FILE: shared/schemas.py -----
+SKIPPED: binary file
+
+----- FILE: tests/__init__.py -----
+SKIPPED: binary file
+
+----- FILE: tests/integration/test_smoke_service_control.sh -----
+SKIPPED: binary file
+
+----- FILE: tests/test_control_cli.py -----
+SKIPPED: binary file
+

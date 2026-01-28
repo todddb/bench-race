@@ -1,0 +1,7 @@
+# Bench-Race code export
+# Repo root: /Users/todddb/projects/bench-race
+# Generated: Wed Jan 28 13:32:58 MST 2026
+
+----- FILE: ./agent/.venv/lib/python3.9/site-packages/_distutils_hack/__init__.py -----
+Mode: -rw-r--r--  Size: 6755 bytes  MTime: Jan 27 15:10:23 2026
+
