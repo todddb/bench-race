@@ -16,6 +16,37 @@ button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827
 .metrics { margin-top: 8px; font-size: 13px; color: #111; }
 .muted { color: #666; }
 
+/* Status pills for machine readiness */
+.pane-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.status-pill { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 500; white-space: nowrap; }
+.status-pill.ready { background: #dcfce7; color: #166534; }
+.status-pill.missing-model { background: #fef3c7; color: #92400e; }
+.status-pill.agent-unreachable { background: #fee2e2; color: #991b1b; }
+.status-pill.ollama-unreachable { background: #fee2e2; color: #991b1b; }
+.status-pill.checking { background: #e5e7eb; color: #374151; }
+
+/* Run row with toggle */
+.run-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+.toggle-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #374151; cursor: pointer; }
+.toggle-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+
+/* Preflight warning banner */
+.preflight-banner { margin-top: 10px; padding: 10px 14px; border-radius: 8px; font-size: 13px; background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.preflight-banner.error { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+.preflight-banner.hidden { display: none; }
+
+/* Mock engine warning badge */
+.engine-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 4px; }
+.engine-badge.ollama { background: #dcfce7; color: #166534; }
+.engine-badge.mock { background: #fee2e2; color: #991b1b; cursor: help; }
+.fallback-reason { font-size: 11px; color: #92400e; margin-top: 4px; }
+
+/* Pane warning state when mock was used */
+.pane.mock-warning { border: 2px solid #fca5a5; background: #fef2f2; }
+.pane.mock-warning .pane-title { color: #991b1b; }
+
 /* Service Control Card */
 .service-controls { display: flex; gap: 12px; margin-bottom: 12px; }
 .service-card { flex: 1; min-width: 200px; }
