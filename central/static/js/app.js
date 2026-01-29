@@ -804,28 +804,25 @@ const generateSampleButton = document.getElementById("generate-sample");
 const historyButton = document.getElementById("btn-history");
 const settingsButton = document.getElementById("btn-settings");
 const optionsToggle = document.getElementById("options-toggle");
-const optionsCaret = document.querySelector(".options-caret");
 const SAMPLE_PROMPT_COOLDOWN_MS = 10000;
 let samplePromptCooldownUntil = 0;
 
 const setOptionsExpanded = (expanded) => {
+  document.body.classList.toggle("options-expanded", expanded);
   document.body.classList.toggle("options-collapsed", !expanded);
-  if (optionsCaret) {
-    optionsCaret.textContent = expanded ? "▾" : "▸";
-  }
   localStorage.setItem(OPTIONS_STORAGE_KEY, expanded ? "true" : "false");
 };
 
 const initOptionsState = () => {
   const stored = localStorage.getItem(OPTIONS_STORAGE_KEY);
-  const expanded = stored !== "false";
+  const expanded = stored === "true";
   setOptionsExpanded(expanded);
 };
 
 initOptionsState();
 optionsToggle?.addEventListener("click", () => {
-  const isCollapsed = document.body.classList.contains("options-collapsed");
-  setOptionsExpanded(isCollapsed);
+  const isExpanded = document.body.classList.contains("options-expanded");
+  setOptionsExpanded(!isExpanded);
 });
 
 const startRun = async () => {
