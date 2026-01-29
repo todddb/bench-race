@@ -44,9 +44,12 @@ button { font-family: inherit; }
 .prompt-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .prompt-helper { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .btn-generate { padding: 6px 10px; font-size: 13px; border-radius: 10px; }
-.options-header { display: flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.options-header { background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.options-toggle { display: inline-flex; align-items: center; gap: 8px; line-height: 1; }
 .options-header:hover { color: var(--primary-dark); }
-.options-caret { color: var(--title-blue); font-weight: 700; }
+.options-caret { color: var(--title-blue); font-weight: 700; display: inline-block; font-size: 14px; transform-origin: center; transition: transform 150ms ease; }
+body.options-expanded .options-toggle .options-caret { transform: rotate(90deg); }
+body.options-collapsed .options-toggle .options-caret { transform: rotate(0deg); }
 .options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .control-field { display: flex; flex-direction: column; }
 .control-label { font-weight: 700; color: #111827; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; font-size: 12px; }
@@ -203,8 +206,10 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
 body.options-collapsed #options-panel { display: none; }
-body.options-collapsed textarea.prompt { min-height: 240px; }
+body.options-collapsed textarea.prompt { min-height: 120px; }
 body.options-collapsed .prompt-section { margin-top: 0; }
+body.options-collapsed .controls.card { padding-bottom: 12px; }
+body.options-expanded textarea.prompt { min-height: 220px; }
 
 /* Responsive: single-column grid on narrow screens */
 @media (max-width: 560px) {
