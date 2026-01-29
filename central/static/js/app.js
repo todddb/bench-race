@@ -589,6 +589,28 @@ const updateHistoryBadge = () => {
   }
 };
 
+const deleteRun = async (runId) => {
+  const confirmed = window.confirm("Delete this run permanently? This cannot be undone.");
+  if (!confirmed) return;
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+    if (!response.ok) {
+      showToast("Failed to delete run.", "error");
+      return;
+    }
+    recentRuns = recentRuns.filter((run) => run.run_id !== runId);
+    if (baselineRunId && baselineRunId === runId) {
+      await setBaselineRunId(null);
+      showToast("Baseline cleared because the run was deleted.", "info");
+    }
+    renderRecentRuns();
+    updateHistoryBadge();
+  } catch (error) {
+    console.error("Failed to delete run", error);
+    showToast("Failed to delete run.", "error");
+  }
+};
+
 const renderRecentRuns = () => {
   const list = document.getElementById("recent-runs-list");
   if (!list) return;
@@ -619,6 +641,7 @@ const renderRecentRuns = () => {
       : "";
 
     item.innerHTML = `
+      <button class="run-delete-button" type="button" aria-label="Delete run" title="Delete run">🗑️</button>
       <div class="recent-run-header">
         <div>
           <div class="recent-run-title">${run.model ?? "n/a"}</div>
@@ -636,7 +659,14 @@ const renderRecentRuns = () => {
       </div>
     `;
 
+    const deleteButton = item.querySelector(".run-delete-button");
+    deleteButton?.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await deleteRun(run.run_id);
+    });
+
     item.querySelectorAll("button").forEach((button) => {
+      if (button.classList.contains("run-delete-button")) return;
       button.addEventListener("click", async (event) => {
         event.stopPropagation();
         const action = button.dataset.action;
