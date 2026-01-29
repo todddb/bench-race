@@ -83,3 +83,7 @@ logs/*.log
 
 
 agent/config/agent.yaml
+# Generated benchmark run artifacts
+central/runs/
+central/runs/*.json
+
