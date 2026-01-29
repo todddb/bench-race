@@ -1,0 +1,5 @@
+comfyui:
+  base_url: ""
+  models_path: ""
+  central_cache_path: "central/model_cache/comfyui"
+  checkpoint_urls: []

@@ -9,6 +9,7 @@ const STATUS_POLL_MS = 12000;
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
+const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 
 let baselineRunId = localStorage.getItem(BASELINE_KEY);
@@ -633,6 +634,11 @@ const renderRecentRuns = () => {
     if (run.has_mock) {
       badges.push('<span class="run-badge warning">Mock engine</span>');
     }
+    if (run.type === "image") {
+      badges.push('<span class="run-badge image">Image</span>');
+    } else {
+      badges.push('<span class="run-badge inference">Inference</span>');
+    }
     if (baselineRunId && baselineRunId === run.run_id) {
       badges.push('<span class="run-badge baseline">Baseline</span>');
     }
@@ -695,6 +701,10 @@ const loadRun = async (runId) => {
     const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
     if (!response.ok) return;
     const run = await response.json();
+    if (run.type === "image") {
+      window.location.href = `/image?run_id=${encodeURIComponent(runId)}`;
+      return;
+    }
     renderRunToPanes(run);
   } catch (error) {
     console.error("Failed to load run", error);
@@ -925,6 +935,20 @@ settingsButton?.addEventListener("click", async () => {
     if (editor) {
       editor.value = (data.models || []).join("\n");
     }
+    const comfyResponse = await fetch(COMFY_SETTINGS_ENDPOINT);
+    if (comfyResponse.ok) {
+      const comfy = await comfyResponse.json();
+      const baseInput = document.getElementById("comfy-base-url");
+      const modelsInput = document.getElementById("comfy-models-path");
+      const cacheInput = document.getElementById("comfy-cache-path");
+      const checkpointsInput = document.getElementById("comfy-checkpoints");
+      if (baseInput) baseInput.value = comfy.base_url || "";
+      if (modelsInput) modelsInput.value = comfy.models_path || "";
+      if (cacheInput) cacheInput.value = comfy.central_cache_path || "";
+      if (checkpointsInput) {
+        checkpointsInput.value = (comfy.checkpoint_urls || []).join("\n");
+      }
+    }
     setPolicyFeedback("", "");
     toggleOverlay("settings");
   } catch (error) {
@@ -954,6 +978,17 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  const baseInput = document.getElementById("comfy-base-url");
+  const modelsInput = document.getElementById("comfy-models-path");
+  const cacheInput = document.getElementById("comfy-cache-path");
+  const checkpointsInput = document.getElementById("comfy-checkpoints");
+  const checkpointUrls =
+    checkpointsInput instanceof HTMLTextAreaElement
+      ? checkpointsInput.value
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+      : [];
   const button = document.getElementById("settings-save");
   if (button) button.disabled = true;
   setPolicyFeedback("", "");
@@ -968,6 +1003,16 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
       throw new Error(data?.error || "Failed to save policy");
     }
     updateModelOptions(data.models || models);
+    await fetch(COMFY_SETTINGS_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_url: baseInput?.value || "",
+        models_path: modelsInput?.value || "",
+        central_cache_path: cacheInput?.value || "",
+        checkpoint_urls: checkpointUrls,
+      }),
+    });
     if (data.missing && Object.keys(data.missing).length > 0) {
       const lines = Object.entries(data.missing).map(
         ([model, machines]) => `${model}: missing on ${machines.join(", ")}`,
@@ -1088,3 +1133,9 @@ document.getElementById("run-view-export-json")?.addEventListener("click", () =>
 setInterval(() => {
   fetchStatus();
 }, STATUS_POLL_MS);
+
+const params = new URLSearchParams(window.location.search);
+const runId = params.get("run_id");
+if (runId) {
+  loadRun(runId);
+}
