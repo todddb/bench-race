@@ -1,0 +1,39 @@
+{
+  "run_id": "20260129-040126_224a9c",
+  "timestamp": "2026-01-29T04:01:26.673442+00:00",
+  "model": "llama3.1:8b-instruct-q8_0",
+  "prompt_text": "What is the capital of France",
+  "prompt_hash": "2bdaf677479724a86557bb58417877704fdb80e0f3c9fe7e9132e5bc806dab0c",
+  "settings": {
+    "max_tokens": 256,
+    "temperature": 0.2,
+    "num_ctx": 4096,
+    "repeat": 1,
+    "machine_ids": [
+      "macbook"
+    ]
+  },
+  "central_git_sha": "bcabc499a787379402b0fc8a755e7a0591c37374",
+  "machines": [
+    {
+      "machine_id": "macbook",
+      "label": "Macbook Pro (M4, 128GB)",
+      "status": "complete",
+      "job_id": "f05e201f-889b-420e-bd91-03c4130a4c39",
+      "model_fit": {
+        "status": "unknown",
+        "needed_gb": 14.0,
+        "available_gb": null,
+        "memory_label": "RAM"
+      },
+      "ttft_ms": 856.2469579999998,
+      "tok_s": 47.5416351217979,
+      "total_ms": 982.4521250000089,
+      "tokens": 6,
+      "engine": "ollama",
+      "model": "llama3.1:8b-instruct-q8_0",
+      "fallback_reason": null
+    }
+  ],
+  "updated_at": "2026-01-29T04:01:27.735638+00:00"
+}
