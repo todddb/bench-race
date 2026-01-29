@@ -63,6 +63,7 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOCK = threading.Lock()
 RUN_CACHE: Dict[str, Dict[str, Any]] = {}
 JOB_RUN_MAP: Dict[str, Dict[str, str]] = {}
+RUN_ID_PATTERN = re.compile(r"^\d{8}-\d{6}_[a-f0-9]{6}$")
 SAMPLE_PROMPT_RATE_LIMIT_S = 10
 SAMPLE_PROMPT_TIMEOUT_S = 20
 _sample_prompt_last_request: Dict[str, float] = {}
@@ -94,6 +95,10 @@ def _new_run_id(ts: datetime) -> str:
 
 def _run_path(run_id: str) -> Path:
     return RUNS_DIR / f"{run_id}.json"
+
+
+def _valid_run_id(run_id: str) -> bool:
+    return bool(RUN_ID_PATTERN.match(run_id))
 
 
 def _write_run_record(record: Dict[str, Any]) -> None:
@@ -651,6 +656,23 @@ def api_run_detail(run_id: str):
     if not record:
         return jsonify({"error": "Run not found"}), 404
     return jsonify(record)
+
+
+@app.delete("/api/runs/<run_id>")
+def api_delete_run(run_id: str):
+    if not _valid_run_id(run_id):
+        return jsonify({"error": "Invalid run id"}), 400
+    path = _run_path(run_id)
+    if not path.exists():
+        return jsonify({"error": "Run not found"}), 404
+    try:
+        path.unlink()
+    except OSError as exc:
+        log.warning("Failed to delete run %s: %s", path, exc)
+        return jsonify({"error": "Failed to delete run"}), 500
+    with RUN_LOCK:
+        RUN_CACHE.pop(run_id, None)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/runs/<run_id>/export.json")
