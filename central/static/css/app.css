@@ -3,6 +3,7 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; marg
 .container { max-width: 1440px; margin: 0 auto; padding: 16px; overflow-x: hidden; }
 h1 { margin: 0 0 12px 0; }
 .card { background: white; border-radius: 12px; padding: 12px; box-shadow: 0 1px 6px rgba(0,0,0,.08); }
+.hidden { display: none !important; }
 .controls { margin-bottom: 16px; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,.12); border-bottom: 1px solid #e5e7eb; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 label { font-size: 12px; color: #555; }
@@ -29,7 +30,6 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; }
 .main-layout { display: flex; gap: 16px; align-items: flex-start; }
 .main-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
-.side-panel { width: 320px; align-self: flex-start; position: sticky; top: 16px; }
 .pane { overflow: hidden; }
 .pane-title { font-weight: 700; margin-bottom: 8px; }
 .output { min-height: 200px; max-height: 320px; background: #0b1020; color: #d7e1ff; padding: 10px; border-radius: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
@@ -56,10 +56,17 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .btn-sync.hidden { display: none; }
 
 /* Run row with toggle */
-.run-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.run-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+.run-actions-left { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.run-actions-right { display: flex; gap: 8px; align-items: center; }
 .btn-secondary { background: #e5e7eb; color: #374151; }
 .btn-secondary:hover { background: #d1d5db; }
 .btn-small { padding: 6px 10px; font-size: 12px; border-radius: 8px; }
+.icon-button { position: relative; width: 32px; height: 32px; border-radius: 8px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: #f3f4f6; color: #111827; border: 1px solid #e5e7eb; font-size: 16px; }
+.icon-button:hover { background: #e5e7eb; }
+.icon-button .icon { line-height: 1; }
+.icon-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: #ef4444; color: white; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; }
+.icon-badge.hidden { display: none; }
 .toggle-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #374151; cursor: pointer; }
 .toggle-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
 
@@ -88,9 +95,6 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .run-warning-banner.hidden { display: none; }
 
 /* Recent runs panel */
-.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.panel-title { font-weight: 700; font-size: 14px; }
-.panel-subtitle { font-size: 11px; color: #6b7280; }
 .recent-runs-list { display: flex; flex-direction: column; gap: 10px; }
 .recent-run-item { border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; cursor: pointer; transition: background 0.2s ease; }
 .recent-run-item:hover { background: #f9fafb; }
@@ -105,6 +109,22 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .run-badge.warning { background: #fee2e2; color: #991b1b; }
 .run-badge.baseline { background: #dcfce7; color: #166534; }
 .recent-empty { font-size: 12px; color: #6b7280; padding: 8px; text-align: center; }
+
+/* Drawer overlays */
+.overlay { position: fixed; inset: 0; z-index: 2000; }
+.overlay-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.35); }
+.drawer { position: fixed; top: 0; right: 0; width: 340px; max-width: 90vw; height: 100vh; background: #fff; box-shadow: -8px 0 20px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 200ms ease; }
+.overlay.open .drawer { transform: translateX(0); }
+.drawer-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px; border-bottom: 1px solid #e5e7eb; }
+.drawer-header h3 { margin: 0; font-size: 16px; }
+.drawer-subtitle { margin: 4px 0 0; font-size: 12px; color: #6b7280; }
+.drawer-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
+.drawer-actions { margin-bottom: 12px; display: flex; gap: 8px; }
+.drawer-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #e5e7eb; }
+.drawer-section { display: flex; flex-direction: column; gap: 6px; }
+.settings-textarea { width: 100%; min-height: 180px; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 13px; padding: 8px; border-radius: 8px; border: 1px solid #e5e7eb; resize: vertical; }
+.form-error { color: #991b1b; font-size: 12px; background: #fee2e2; border-radius: 6px; padding: 6px 8px; }
+.close-drawer { width: 28px; height: 28px; font-size: 14px; }
 
 /* Deltas */
 .delta { font-size: 11px; margin-left: 6px; font-weight: 600; }
@@ -158,14 +178,12 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 @media (max-width: 560px) {
   .grid { grid-template-columns: 1fr; }
   .service-controls { flex-direction: column; }
-  .side-panel { position: static; width: 100%; }
   .main-layout { flex-direction: column; }
 }
 
 @media (max-width: 980px) {
   .controls-grid { grid-template-columns: 1fr; }
   .main-layout { flex-direction: column; }
-  .side-panel { position: static; width: 100%; }
 }
 
 @media (max-width: 900px) {

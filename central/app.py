@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import random
+import shutil
 import subprocess
 import threading
 import time
@@ -68,6 +69,9 @@ _sample_prompt_last_request: Dict[str, float] = {}
 _sample_job_lock = threading.Lock()
 _sample_job_events: Dict[str, threading.Event] = {}
 _sample_job_buffers: Dict[str, List[str]] = {}
+MODEL_POLICY_RATE_LIMIT_S = 5
+_model_policy_last_request: Dict[str, float] = {}
+MODEL_POLICY_LOCK = threading.Lock()
 
 
 def _current_git_sha() -> str:
@@ -340,6 +344,7 @@ def load_model_policy() -> Dict[str, Any]:
 
 
 MODEL_POLICY: Dict[str, Any] = load_model_policy()
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 MODEL_PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)b", re.IGNORECASE)
 
@@ -351,6 +356,45 @@ def _required_models() -> Dict[str, List[str]]:
         "whisper": list(required.get("whisper") or []),
         "sdxl_profiles": list(required.get("sdxl_profiles") or []),
     }
+
+
+def _write_model_policy(policy: Dict[str, Any]) -> None:
+    MODEL_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    if MODEL_POLICY_PATH.exists():
+        backup_path = MODEL_POLICY_PATH.with_name(f"{MODEL_POLICY_PATH.name}.bak.{timestamp}")
+        shutil.copy2(MODEL_POLICY_PATH, backup_path)
+    temp_path = MODEL_POLICY_PATH.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        f.write(f"# Updated {datetime.now(timezone.utc).isoformat()}\n")
+        yaml.safe_dump(policy, f, sort_keys=False)
+    temp_path.replace(MODEL_POLICY_PATH)
+
+
+def _model_policy_rate_limited(remote_addr: str) -> bool:
+    now = time.time()
+    last = _model_policy_last_request.get(remote_addr, 0)
+    if now - last < MODEL_POLICY_RATE_LIMIT_S:
+        return True
+    _model_policy_last_request[remote_addr] = now
+    return False
+
+
+def _missing_models_for_policy(models: List[str]) -> Dict[str, List[str]]:
+    missing: Dict[str, List[str]] = {model: [] for model in models}
+    for m in MACHINES:
+        label = m.get("label") or m.get("machine_id") or "unknown"
+        try:
+            r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+            r.raise_for_status()
+            cap = r.json()
+            available = _available_llm_models(cap)
+        except Exception:
+            available = []
+        for model in models:
+            if model not in available:
+                missing[model].append(label)
+    return {model: machines for model, machines in missing.items() if machines}
 
 
 def _available_llm_models(cap: Dict[str, Any]) -> List[str]:
@@ -862,6 +906,46 @@ def api_generate_sample_prompt():
         log.warning("Sample prompt generation failed: %s", exc)
         fallback = _heuristic_sample_prompt(seed)
         return jsonify({"prompt": fallback, "fallback": True, "error": "agent_generation_failed"}), 503
+
+
+@app.get("/api/settings/model_policy")
+def api_get_model_policy():
+    required = _required_models()
+    return jsonify({"models": required.get("llm") or []})
+
+
+@app.post("/api/settings/model_policy")
+def api_set_model_policy():
+    remote_addr = request.remote_addr or "unknown"
+    if _model_policy_rate_limited(remote_addr):
+        return jsonify({"error": "Rate limited. Try again shortly."}), 429
+
+    payload = request.get_json(silent=True) or {}
+    models = payload.get("models")
+    if models is None or not isinstance(models, list):
+        return jsonify({"error": "Models payload must be a list."}), 400
+
+    cleaned: List[str] = []
+    for model in models:
+        if not isinstance(model, str):
+            return jsonify({"error": "Each model must be a string."}), 400
+        name = model.strip()
+        if not name:
+            continue
+        if not MODEL_ID_RE.match(name):
+            return jsonify({"error": f"Invalid model name: {name}"}), 400
+        cleaned.append(name)
+
+    with MODEL_POLICY_LOCK:
+        policy = load_model_policy()
+        required = policy.setdefault("required", {})
+        required["llm"] = cleaned
+        _write_model_policy(policy)
+        global MODEL_POLICY
+        MODEL_POLICY = policy
+
+    missing = _missing_models_for_policy(cleaned)
+    return jsonify({"ok": True, "changed": True, "models": cleaned, "missing": missing})
 
 
 # -----------------------------------------------------------------------------

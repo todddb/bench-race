@@ -64,12 +64,23 @@
             </div>
 
             <div class="run-row">
-              <button id="run">Run (LLM)</button>
-              <button id="refresh-caps" class="btn-secondary" title="Refresh capabilities">↻ Refresh</button>
-              <label class="toggle-label">
-                <input type="checkbox" id="run-only-ready" checked />
-                Run only ready machines
-              </label>
+              <div class="run-actions-left">
+                <button id="run">Run (LLM)</button>
+                <button id="refresh-caps" class="btn-secondary" title="Refresh capabilities">↻ Refresh</button>
+                <label class="toggle-label">
+                  <input type="checkbox" id="run-only-ready" checked />
+                  Run only ready machines
+                </label>
+              </div>
+              <div class="run-actions-right">
+                <button id="btn-history" class="icon-button" type="button" aria-label="Recent Runs" title="Recent Runs">
+                  <span class="icon" aria-hidden="true">🕒</span>
+                  <span id="history-count" class="icon-badge hidden" aria-hidden="true">0</span>
+                </button>
+                <button id="btn-settings" class="icon-button" type="button" aria-label="Settings (manage central model policy)" title="Settings">
+                  <span class="icon" aria-hidden="true">⚙️</span>
+                </button>
+              </div>
             </div>
             <div id="preflight-banner" class="preflight-banner hidden"></div>
             <div id="status"></div>
@@ -119,20 +130,56 @@
           </div>
         </div>
 
-        <aside class="side-panel card">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">Recent Runs</div>
-              <div class="panel-subtitle">Click a run to view results.</div>
-            </div>
-          </div>
-          <div id="recent-runs-list" class="recent-runs-list"></div>
-        </aside>
       </div>
     </div>
 
     <!-- Toast container for notifications -->
     <div class="toast-container" id="toast-container"></div>
+
+    <div id="history-overlay" class="overlay hidden" aria-hidden="true">
+      <div class="overlay-backdrop" data-overlay-close="history"></div>
+      <aside class="drawer drawer-right" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <header class="drawer-header">
+          <div>
+            <h3 id="history-title">Recent Runs</h3>
+            <p class="drawer-subtitle">Click a run to view results. Pin a run to use as baseline.</p>
+          </div>
+          <button class="icon-button close-drawer" type="button" data-overlay-close="history" aria-label="Close recent runs">✕</button>
+        </header>
+        <div class="drawer-body">
+          <div class="drawer-actions">
+            <button id="refresh-runs" class="btn-secondary btn-small" type="button">Refresh</button>
+          </div>
+          <div id="recent-runs-list" class="recent-runs-list"></div>
+        </div>
+      </aside>
+    </div>
+
+    <div id="settings-overlay" class="overlay hidden" aria-hidden="true">
+      <div class="overlay-backdrop" data-overlay-close="settings"></div>
+      <aside class="drawer drawer-right" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="drawer-header">
+          <div>
+            <h3 id="settings-title">Settings</h3>
+            <p class="drawer-subtitle">Manage the central model policy.</p>
+          </div>
+          <button class="icon-button close-drawer" type="button" data-overlay-close="settings" aria-label="Close settings">✕</button>
+        </header>
+        <div class="drawer-body">
+          <div class="drawer-section">
+            <label for="model-policy-editor" class="control-label">Model Policy (central source of truth)</label>
+            <div class="helper">One model per line. Example: llama3.1:8b-instruct-q8_0</div>
+            <textarea id="model-policy-editor" class="settings-textarea" rows="10"></textarea>
+            <div id="model-policy-error" class="form-error hidden" role="alert"></div>
+            <div id="model-policy-summary" class="helper hidden"></div>
+          </div>
+        </div>
+        <footer class="drawer-footer">
+          <button id="settings-cancel" class="btn-secondary" type="button">Cancel</button>
+          <button id="settings-save" class="btn" type="button">Save</button>
+        </footer>
+      </aside>
+    </div>
 
     <script src="/static/js/app.js"></script>
   </body>
