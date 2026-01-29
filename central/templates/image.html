@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>bench-race</title>
+    <title>bench-race · image</title>
     <link rel="stylesheet" href="/static/css/app.css" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   </head>
@@ -12,14 +12,14 @@
         <h1 class="app-title">Generative AI Benchmark Race</h1>
         <div class="app-actions">
           <nav class="app-nav" aria-label="Benchmark modes">
-            <a class="nav-link active" href="/inference">Inference</a>
-            <a class="nav-link" href="/image">Image</a>
+            <a class="nav-link" href="/inference">Inference</a>
+            <a class="nav-link active" href="/image">Image</a>
           </nav>
           <button id="btn-history" class="icon-button" type="button" aria-label="Recent Runs" title="Recent Runs">
             <span class="icon" aria-hidden="true">🕒</span>
             <span id="history-count" class="icon-badge hidden" aria-hidden="true">0</span>
           </button>
-          <button id="btn-settings" class="icon-button" type="button" aria-label="Settings (manage central model policy)" title="Settings">
+          <button id="btn-settings" class="icon-button" type="button" aria-label="Settings" title="Settings">
             <span class="icon" aria-hidden="true">⚙️</span>
           </button>
         </div>
@@ -34,31 +34,30 @@
                   <div class="prompt-section">
                     <div class="prompt-header">
                       <label for="prompt" class="control-label">Prompt</label>
-                      <button id="generate-sample" class="btn btn-secondary btn-generate" type="button">Generate Sample</button>
                     </div>
-                    <textarea id="prompt" class="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+                    <textarea id="prompt" class="prompt" rows="6">A cinematic portrait of a futuristic city at sunrise, ultra-detailed, volumetric light.</textarea>
                     <div class="prompt-helper helper">
-                      Enter a real-world prompt. Prefer multi-part tasks that require reasoning or code generation — these take longer and stress performance.
+                      SDXL text-to-image prompt used across all agents.
                     </div>
                   </div>
 
                   <div class="run-row">
                     <div class="run-actions-left">
-                      <button id="run" class="btn btn-primary">Start</button>
-                      <button id="refresh-caps" class="btn btn-secondary" title="Refresh capabilities">Refresh</button>
+                      <button id="run" class="btn btn-primary">Run</button>
+                      <button id="refresh-caps" class="btn btn-secondary" title="Refresh checkpoints">Refresh</button>
                     </div>
                   </div>
                 </div>
 
                 <div class="controls-right">
                   <div class="model-row control-field">
-                    <label for="model" class="control-label">Model</label>
-                    <select id="model">
-                      {% for model in model_options %}
-                      <option value="{{ model }}">{{ model }}</option>
+                    <label for="checkpoint" class="control-label">Checkpoint</label>
+                    <select id="checkpoint">
+                      {% for checkpoint in checkpoint_options %}
+                      <option value="{{ checkpoint }}">{{ checkpoint }}</option>
                       {% endfor %}
                     </select>
-                    <div class="helper">Which model to run on each machine.</div>
+                    <div class="helper">Checkpoint to run on each machine.</div>
                   </div>
 
                   <button class="options-header options-toggle" id="options-toggle" type="button">
@@ -67,27 +66,43 @@
                   </button>
                   <div id="options-panel" class="options-grid">
                     <div class="control-field">
-                      <label for="max_tokens" class="control-label">Max tokens</label>
-                      <input id="max_tokens" type="number" value="256" />
-                      <div class="helper">Limits how long the response can be.</div>
+                      <label for="seed-mode" class="control-label">Seed Mode</label>
+                      <select id="seed-mode">
+                        <option value="fixed">Fixed</option>
+                        <option value="random">Random</option>
+                      </select>
                     </div>
 
                     <div class="control-field">
-                      <label for="num_ctx" class="control-label">Context</label>
-                      <input id="num_ctx" type="number" value="4096" />
-                      <div class="helper">How much conversation/prompt can fit. Larger uses more memory.</div>
+                      <label for="seed" class="control-label">Seed</label>
+                      <input id="seed" type="number" value="12345" />
                     </div>
 
                     <div class="control-field">
-                      <label for="temperature" class="control-label">Temperature</label>
-                      <input id="temperature" type="number" step="0.1" value="0.2" />
-                      <div class="helper">Higher = more creative, lower = more deterministic.</div>
+                      <label for="steps" class="control-label">Steps</label>
+                      <input id="steps" type="number" value="30" />
                     </div>
 
                     <div class="control-field">
-                      <label for="repeat" class="control-label">Repeats</label>
+                      <label for="resolution" class="control-label">Resolution</label>
+                      <select id="resolution">
+                        <option value="512x512">512x512</option>
+                        <option value="768x768">768x768</option>
+                        <option value="1024x1024" selected>1024x1024</option>
+                        <option value="1152x896">1152x896</option>
+                        <option value="1344x768">1344x768</option>
+                        <option value="1536x640">1536x640</option>
+                      </select>
+                    </div>
+
+                    <div class="control-field">
+                      <label for="num-images" class="control-label">Num Images</label>
+                      <input id="num-images" type="number" value="1" />
+                    </div>
+
+                    <div class="control-field">
+                      <label for="repeat" class="control-label">Repeat</label>
                       <input id="repeat" type="number" value="1" />
-                      <div class="helper">Run multiple times; first run may be slower due to cold cache.</div>
                     </div>
                   </div>
                 </div>
@@ -101,23 +116,19 @@
             <div class="run-view-main">
               <div class="run-view-title" id="run-view-title"></div>
               <div class="run-view-subtitle" id="run-view-subtitle"></div>
-              <div id="run-warning-banner" class="run-warning-banner hidden">Mock engine used on one or more machines.</div>
             </div>
             <div class="run-view-actions">
               <button id="run-view-return" class="btn-secondary btn-small">Return to live</button>
-              <button id="run-view-pin" class="btn-secondary btn-small">Pin as baseline</button>
-              <button id="run-view-export-csv" class="btn-secondary btn-small">Export CSV</button>
-              <button id="run-view-export-json" class="btn-secondary btn-small">Export JSON</button>
             </div>
           </div>
 
-          <div class="grid">
+          <div class="grid image-grid">
             {% for m in machines %}
-            <div class="pane card" id="pane-{{ m.machine_id }}">
+            <div class="pane card image-pane" id="pane-{{ m.machine_id }}">
               <div class="pane-header">
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
-                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">Model Fit: --</div>
+                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">Checkpoint: --</div>
                 </div>
                 <div class="pane-status">
                   <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
@@ -125,14 +136,9 @@
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
                 </div>
               </div>
-              <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
-                <div class="progress-bar">
-                  <div class="progress-fill" id="sync-progress-fill-{{ m.machine_id }}"></div>
-                </div>
-                <div class="progress-text" id="sync-progress-text-{{ m.machine_id }}">Preparing sync…</div>
-                <ul class="progress-log" id="sync-progress-log-{{ m.machine_id }}"></ul>
+              <div class="image-preview">
+                <img id="preview-{{ m.machine_id }}" class="preview-image" alt="Preview" />
               </div>
-              <pre class="output" id="out-{{ m.machine_id }}"></pre>
               <div class="metrics" id="metrics-{{ m.machine_id }}">
                 <span class="muted">Waiting…</span>
               </div>
@@ -140,11 +146,9 @@
             {% endfor %}
           </div>
         </div>
-
       </div>
     </div>
 
-    <!-- Toast container for notifications -->
     <div class="toast-container" id="toast-container"></div>
 
     <div id="history-overlay" class="overlay hidden" aria-hidden="true">
@@ -153,7 +157,7 @@
         <header class="drawer-header">
           <div>
             <h3 id="history-title">Recent Runs</h3>
-            <p class="drawer-subtitle">Click a run to view results. Pin a run to use as baseline.</p>
+            <p class="drawer-subtitle">Click a run to view results.</p>
           </div>
           <button class="icon-button close-drawer" type="button" data-overlay-close="history" aria-label="Close recent runs">✕</button>
         </header>
@@ -204,6 +208,6 @@
       </aside>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/image.js"></script>
   </body>
 </html>

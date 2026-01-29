@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import io
@@ -22,7 +23,7 @@ import os
 import requests
 import yaml
 import websockets
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 from flask_socketio import SocketIO, emit
 
 
@@ -33,6 +34,7 @@ CENTRAL_DIR = Path(__file__).resolve().parent          # .../bench-race/central
 ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
 CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
 MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
+COMFY_SETTINGS_PATH = CENTRAL_DIR / "config" / "comfyui.yaml"
 
 import sys
 if str(ROOT_DIR) not in sys.path:
@@ -136,13 +138,152 @@ def _prompt_preview(prompt: str, limit: int = 120) -> str:
 def _run_summary(record: Dict[str, Any]) -> Dict[str, Any]:
     machines = record.get("machines") or []
     has_mock = any(m.get("engine") == "mock" for m in machines)
+    run_type = record.get("type") or "inference"
     return {
         "run_id": record.get("run_id"),
         "timestamp": record.get("timestamp"),
         "model": record.get("model"),
+        "type": run_type,
         "prompt_preview": _prompt_preview(record.get("prompt_text", "")),
         "has_mock": has_mock,
     }
+
+
+def _default_comfy_settings() -> Dict[str, Any]:
+    return {
+        "base_url": "",
+        "models_path": "",
+        "central_cache_path": str(CENTRAL_DIR / "model_cache" / "comfyui"),
+        "checkpoint_urls": [],
+    }
+
+
+def _load_comfy_settings() -> Dict[str, Any]:
+    if not COMFY_SETTINGS_PATH.exists():
+        return _default_comfy_settings()
+    with open(COMFY_SETTINGS_PATH, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f) or {}
+    comfy = payload.get("comfyui") if isinstance(payload, dict) else {}
+    settings = _default_comfy_settings()
+    if isinstance(comfy, dict):
+        settings.update({k: v for k, v in comfy.items() if v is not None})
+    return settings
+
+
+def _save_comfy_settings(settings: Dict[str, Any]) -> None:
+    COMFY_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"comfyui": settings}
+    with open(COMFY_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+
+
+def _comfy_cache_dir(settings: Optional[Dict[str, Any]] = None) -> Path:
+    conf = settings or _load_comfy_settings()
+    path = Path(conf.get("central_cache_path") or (CENTRAL_DIR / "model_cache" / "comfyui"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _checkpoint_entry_from_line(line: str) -> Optional[Dict[str, str]]:
+    if not line:
+        return None
+    parts = [part.strip() for part in line.split("|") if part.strip()]
+    if not parts:
+        return None
+    entry = {"url": parts[0]}
+    if len(parts) > 1:
+        entry["sha256"] = parts[1]
+    return entry
+
+
+def _checkpoint_filename_from_url(url: str) -> str:
+    name = url.split("?")[0].rstrip("/").split("/")[-1]
+    return name or url
+
+
+def _checkpoint_entries(settings: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    conf = settings or _load_comfy_settings()
+    urls = conf.get("checkpoint_urls") or []
+    entries = []
+    for line in urls:
+        entry = _checkpoint_entry_from_line(line)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def _list_cached_checkpoints(settings: Optional[Dict[str, Any]] = None) -> List[str]:
+    cache_dir = _comfy_cache_dir(settings)
+    if not cache_dir.exists():
+        return []
+    return sorted([p.name for p in cache_dir.iterdir() if p.is_file()])
+
+
+def _ensure_checkpoint_cached(checkpoint_name: str, settings: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    if not checkpoint_name:
+        return "Missing checkpoint name."
+    conf = settings or _load_comfy_settings()
+    cache_dir = _comfy_cache_dir(conf)
+    target_path = cache_dir / checkpoint_name
+    if target_path.exists():
+        return None
+
+    entries = _checkpoint_entries(conf)
+    url_entry = next(
+        (entry for entry in entries if _checkpoint_filename_from_url(entry["url"]) == checkpoint_name),
+        None,
+    )
+    if not url_entry:
+        return f"Checkpoint URL not configured for {checkpoint_name}."
+
+    url = url_entry["url"]
+    sha256 = url_entry.get("sha256")
+    try:
+        with requests.get(url, stream=True, timeout=20) as resp:
+            resp.raise_for_status()
+            hasher = hashlib.sha256() if sha256 else None
+            with open(target_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    if hasher:
+                        hasher.update(chunk)
+        if hasher and sha256:
+            digest = hasher.hexdigest()
+            if digest.lower() != sha256.lower():
+                target_path.unlink(missing_ok=True)
+                return f"Checksum mismatch for {checkpoint_name}."
+    except Exception as exc:
+        if target_path.exists():
+            target_path.unlink(missing_ok=True)
+        return f"Failed to download checkpoint: {exc}"
+    return None
+
+
+def _run_images_dir(run_id: str) -> Path:
+    path = RUNS_DIR / run_id / "images"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_image_payload(run_id: str, machine_id: str, filename: str, b64_data: str) -> Optional[str]:
+    if not b64_data:
+        return None
+    try:
+        binary = base64.b64decode(b64_data)
+    except Exception:
+        return None
+    base_dir = _run_images_dir(run_id) / machine_id
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / filename
+    try:
+        with open(path, "wb") as f:
+            f.write(binary)
+    except OSError:
+        return None
+    images_root = _run_images_dir(run_id)
+    return str(path.relative_to(images_root))
 
 
 def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Optional[Dict[str, Any]]:
@@ -163,44 +304,130 @@ def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Opt
 
 
 def _update_run_from_event(event: Dict[str, Any]) -> None:
-    if event.get("type") != "job_done":
-        return
+    event_type = event.get("type")
     job_id = event.get("job_id")
-    if not job_id:
+    if not job_id or not event_type:
         return
-    with RUN_LOCK:
-        job_info = JOB_RUN_MAP.get(job_id)
-        if not job_info:
-            return
-        run_id = job_info["run_id"]
-        record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
-        if not record:
-            return
-        machine_id = job_info["machine_id"]
-        payload = event.get("payload") or {}
-        machine_entry = next(
-            (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
-            None,
-        )
-        if not machine_entry:
-            machine_entry = {"machine_id": machine_id, "label": job_info.get("label")}
-            record.setdefault("machines", []).append(machine_entry)
-        machine_entry.update(
-            {
-                "status": "complete",
-                "ttft_ms": payload.get("ttft_ms"),
-                "tok_s": payload.get("gen_tokens_per_s"),
-                "total_ms": payload.get("total_ms"),
-                "tokens": payload.get("gen_tokens"),
-                "engine": payload.get("engine"),
-                "model": payload.get("model"),
-                "fallback_reason": payload.get("fallback_reason"),
-            }
-        )
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        RUN_CACHE[run_id] = record
-        _write_run_record(record)
-        JOB_RUN_MAP.pop(job_id, None)
+
+    if event_type == "job_done":
+        with RUN_LOCK:
+            job_info = JOB_RUN_MAP.get(job_id)
+            if not job_info:
+                return
+            run_id = job_info["run_id"]
+            record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+            if not record:
+                return
+            machine_id = job_info["machine_id"]
+            payload = event.get("payload") or {}
+            machine_entry = next(
+                (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                None,
+            )
+            if not machine_entry:
+                machine_entry = {"machine_id": machine_id, "label": job_info.get("label")}
+                record.setdefault("machines", []).append(machine_entry)
+            machine_entry.update(
+                {
+                    "status": "complete",
+                    "ttft_ms": payload.get("ttft_ms"),
+                    "tok_s": payload.get("gen_tokens_per_s"),
+                    "total_ms": payload.get("total_ms"),
+                    "tokens": payload.get("gen_tokens"),
+                    "engine": payload.get("engine"),
+                    "model": payload.get("model"),
+                    "fallback_reason": payload.get("fallback_reason"),
+                }
+            )
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            RUN_CACHE[run_id] = record
+            _write_run_record(record)
+            JOB_RUN_MAP.pop(job_id, None)
+        return
+
+    if event_type.startswith("image_"):
+        with RUN_LOCK:
+            job_info = JOB_RUN_MAP.get(job_id)
+            if not job_info:
+                return
+            run_id = job_info["run_id"]
+            record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+            if not record:
+                return
+            machine_id = job_info["machine_id"]
+            payload = event.get("payload") or {}
+            machine_entry = next(
+                (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                None,
+            )
+            if not machine_entry:
+                machine_entry = {"machine_id": machine_id, "label": job_info.get("label")}
+                record.setdefault("machines", []).append(machine_entry)
+
+            if event_type == "image_started":
+                machine_entry.update(
+                    {
+                        "status": "running",
+                        "queue_latency_ms": payload.get("queue_latency_ms"),
+                        "started_at": payload.get("started_at"),
+                    }
+                )
+            elif event_type == "image_progress":
+                machine_entry.update(
+                    {
+                        "status": "running",
+                        "step": payload.get("step"),
+                        "total_steps": payload.get("total_steps"),
+                    }
+                )
+            elif event_type == "image_preview":
+                image_b64 = payload.get("image_b64")
+                filename = payload.get("filename") or "preview.jpg"
+                saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+                if saved_path:
+                    machine_entry["preview_path"] = saved_path
+                machine_entry.update(
+                    {
+                        "status": "running",
+                        "step": payload.get("step"),
+                        "total_steps": payload.get("total_steps"),
+                    }
+                )
+            elif event_type == "image_complete":
+                images_payload = payload.get("images") or []
+                stored_images = []
+                for idx, image in enumerate(images_payload):
+                    filename = image.get("filename") or f"image_{idx + 1}.png"
+                    saved_path = _save_image_payload(run_id, machine_id, filename, image.get("image_b64") or "")
+                    if saved_path:
+                        stored_images.append(saved_path)
+                machine_entry.update(
+                    {
+                        "status": "complete",
+                        "queue_latency_ms": payload.get("queue_latency_ms"),
+                        "gen_time_ms": payload.get("gen_time_ms"),
+                        "total_ms": payload.get("total_ms"),
+                        "images": stored_images,
+                        "steps": payload.get("steps"),
+                        "resolution": payload.get("resolution"),
+                        "seed": payload.get("seed"),
+                        "checkpoint": payload.get("checkpoint"),
+                        "num_images": payload.get("num_images"),
+                    }
+                )
+                JOB_RUN_MAP.pop(job_id, None)
+            elif event_type == "image_error":
+                machine_entry.update(
+                    {
+                        "status": "error",
+                        "error": payload.get("message") or "Generation failed",
+                    }
+                )
+                JOB_RUN_MAP.pop(job_id, None)
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            RUN_CACHE[run_id] = record
+            _write_run_record(record)
+        return
 
 
 def _sample_prompt_rate_limited(remote_addr: str) -> bool:
@@ -536,6 +763,23 @@ def index():
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
+@app.get("/inference")
+def inference():
+    model_options = _required_models().get("llm") or []
+    return render_template("index.html", machines=MACHINES, model_options=model_options)
+
+
+@app.get("/image")
+def image():
+    settings = _load_comfy_settings()
+    checkpoint_options = _list_cached_checkpoints(settings)
+    if not checkpoint_options:
+        checkpoint_options = [
+            _checkpoint_filename_from_url(entry["url"]) for entry in _checkpoint_entries(settings)
+        ]
+    return render_template("image.html", machines=MACHINES, checkpoint_options=checkpoint_options)
+
+
 @app.get("/admin")
 def admin():
     return render_template("admin.html")
@@ -635,6 +879,48 @@ def api_status():
     return jsonify({"model": selected_model, "required": required, "machines": statuses})
 
 
+@app.get("/api/image/status")
+def api_image_status():
+    checkpoint = request.args.get("checkpoint") or ""
+    statuses = []
+    for m in MACHINES:
+        last_checked = time.time()
+        try:
+            r = requests.get(f"{m['agent_base_url'].rstrip('/')}/api/comfy/health", timeout=3)
+            r.raise_for_status()
+            cap = r.json()
+            checkpoints = cap.get("checkpoints") or []
+            has_checkpoint = bool(checkpoint and checkpoint in checkpoints)
+            statuses.append(
+                {
+                    "machine_id": cap.get("machine_id") or m.get("machine_id"),
+                    "label": cap.get("label") or m.get("label"),
+                    "reachable": True,
+                    "comfy_running": cap.get("running", False),
+                    "checkpoints": checkpoints,
+                    "has_checkpoint": has_checkpoint,
+                    "missing_checkpoint": checkpoint if checkpoint and not has_checkpoint else None,
+                    "last_checked": last_checked,
+                    "error": cap.get("error"),
+                }
+            )
+        except Exception as e:
+            statuses.append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "reachable": False,
+                    "comfy_running": False,
+                    "checkpoints": [],
+                    "has_checkpoint": False,
+                    "missing_checkpoint": checkpoint or None,
+                    "last_checked": last_checked,
+                    "error": str(e),
+                }
+            )
+    return jsonify({"checkpoint": checkpoint, "machines": statuses})
+
+
 @app.get("/api/runs")
 def api_runs():
     limit = int(request.args.get("limit", 20))
@@ -670,6 +956,12 @@ def api_delete_run(run_id: str):
     except OSError as exc:
         log.warning("Failed to delete run %s: %s", path, exc)
         return jsonify({"error": "Failed to delete run"}), 500
+    images_dir = RUNS_DIR / run_id
+    if images_dir.exists():
+        try:
+            shutil.rmtree(images_dir)
+        except OSError as exc:
+            log.warning("Failed to delete run images %s: %s", run_id, exc)
     with RUN_LOCK:
         RUN_CACHE.pop(run_id, None)
     return jsonify({"ok": True})
@@ -734,6 +1026,26 @@ def api_run_export_csv(run_id: str):
     )
 
 
+@app.get("/api/runs/<run_id>/images/<path:filename>")
+def api_run_image(run_id: str, filename: str):
+    if not _valid_run_id(run_id):
+        return jsonify({"error": "Invalid run id"}), 400
+    file_path = RUNS_DIR / run_id / "images" / filename
+    if not file_path.exists():
+        return jsonify({"error": "Image not found"}), 404
+    return send_file(file_path)
+
+
+@app.get("/api/comfy/checkpoints/<path:checkpoint_name>")
+def api_get_checkpoint(checkpoint_name: str):
+    settings = _load_comfy_settings()
+    cache_dir = _comfy_cache_dir(settings)
+    file_path = cache_dir / checkpoint_name
+    if not file_path.exists():
+        return jsonify({"error": "Checkpoint not found"}), 404
+    return send_file(file_path, as_attachment=True)
+
+
 @app.post("/api/machines/<machine_id>/sync")
 def api_sync_models(machine_id: str):
     required = _required_models()
@@ -766,6 +1078,35 @@ def api_sync_models(machine_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.post("/api/machines/<machine_id>/sync_image")
+def api_sync_image_models(machine_id: str):
+    settings = _load_comfy_settings()
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+    try:
+        r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/api/comfy/health", timeout=3)
+        r.raise_for_status()
+        cap = r.json()
+        available = cap.get("checkpoints") or []
+        required = _list_cached_checkpoints(settings)
+        missing = [ckpt for ckpt in required if ckpt not in available]
+        if not missing:
+            return jsonify({"message": "No missing checkpoints"})
+        sync_resp = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync",
+            json={
+                "checkpoints": missing,
+                "central_base_url": request.host_url.rstrip("/"),
+            },
+            timeout=5,
+        )
+        sync_resp.raise_for_status()
+        return jsonify(sync_resp.json())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.post("/api/start_llm")
 def api_start_llm():
     payload = request.get_json(force=True) or {}
@@ -787,6 +1128,7 @@ def api_start_llm():
     run_record: Dict[str, Any] = {
         "run_id": run_id,
         "timestamp": run_timestamp.isoformat(),
+        "type": "inference",
         "model": model,
         "prompt_text": prompt,
         "prompt_hash": prompt_hash,
@@ -872,6 +1214,128 @@ def api_start_llm():
         _prune_old_runs()
 
     return jsonify({"run_id": run_id, "results": results})
+
+
+@app.post("/api/start_image")
+def api_start_image():
+    payload = request.get_json(force=True) or {}
+
+    prompt = payload.get("prompt", "")
+    checkpoint = payload.get("checkpoint", "")
+    seed_mode = payload.get("seed_mode", "fixed")
+    seed = payload.get("seed")
+    steps = int(payload.get("steps", 30))
+    width = int(payload.get("width", 1024))
+    height = int(payload.get("height", 1024))
+    num_images = int(payload.get("num_images", 1))
+    repeat = int(payload.get("repeat", 1))
+
+    if seed_mode == "random" or seed is None:
+        seed = random.randint(1, 2**31 - 1)
+
+    settings = _load_comfy_settings()
+    checkpoint_error = _ensure_checkpoint_cached(checkpoint, settings)
+    if checkpoint_error:
+        return jsonify({"error": checkpoint_error}), 400
+
+    run_timestamp = datetime.now(timezone.utc)
+    run_id = _new_run_id(run_timestamp)
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+    run_record: Dict[str, Any] = {
+        "run_id": run_id,
+        "timestamp": run_timestamp.isoformat(),
+        "type": "image",
+        "model": checkpoint,
+        "prompt_text": prompt,
+        "prompt_hash": prompt_hash,
+        "settings": {
+            "checkpoint": checkpoint,
+            "seed_mode": seed_mode,
+            "seed": seed,
+            "steps": steps,
+            "width": width,
+            "height": height,
+            "num_images": num_images,
+            "repeat": repeat,
+        },
+        "central_git_sha": _current_git_sha(),
+        "machines": [],
+    }
+
+    results = []
+    for m in MACHINES:
+        try:
+            health = requests.get(
+                f"{m['agent_base_url'].rstrip('/')}/api/comfy/health",
+                timeout=3,
+            )
+            health.raise_for_status()
+            cap = health.json()
+            checkpoints = cap.get("checkpoints") or []
+            if checkpoint and checkpoint not in checkpoints:
+                run_record["machines"].append(
+                    {
+                        "machine_id": m.get("machine_id"),
+                        "label": m.get("label"),
+                        "status": "blocked",
+                        "error": "Missing checkpoint",
+                    }
+                )
+                results.append({"machine_id": m.get("machine_id"), "skipped": True, "reason": "missing_checkpoint"})
+                continue
+
+            resp = requests.post(
+                f"{m['agent_base_url'].rstrip('/')}/api/comfy/txt2img",
+                json={
+                    "run_id": run_id,
+                    "prompt": prompt,
+                    "checkpoint": checkpoint,
+                    "seed": seed,
+                    "steps": steps,
+                    "width": width,
+                    "height": height,
+                    "num_images": num_images,
+                    "repeat": repeat,
+                },
+                timeout=5,
+            )
+            resp.raise_for_status()
+            job = resp.json()
+            agent_job_id = job.get("agent_job_id")
+            if agent_job_id:
+                JOB_RUN_MAP[agent_job_id] = {
+                    "run_id": run_id,
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                }
+            results.append({"machine_id": m.get("machine_id"), "job": job})
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "pending",
+                    "job_id": agent_job_id,
+                    "checkpoint": checkpoint,
+                }
+            )
+        except Exception as exc:
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+            results.append({"machine_id": m.get("machine_id"), "error": str(exc)})
+
+    with RUN_LOCK:
+        RUN_CACHE[run_id] = run_record
+        _write_run_record(run_record)
+        _prune_old_runs()
+
+    return jsonify({"run_id": run_id, "seed": seed, "results": results})
 
 
 @app.post("/api/generate_sample_prompt")
@@ -968,6 +1432,22 @@ def api_set_model_policy():
 
     missing = _missing_models_for_policy(cleaned)
     return jsonify({"ok": True, "changed": True, "models": cleaned, "missing": missing})
+
+
+@app.get("/api/settings/comfy")
+def api_get_comfy_settings():
+    settings = _load_comfy_settings()
+    return jsonify(settings)
+
+
+@app.post("/api/settings/comfy")
+def api_set_comfy_settings():
+    payload = request.get_json(force=True) or {}
+    settings = _default_comfy_settings()
+    settings.update({k: v for k, v in payload.items() if v is not None})
+    settings["checkpoint_urls"] = settings.get("checkpoint_urls") or []
+    _save_comfy_settings(settings)
+    return jsonify({"ok": True, "settings": settings})
 
 
 # -----------------------------------------------------------------------------

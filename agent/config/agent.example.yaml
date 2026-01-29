@@ -1,10 +1,10 @@
-# agent/config/agent.yaml.example
+# agent/config/agent.example.yaml
 #
 # Per-machine configuration for a bench-race agent.
 # This file is intentionally NOT tracked when copied to agent.yaml.
 #
 # Central controls required models and policies.
-# This file only configures how the agent runs and connects to Ollama.
+# This file only configures how the agent runs and connects to backends.
 
 # Unique ID for this machine (must match central machines.yaml)
 machine_id: "example-machine"
@@ -17,7 +17,6 @@ bind_host: "0.0.0.0"
 bind_port: 9001
 
 # Base URL for the local Ollama instance
-# In most cases this should be localhost
 ollama_base_url: "http://127.0.0.1:11434"
 
 # Central base URL (used for ComfyUI checkpoint sync)
@@ -32,18 +31,3 @@ comfyui:
   host: "127.0.0.1"
   port: 8188
   checkpoints_dir: "/opt/comfyui/models/checkpoints"
-
-# Optional: override if Ollama is remote or non-standard
-# ollama_timeout_s: 2.0
-
-# NOTE:
-# Model lists are no longer defined here.
-# Required models are defined centrally in:
-#   central/config/model_policy.yaml
-#
-# Any model lists found here will be ignored or deprecated.
-
-# Deprecated (kept for reference only)
-# llm_models:
-#   - llama3.1:8b-instruct-q8_0
-#   - llama3.1:70b-instruct-q4_K_M

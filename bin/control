@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+import yaml
 
 # Resolve paths relative to repo root
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -67,6 +68,8 @@ OLLAMA_PORT = int(os.environ.get("OLLAMA_PORT", "11434"))
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 OLLAMA_PIDFILE = PIDS_DIR / "ollama.pid"
 OLLAMA_LOGFILE = LOG_DIR / "ollama.log"
+COMFY_PIDFILE = PIDS_DIR / "comfyui.pid"
+COMFY_LOGFILE = LOG_DIR / "comfyui.log"
 
 
 def log(msg: str) -> None:
@@ -218,6 +221,76 @@ def ensure_ollama() -> bool:
     return True
 
 
+def load_agent_config() -> Dict[str, Any]:
+    config_path = REPO_ROOT / "agent" / "config" / "agent.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def comfy_settings() -> Dict[str, Any]:
+    config = load_agent_config()
+    return config.get("comfyui") or {}
+
+
+def comfy_install_dir() -> Path:
+    config = comfy_settings()
+    path = config.get("install_dir") or os.environ.get("COMFYUI_DIR")
+    if path:
+        return Path(path)
+    return REPO_ROOT / "agent" / "third_party" / "comfyui"
+
+
+def comfy_port() -> int:
+    config = comfy_settings()
+    return int(config.get("port") or 8188)
+
+
+def ensure_comfyui() -> bool:
+    config = comfy_settings()
+    if config.get("enabled") is False:
+        return True
+    pid = read_pid(COMFY_PIDFILE)
+    if pid and pid_is_running(pid):
+        return True
+
+    port = comfy_port()
+    if is_port_listening(port):
+        return True
+
+    comfy_dir = comfy_install_dir()
+    venv_dir = comfy_dir / ".venv"
+    if not comfy_dir.exists() or not venv_dir.exists():
+        log("WARN: ComfyUI not installed. Run scripts/install_comfyui_* to install.")
+        return False
+
+    host = config.get("host") or "0.0.0.0"
+    cmd = [
+        get_venv_python(venv_dir),
+        "main.py",
+        "--listen",
+        host,
+        "--port",
+        str(port),
+    ]
+    log(f"Starting ComfyUI on {host}:{port}...")
+    with open(COMFY_LOGFILE, "a") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(comfy_dir),
+            stdout=logf,
+            stderr=logf,
+            start_new_session=True,
+        )
+    write_pid(COMFY_PIDFILE, proc.pid)
+    time.sleep(1)
+    return True
+
+
 def get_venv_python(venv_path: Path) -> str:
     """Get path to Python executable in venv."""
     if platform.system() == "Windows":
@@ -276,6 +349,8 @@ def start_service(
     # Ensure Ollama if needed
     if config.get("requires_ollama"):
         ensure_ollama()
+    if component == "agent":
+        ensure_comfyui()
 
     # Get host and port
     host = os.environ.get(config["host_env"], config["default_host"])
@@ -422,6 +497,25 @@ def stop_service(component: str, output_json: bool = False) -> Dict[str, Any]:
 
     remove_pid(pidfile)
 
+    if component == "agent":
+        comfy_pid = read_pid(COMFY_PIDFILE)
+        if comfy_pid and pid_is_running(comfy_pid):
+            log(f"Stopping ComfyUI (pid {comfy_pid})...")
+            try:
+                os.kill(comfy_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            for _ in range(20):
+                if not pid_is_running(comfy_pid):
+                    break
+                time.sleep(0.2)
+            if pid_is_running(comfy_pid):
+                try:
+                    os.kill(comfy_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            remove_pid(COMFY_PIDFILE)
+
     result = {
         "component": component,
         "action": "stop",
@@ -470,9 +564,11 @@ def status_service(component: str, output_json: bool = False) -> Dict[str, Any]:
             if "uptime_seconds" in process_info:
                 result["info"] += f", uptime {process_info['uptime_seconds']}s"
 
-    # Add extra info for agent
-    if component == "agent" and not output_json:
-        ollama_info = "REACHABLE" if check_ollama_available() else "NOT REACHABLE"
+    if component == "agent":
+        comfy_pid = read_pid(COMFY_PIDFILE)
+        comfy_running = bool(comfy_pid and pid_is_running(comfy_pid))
+        result["comfyui_running"] = comfy_running
+        result["comfyui_pid"] = comfy_pid if comfy_running else None
 
     if output_json:
         print(json.dumps(result))
@@ -485,6 +581,8 @@ def status_service(component: str, output_json: bool = False) -> Dict[str, Any]:
         if component == "agent":
             ollama_status = "REACHABLE" if check_ollama_available() else "STOPPED"
             log(f"Ollama: {ollama_status} ({OLLAMA_URL})")
+            comfy_status = "RUNNING" if result.get("comfyui_running") else "STOPPED"
+            log(f"ComfyUI: {comfy_status} (port {comfy_port()})")
 
         log(f"Log file: {logfile}")
 
