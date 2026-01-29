@@ -27,24 +27,21 @@
             <div class="controls-grid">
               <div class="controls-columns">
                 <div class="controls-left">
-                  <div class="prompt-header">
-                    <label for="prompt" class="control-label">Prompt</label>
-                    <button id="generate-sample" class="btn btn-secondary" type="button">Generate Sample</button>
+                  <div class="prompt-section">
+                    <div class="prompt-header">
+                      <label for="prompt" class="control-label">Prompt</label>
+                      <button id="generate-sample" class="btn btn-secondary btn-generate" type="button">Generate Sample</button>
+                    </div>
+                    <textarea id="prompt" class="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+                    <div class="prompt-helper helper">
+                      Enter a real-world prompt. Prefer multi-part tasks that require reasoning or code generation — these take longer and stress performance.
+                    </div>
                   </div>
-                  <div class="prompt-desc">
-                    Enter a real-world prompt. Prefer multi-part tasks that require reasoning or code generation — these take longer and stress performance.
-                  </div>
-                  <textarea id="prompt" class="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
-                  <div class="prompt-helper helper">Creates a unique, realistic prompt intended to take some time to process.</div>
 
                   <div class="run-row">
                     <div class="run-actions-left">
                       <button id="run" class="btn btn-primary">Start</button>
                       <button id="refresh-caps" class="btn btn-secondary" title="Refresh capabilities">Refresh</button>
-                      <label class="toggle-label">
-                        <input type="checkbox" id="run-only-ready" checked />
-                        Run only ready machines
-                      </label>
                     </div>
                   </div>
                 </div>
@@ -60,11 +57,11 @@
                     <div class="helper">Which model to run on each machine.</div>
                   </div>
 
-                  <div class="options-header">
+                  <button class="options-header" id="options-toggle" type="button">
                     <span class="control-label">Options</span>
-                    <span class="options-caret">▸</span>
-                  </div>
-                  <div class="options-grid">
+                    <span class="options-caret">▾</span>
+                  </button>
+                  <div id="options-panel" class="options-grid">
                     <div class="control-field">
                       <label for="max_tokens" class="control-label">Max tokens</label>
                       <input id="max_tokens" type="number" value="256" />
@@ -185,8 +182,8 @@
           </div>
         </div>
         <footer class="drawer-footer">
-          <button id="settings-cancel" class="btn-secondary" type="button">Cancel</button>
-          <button id="settings-save" class="btn" type="button">Save</button>
+          <button id="settings-cancel" class="btn btn-secondary" type="button">Cancel</button>
+          <button id="settings-save" class="btn btn-primary" type="button">Save</button>
         </footer>
       </aside>
     </div>
