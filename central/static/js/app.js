@@ -9,6 +9,7 @@ const STATUS_POLL_MS = 12000;
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
+const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 
 let baselineRunId = localStorage.getItem(BASELINE_KEY);
 let baselineRun = null;
@@ -26,6 +27,16 @@ const FALLBACK_REASONS = {
   missing_model: "Model not installed on Ollama",
   stream_error: "Streaming error occurred",
   unknown: "Unknown reason",
+};
+
+const showToast = (message, type = "info") => {
+  const container = document.getElementById("toast-container");
+  if (!container) return;
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3500);
 };
 
 const handleJobResults = (results) => {
@@ -619,7 +630,7 @@ const renderRecentRuns = () => {
       ${warningText}
       <div class="recent-run-actions">
         <button class="btn-secondary btn-small" data-action="view">View</button>
-        <button class="btn-secondary btn-small" data-action="pin">Pin baseline</button>
+        <button class="btn-secondary btn-small" data-action="pin" title="Pin baseline">Baseline</button>
         <button class="btn-secondary btn-small" data-action="csv">CSV</button>
         <button class="btn-secondary btn-small" data-action="json">JSON</button>
       </div>
@@ -792,23 +803,36 @@ const runButton = document.getElementById("run");
 const generateSampleButton = document.getElementById("generate-sample");
 const historyButton = document.getElementById("btn-history");
 const settingsButton = document.getElementById("btn-settings");
+const optionsToggle = document.getElementById("options-toggle");
+const optionsCaret = document.querySelector(".options-caret");
 const SAMPLE_PROMPT_COOLDOWN_MS = 10000;
 let samplePromptCooldownUntil = 0;
 
+const setOptionsExpanded = (expanded) => {
+  document.body.classList.toggle("options-collapsed", !expanded);
+  if (optionsCaret) {
+    optionsCaret.textContent = expanded ? "▾" : "▸";
+  }
+  localStorage.setItem(OPTIONS_STORAGE_KEY, expanded ? "true" : "false");
+};
+
+const initOptionsState = () => {
+  const stored = localStorage.getItem(OPTIONS_STORAGE_KEY);
+  const expanded = stored !== "false";
+  setOptionsExpanded(expanded);
+};
+
+initOptionsState();
+optionsToggle?.addEventListener("click", () => {
+  const isCollapsed = document.body.classList.contains("options-collapsed");
+  setOptionsExpanded(isCollapsed);
+});
+
 const startRun = async () => {
-  const runOnlyReady = document.getElementById("run-only-ready")?.checked ?? true;
   const { blocked, ready } = getPreflightStatus();
 
-  // If "run only ready" is ON, skip blocked machines
-  // If "run only ready" is OFF, block entire run if any machine fails
-  if (!runOnlyReady && blocked.length > 0) {
-    const reasons = blocked.map((b) => `${b.label || b.machine_id}: ${b.reason}`).join("\n");
-    alert(`Cannot run: some machines are not ready.\n\n${reasons}\n\nEnable "Run only ready machines" to skip blocked machines.`);
-    return;
-  }
-
   if (ready.length === 0) {
-    alert("No machines are ready to run. Check agent status or model availability.");
+    showToast("No ready machines available.", "info");
     return;
   }
 
@@ -819,17 +843,13 @@ const startRun = async () => {
     num_ctx: parseInt(document.getElementById("num_ctx").value, 10),
     temperature: parseFloat(document.getElementById("temperature").value),
     repeat: parseInt(document.getElementById("repeat").value, 10),
+    machine_ids: ready.map((m) => m.machine_id),
   };
-
-  // If running only ready machines, specify which ones
-  if (runOnlyReady && blocked.length > 0) {
-    payload.machine_ids = ready.map((m) => m.machine_id);
-  }
 
   paneMap.forEach(({ out, metrics }, machineId) => {
     // Check if this machine is blocked
     const isBlocked = blocked.some((b) => b.machine_id === machineId);
-    if (runOnlyReady && isBlocked) {
+    if (isBlocked) {
       out.textContent = "Skipped (not ready)";
       metrics.innerHTML = `<span class="muted">Machine not ready</span>`;
       liveOutput.set(machineId, out.textContent);
