@@ -8,6 +8,7 @@ const liveState = new Map();
 const STATUS_POLL_MS = 12000;
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
+const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
 
 let baselineRunId = localStorage.getItem(BASELINE_KEY);
 let baselineRun = null;
@@ -16,6 +17,8 @@ let viewingRunId = null;
 let currentRunData = null;
 let liveRunId = null;
 let recentRuns = [];
+let activeOverlay = null;
+let lastOverlayFocus = null;
 
 // Fallback reason display strings
 const FALLBACK_REASONS = {
@@ -83,6 +86,91 @@ const formatDelta = (value, baselineValue, higherIsBetter, unit, decimals = 1) =
   const isGood = higherIsBetter ? delta > 0 : delta < 0;
   const sign = delta > 0 ? "+" : "-";
   return `<span class="delta ${isGood ? "good" : "bad"}">Δ ${sign}${Math.abs(delta).toFixed(decimals)}${unit}</span>`;
+};
+
+const isEditableTarget = (target) =>
+  target instanceof HTMLInputElement ||
+  target instanceof HTMLTextAreaElement ||
+  target?.isContentEditable;
+
+const getFocusableElements = (container) => {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+};
+
+const trapFocus = (event, container) => {
+  const focusable = getFocusableElements(container);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+};
+
+const openOverlay = (overlayId) => {
+  const overlay = document.getElementById(`${overlayId}-overlay`);
+  if (!overlay) return;
+  if (activeOverlay && activeOverlay !== overlayId) {
+    closeOverlay(activeOverlay);
+  }
+  overlay.classList.remove("hidden");
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
+  activeOverlay = overlayId;
+  lastOverlayFocus = document.activeElement;
+  const drawer = overlay.querySelector(".drawer");
+  const focusable = getFocusableElements(drawer);
+  if (focusable.length) {
+    focusable[0].focus();
+  }
+  const keyHandler = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeOverlay(overlayId);
+      return;
+    }
+    if (event.key === "Tab") {
+      trapFocus(event, drawer);
+    }
+  };
+  overlay.dataset.keyHandler = "true";
+  overlay._keyHandler = keyHandler;
+  document.addEventListener("keydown", keyHandler);
+};
+
+const closeOverlay = (overlayId) => {
+  const overlay = document.getElementById(`${overlayId}-overlay`);
+  if (!overlay) return;
+  overlay.classList.remove("open");
+  overlay.classList.add("hidden");
+  overlay.setAttribute("aria-hidden", "true");
+  activeOverlay = null;
+  const keyHandler = overlay._keyHandler;
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler);
+  }
+  overlay._keyHandler = null;
+  if (lastOverlayFocus && typeof lastOverlayFocus.focus === "function") {
+    lastOverlayFocus.focus();
+  }
+};
+
+const toggleOverlay = (overlayId) => {
+  if (activeOverlay === overlayId) {
+    closeOverlay(overlayId);
+  } else {
+    openOverlay(overlayId);
+  }
 };
 
 const renderEngineBadge = (engine, fallbackReason) => {
@@ -472,8 +560,21 @@ const fetchRecentRuns = async () => {
     if (!response.ok) return;
     recentRuns = await response.json();
     renderRecentRuns();
+    updateHistoryBadge();
   } catch (error) {
     console.error("Failed to fetch runs", error);
+  }
+};
+
+const updateHistoryBadge = () => {
+  const badge = document.getElementById("history-count");
+  if (!badge) return;
+  const count = recentRuns.length;
+  badge.textContent = String(count);
+  if (count > 0) {
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
   }
 };
 
@@ -556,6 +657,45 @@ const loadRun = async (runId) => {
     renderRunToPanes(run);
   } catch (error) {
     console.error("Failed to load run", error);
+  }
+};
+
+const loadModelPolicy = async () => {
+  const response = await fetch(MODEL_POLICY_ENDPOINT);
+  if (!response.ok) {
+    throw new Error("Failed to load model policy");
+  }
+  return response.json();
+};
+
+const updateModelOptions = (models) => {
+  const select = document.getElementById("model");
+  if (!select) return;
+  const currentValue = select.value;
+  select.innerHTML = "";
+  (models || []).forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    select.appendChild(option);
+  });
+  if (models?.includes(currentValue)) {
+    select.value = currentValue;
+  } else if (models?.length) {
+    select.value = models[0];
+  }
+};
+
+const setPolicyFeedback = (summary, error) => {
+  const errorEl = document.getElementById("model-policy-error");
+  const summaryEl = document.getElementById("model-policy-summary");
+  if (errorEl) {
+    errorEl.textContent = error || "";
+    errorEl.classList.toggle("hidden", !error);
+  }
+  if (summaryEl) {
+    summaryEl.textContent = summary || "";
+    summaryEl.classList.toggle("hidden", !summary);
   }
 };
 
@@ -650,6 +790,8 @@ socket.on("llm_jobs_started", (payload) => {
 
 const runButton = document.getElementById("run");
 const generateSampleButton = document.getElementById("generate-sample");
+const historyButton = document.getElementById("btn-history");
+const settingsButton = document.getElementById("btn-settings");
 const SAMPLE_PROMPT_COOLDOWN_MS = 10000;
 let samplePromptCooldownUntil = 0;
 
@@ -724,6 +866,78 @@ runButton?.addEventListener("click", async () => {
   await startRun();
 });
 
+historyButton?.addEventListener("click", async () => {
+  await fetchRecentRuns();
+  toggleOverlay("history");
+});
+
+settingsButton?.addEventListener("click", async () => {
+  try {
+    const data = await loadModelPolicy();
+    const editor = document.getElementById("model-policy-editor");
+    if (editor) {
+      editor.value = (data.models || []).join("\n");
+    }
+    setPolicyFeedback("", "");
+    toggleOverlay("settings");
+  } catch (error) {
+    alert("Could not load settings. Try again.");
+  }
+});
+
+document.getElementById("refresh-runs")?.addEventListener("click", async () => {
+  await fetchRecentRuns();
+});
+
+document.querySelectorAll("[data-overlay-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const overlayId = button.getAttribute("data-overlay-close");
+    if (overlayId) closeOverlay(overlayId);
+  });
+});
+
+document.getElementById("settings-cancel")?.addEventListener("click", () => {
+  closeOverlay("settings");
+});
+
+document.getElementById("settings-save")?.addEventListener("click", async () => {
+  const editor = document.getElementById("model-policy-editor");
+  if (!(editor instanceof HTMLTextAreaElement)) return;
+  const models = editor.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const button = document.getElementById("settings-save");
+  if (button) button.disabled = true;
+  setPolicyFeedback("", "");
+  try {
+    const response = await fetch(MODEL_POLICY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.error || "Failed to save policy");
+    }
+    updateModelOptions(data.models || models);
+    if (data.missing && Object.keys(data.missing).length > 0) {
+      const lines = Object.entries(data.missing).map(
+        ([model, machines]) => `${model}: missing on ${machines.join(", ")}`,
+      );
+      setPolicyFeedback(lines.join(" • "), "");
+    } else {
+      setPolicyFeedback("Policy saved.", "");
+    }
+    await fetchStatus();
+    closeOverlay("settings");
+  } catch (error) {
+    setPolicyFeedback("", error.message || "Failed to save policy");
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
 generateSampleButton?.addEventListener("click", async (event) => {
   const btn = event.currentTarget;
   if (!(btn instanceof HTMLButtonElement)) return;
@@ -765,6 +979,19 @@ generateSampleButton?.addEventListener("click", async (event) => {
   } finally {
     btn.disabled = false;
     btn.innerText = "Generate Sample";
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (isEditableTarget(event.target)) return;
+  if (event.key === "r" || event.key === "R") {
+    event.preventDefault();
+    fetchRecentRuns();
+    toggleOverlay("history");
+  }
+  if (event.key === "s" || event.key === "S") {
+    event.preventDefault();
+    settingsButton?.click();
   }
 });
 
