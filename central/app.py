@@ -362,8 +362,30 @@ def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
             if response.status_code >= 400:
                 result["error"] = _format_http_error(response.status_code, response.reason)
             else:
+                original_name = url.split("?")[0].lower()
                 resolved_name = response.url.split("?")[0].lower()
-                if not resolved_name.endswith(".safetensors"):
+                content_disp = response.headers.get("Content-Disposition") or response.headers.get(
+                    "content-disposition"
+                )
+                filename_from_header = None
+                if content_disp:
+                    match_star = re.search(r"filename\*\s*=\s*[^']*''([^;]+)", content_disp, flags=re.IGNORECASE)
+                    match_plain = re.search(
+                        r'filename\s*=\s*"?(?P<name>[^";]+)"?', content_disp, flags=re.IGNORECASE
+                    )
+                    if match_star:
+                        filename_from_header = match_star.group(1)
+                    elif match_plain:
+                        filename_from_header = match_plain.group("name")
+
+                def _has_safetensors(name: Optional[str]) -> bool:
+                    return bool(name and name.split("?")[0].lower().endswith(".safetensors"))
+
+                if not (
+                    _has_safetensors(resolved_name)
+                    or _has_safetensors(original_name)
+                    or _has_safetensors(filename_from_header)
+                ):
                     result["error"] = "Resolved URL must end with .safetensors"
                 else:
                     result["valid"] = True
