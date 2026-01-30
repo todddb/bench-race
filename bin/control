@@ -166,6 +166,160 @@ def check_ollama_available() -> bool:
         return False
 
 
+def check_comfyui_health(port: Optional[int] = None) -> bool:
+    """Check if ComfyUI is healthy by hitting /system_stats."""
+    if port is None:
+        port = comfy_port()
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/system_stats"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def get_comfyui_system_stats(port: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Get ComfyUI system stats JSON."""
+    if port is None:
+        port = comfy_port()
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/system_stats"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+def print_log_tail(logfile: Path, lines: int = 50) -> None:
+    """Print the last N lines of a log file for debugging."""
+    if not logfile.exists():
+        log(f"Log file does not exist: {logfile}")
+        return
+    try:
+        with open(logfile, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+            tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        log(f"--- Last {len(tail)} lines of {logfile} ---")
+        for line in tail:
+            print(line.rstrip())
+        log("--- End of log ---")
+    except Exception as e:
+        log(f"Could not read log file: {e}")
+
+
+def detect_ollama_accel() -> str:
+    """
+    Detect if Ollama is using GPU or CPU.
+    Returns: 'gpu', 'cpu', 'unknown', or 'down'
+    """
+    if not check_ollama_available():
+        return "down"
+
+    # Try nvidia-smi to check if ollama is using GPU
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Check if any ollama process is using GPU memory
+            for line in result.stdout.strip().split("\n"):
+                if "ollama" in line.lower():
+                    # Parse memory usage - format is: pid, process_name, used_memory
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        try:
+                            mem = int(parts[2])
+                            if mem > 0:
+                                return "gpu"
+                        except (ValueError, IndexError):
+                            pass
+            # nvidia-smi exists but no ollama using GPU - likely CPU mode
+            return "cpu"
+    except FileNotFoundError:
+        # nvidia-smi not found, not an NVIDIA system
+        pass
+    except Exception:
+        pass
+
+    # On macOS, check for Metal support (best effort)
+    if platform.system() == "Darwin":
+        # Ollama on macOS with Apple Silicon uses Metal by default
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.optional.arm64"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "1":
+                return "gpu"  # Apple Silicon with Metal
+        except Exception:
+            pass
+
+    return "unknown"
+
+
+def detect_comfyui_accel() -> str:
+    """
+    Detect if ComfyUI is using GPU or CPU.
+    Returns: 'gpu', 'cpu', 'unknown', or 'down'
+    """
+    port = comfy_port()
+
+    # First check if ComfyUI is reachable
+    stats = get_comfyui_system_stats(port)
+    if stats:
+        # Try to infer from system_stats response
+        devices = stats.get("devices", [])
+        if devices:
+            for device in devices:
+                device_name = device.get("name", "").lower()
+                device_type = device.get("type", "").lower()
+                if "cuda" in device_name or "cuda" in device_type:
+                    return "gpu"
+                if "mps" in device_name or "mps" in device_type:
+                    return "gpu"  # Apple Metal Performance Shaders
+                if device_type == "cpu":
+                    return "cpu"
+        # If we got stats but can't determine from devices, check log
+    elif not is_port_listening(port):
+        return "down"
+
+    # Fallback: check ComfyUI log for device info
+    if COMFY_LOGFILE.exists():
+        try:
+            with open(COMFY_LOGFILE, "r", encoding="utf-8", errors="replace") as f:
+                # Read last 200 lines
+                lines = f.readlines()[-200:]
+                content = "".join(lines).lower()
+
+                if "device: cuda:" in content or "using device: cuda" in content:
+                    return "gpu"
+                if "device: mps" in content or "using device: mps" in content:
+                    return "gpu"
+                if "torch not compiled with cuda enabled" in content:
+                    return "cpu"
+                if "device: cpu" in content or "using device: cpu" in content:
+                    return "cpu"
+        except Exception:
+            pass
+
+    # If reachable but can't determine
+    if stats or is_port_listening(port):
+        return "unknown"
+
+    return "down"
+
+
 def ensure_ollama() -> bool:
     """Ensure Ollama is running and reachable."""
     # Check if ollama command exists
@@ -251,21 +405,41 @@ def comfy_port() -> int:
 
 
 def ensure_comfyui() -> bool:
+    """
+    Ensure ComfyUI is running and healthy.
+    Returns True if ComfyUI is up, False otherwise.
+    """
     config = comfy_settings()
     if config.get("enabled") is False:
-        return True
-    pid = read_pid(COMFY_PIDFILE)
-    if pid and pid_is_running(pid):
+        log("ComfyUI disabled in config.")
         return True
 
     port = comfy_port()
-    if is_port_listening(port):
-        return True
+    log("Checking ComfyUI...")
 
+    # Check if already running and healthy
+    pid = read_pid(COMFY_PIDFILE)
+    if pid and pid_is_running(pid):
+        if check_comfyui_health(port):
+            log(f"ComfyUI already running and healthy at http://127.0.0.1:{port}")
+            return True
+
+    # Check if port is already listening (maybe started externally)
+    if is_port_listening(port):
+        if check_comfyui_health(port):
+            log(f"ComfyUI already running at http://127.0.0.1:{port}")
+            return True
+
+    # Need to start ComfyUI
     comfy_dir = comfy_install_dir()
     venv_dir = comfy_dir / ".venv"
-    if not comfy_dir.exists() or not venv_dir.exists():
-        log("WARN: ComfyUI not installed. Run scripts/install_comfyui_* to install.")
+    if not comfy_dir.exists():
+        log(f"WARN: ComfyUI directory not found: {comfy_dir}")
+        log("Run scripts/install_comfyui_linux.sh or scripts/install_comfyui_macos.sh to install.")
+        return False
+    if not venv_dir.exists():
+        log(f"WARN: ComfyUI venv not found: {venv_dir}")
+        log("Run scripts/install_comfyui_linux.sh or scripts/install_comfyui_macos.sh to install.")
         return False
 
     host = config.get("host") or "0.0.0.0"
@@ -278,6 +452,8 @@ def ensure_comfyui() -> bool:
         str(port),
     ]
     log(f"Starting ComfyUI on {host}:{port}...")
+
+    # Start ComfyUI process
     with open(COMFY_LOGFILE, "a") as logf:
         proc = subprocess.Popen(
             cmd,
@@ -287,8 +463,35 @@ def ensure_comfyui() -> bool:
             start_new_session=True,
         )
     write_pid(COMFY_PIDFILE, proc.pid)
-    time.sleep(1)
-    return True
+    log(f"ComfyUI started (pid {proc.pid}). Waiting for health check...")
+
+    # Wait for health check (up to 10 seconds)
+    max_wait = 10
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        # Check if process is still running
+        if not pid_is_running(proc.pid):
+            log("ERROR: ComfyUI process exited unexpectedly.")
+            print_log_tail(COMFY_LOGFILE, 50)
+            remove_pid(COMFY_PIDFILE)
+            return False
+
+        if check_comfyui_health(port):
+            elapsed = time.time() - start_time
+            log(f"ComfyUI healthy at http://127.0.0.1:{port} (started in {elapsed:.1f}s)")
+            return True
+
+        time.sleep(0.5)
+
+    # Timeout - check if process is still alive
+    if pid_is_running(proc.pid):
+        log(f"ERROR: ComfyUI did not become healthy within {max_wait}s.")
+        log("Process is still running but not responding to health checks.")
+    else:
+        log("ERROR: ComfyUI process died during startup.")
+
+    print_log_tail(COMFY_LOGFILE, 50)
+    return False
 
 
 def get_venv_python(venv_path: Path) -> str:
@@ -348,9 +551,23 @@ def start_service(
 
     # Ensure Ollama if needed
     if config.get("requires_ollama"):
+        log("Checking Ollama...")
         ensure_ollama()
+
+    # Ensure ComfyUI for agent
     if component == "agent":
-        ensure_comfyui()
+        if not ensure_comfyui():
+            result = {
+                "component": component,
+                "action": "start",
+                "result": "error",
+                "message": "ComfyUI failed to start. Check logs for details.",
+            }
+            if output_json:
+                print(json.dumps(result))
+            else:
+                log(f"ERROR: {result['message']}")
+            return result
 
     # Get host and port
     host = os.environ.get(config["host_env"], config["default_host"])
@@ -565,10 +782,17 @@ def status_service(component: str, output_json: bool = False) -> Dict[str, Any]:
                 result["info"] += f", uptime {process_info['uptime_seconds']}s"
 
     if component == "agent":
+        # ComfyUI status
         comfy_pid = read_pid(COMFY_PIDFILE)
         comfy_running = bool(comfy_pid and pid_is_running(comfy_pid))
-        result["comfyui_running"] = comfy_running
+        comfyui_accel = detect_comfyui_accel()
+        result["comfyui_running"] = comfy_running or comfyui_accel not in ("down",)
         result["comfyui_pid"] = comfy_pid if comfy_running else None
+        result["comfyui_accel"] = comfyui_accel
+
+        # Ollama status
+        ollama_accel = detect_ollama_accel()
+        result["ollama_accel"] = ollama_accel
 
     if output_json:
         print(json.dumps(result))
@@ -579,10 +803,22 @@ def status_service(component: str, output_json: bool = False) -> Dict[str, Any]:
         log(f"{component.capitalize()}: {status_str}{pid_str}{info_str}")
 
         if component == "agent":
-            ollama_status = "REACHABLE" if check_ollama_available() else "STOPPED"
-            log(f"Ollama: {ollama_status} ({OLLAMA_URL})")
-            comfy_status = "RUNNING" if result.get("comfyui_running") else "STOPPED"
-            log(f"ComfyUI: {comfy_status} (port {comfy_port()})")
+            # Ollama status with acceleration info
+            ollama_accel = result.get("ollama_accel", "unknown")
+            if ollama_accel == "down":
+                log(f"Ollama: down")
+            else:
+                accel_str = f"({ollama_accel})" if ollama_accel != "unknown" else ""
+                log(f"Ollama: up {accel_str} {OLLAMA_URL}".strip())
+
+            # ComfyUI status with acceleration info
+            comfyui_accel = result.get("comfyui_accel", "unknown")
+            cport = comfy_port()
+            if comfyui_accel == "down":
+                log(f"ComfyUI: down (port {cport})")
+            else:
+                accel_str = f"({comfyui_accel})" if comfyui_accel != "unknown" else ""
+                log(f"ComfyUI: up {accel_str} port {cport}".strip())
 
         log(f"Log file: {logfile}")
 
