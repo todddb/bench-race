@@ -15,6 +15,7 @@
             <a class="nav-link active" href="/inference">Inference</a>
             <a class="nav-link" href="/image">Image</a>
           </nav>
+          <div id="run-active-indicator" title="No active runs"></div>
           <button id="btn-history" class="icon-button" type="button" aria-label="Recent Runs" title="Recent Runs">
             <span class="icon" aria-hidden="true">🕒</span>
             <span id="history-count" class="icon-badge hidden" aria-hidden="true">0</span>
@@ -195,6 +196,20 @@
             <label for="comfy-checkpoints" class="control-label">Checkpoint URL List</label>
             <div class="help-text">One URL per line. Optional |sha256 after URL.</div>
             <textarea id="comfy-checkpoints" class="settings-textarea" rows="6"></textarea>
+          </div>
+          <div class="drawer-section">
+            <h4 class="drawer-section-title">Performance</h4>
+            <div class="polling-settings">
+              <div class="setting-row">
+                <label class="setting-label" for="idle-poll-interval">Idle Poll Interval (s)</label>
+                <input type="number" class="setting-input" id="idle-poll-interval" value="30" min="5" max="120" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="active-poll-interval">Active Poll Interval (ms)</label>
+                <input type="number" class="setting-input" id="active-poll-interval" value="2000" min="500" max="10000" />
+              </div>
+              <div class="setting-helper">Polling frequency when runs are active vs idle. Lower uses more resources.</div>
+            </div>
           </div>
         </div>
         <footer class="drawer-footer">

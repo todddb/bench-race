@@ -65,6 +65,7 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOCK = threading.Lock()
 RUN_CACHE: Dict[str, Dict[str, Any]] = {}
 JOB_RUN_MAP: Dict[str, Dict[str, str]] = {}
+ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}  # run_id -> {start_time, type, machine_ids}
 RUN_ID_PATTERN = re.compile(r"^\d{8}-\d{6}_[a-f0-9]{6}$")
 SAMPLE_PROMPT_RATE_LIMIT_S = 10
 SAMPLE_PROMPT_TIMEOUT_S = 20
@@ -147,6 +148,68 @@ def _run_summary(record: Dict[str, Any]) -> Dict[str, Any]:
         "prompt_preview": _prompt_preview(record.get("prompt_text", "")),
         "has_mock": has_mock,
     }
+
+
+def _mark_run_active(run_id: str, run_type: str, machine_ids: List[str]) -> None:
+    """Mark a run as active and emit run_start event to all connected clients."""
+    with RUN_LOCK:
+        ACTIVE_RUNS[run_id] = {
+            "start_time": time.time(),
+            "type": run_type,
+            "machine_ids": machine_ids,
+        }
+    socketio.emit("run_lifecycle", {
+        "type": "run_start",
+        "run_id": run_id,
+        "run_type": run_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    log.info("Run started: %s (type=%s, machines=%d)", run_id, run_type, len(machine_ids))
+
+
+def _mark_run_complete(run_id: str) -> None:
+    """Mark a run as complete and emit run_end event if it was active."""
+    with RUN_LOCK:
+        if run_id not in ACTIVE_RUNS:
+            return
+        del ACTIVE_RUNS[run_id]
+    socketio.emit("run_lifecycle", {
+        "type": "run_end",
+        "run_id": run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    log.info("Run completed: %s", run_id)
+
+
+def _check_run_complete(run_id: str) -> None:
+    """Check if all jobs for a run are complete and mark it accordingly."""
+    with RUN_LOCK:
+        if run_id not in ACTIVE_RUNS:
+            return
+        # Check if there are any remaining jobs for this run
+        has_pending_jobs = any(
+            info["run_id"] == run_id for info in JOB_RUN_MAP.values()
+        )
+        if not has_pending_jobs:
+            del ACTIVE_RUNS[run_id]
+    if not has_pending_jobs:
+        socketio.emit("run_lifecycle", {
+            "type": "run_end",
+            "run_id": run_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        log.info("Run completed: %s", run_id)
+
+
+def _get_active_runs() -> Dict[str, Any]:
+    """Get info about currently active runs."""
+    with RUN_LOCK:
+        run_ids = list(ACTIVE_RUNS.keys())
+        return {
+            "is_active": len(run_ids) > 0,
+            "run_ids": run_ids,
+            "count": len(run_ids),
+        }
 
 
 def _default_comfy_settings() -> Dict[str, Any]:
@@ -343,6 +406,8 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
             RUN_CACHE[run_id] = record
             _write_run_record(record)
             JOB_RUN_MAP.pop(job_id, None)
+        # Check if this run is now complete (all jobs done)
+        _check_run_complete(run_id)
         return
 
     if event_type.startswith("image_"):
@@ -427,6 +492,10 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
             record["updated_at"] = datetime.now(timezone.utc).isoformat()
             RUN_CACHE[run_id] = record
             _write_run_record(record)
+
+        # Check if this run is now complete (image_complete or image_error removes from job map)
+        if event_type in ("image_complete", "image_error"):
+            _check_run_complete(run_id)
         return
 
 
@@ -936,6 +1005,12 @@ def api_runs():
     return jsonify(summaries)
 
 
+@app.get("/api/runs/active")
+def api_runs_active():
+    """Return info about currently active runs for frontend polling optimization."""
+    return jsonify(_get_active_runs())
+
+
 @app.get("/api/runs/<run_id>")
 def api_run_detail(run_id: str):
     record = _load_run_record(run_id)
@@ -1213,6 +1288,11 @@ def api_start_llm():
         _write_run_record(run_record)
         _prune_old_runs()
 
+    # Mark run as active with the machine IDs that successfully started jobs
+    active_machine_ids = [r["machine_id"] for r in results if "job" in r]
+    if active_machine_ids:
+        _mark_run_active(run_id, "inference", active_machine_ids)
+
     return jsonify({"run_id": run_id, "results": results})
 
 
@@ -1334,6 +1414,11 @@ def api_start_image():
         RUN_CACHE[run_id] = run_record
         _write_run_record(run_record)
         _prune_old_runs()
+
+    # Mark run as active with the machine IDs that successfully started jobs
+    active_machine_ids = [r["machine_id"] for r in results if "job" in r]
+    if active_machine_ids:
+        _mark_run_active(run_id, "image", active_machine_ids)
 
     return jsonify({"run_id": run_id, "seed": seed, "results": results})
 

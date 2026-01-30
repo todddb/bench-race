@@ -1,11 +1,34 @@
 const socket = io();
 const paneMap = new Map();
-const STATUS_POLL_MS = 12000;
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
 const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
+const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
+const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
+
+// Adaptive polling configuration
+const DEFAULT_POLLING_CONFIG = {
+  idlePollIntervalMs: 30000,   // 30s when no runs active
+  activePollIntervalMs: 2000,  // 2s when runs active
+  uiUpdateThrottleMs: 500,     // Throttle UI updates to max 2/sec
+};
+let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
+
+// Preview settings
+const DEFAULT_PREVIEW_CONFIG = {
+  enableLivePreview: true,     // Whether to show live preview images
+  previewThrottleMs: 1000,     // Throttle preview updates (1 per second)
+  previewResolution: 256,       // Preview image size
+};
+let previewConfig = { ...DEFAULT_PREVIEW_CONFIG };
+
+// Global run state tracking
+let isRunActive = false;
+const activeRunIds = new Set();
+let statusPollTimer = null;
+let lastPreviewUpdate = new Map(); // machineId -> timestamp
 
 let viewingMode = "live";
 let viewingRunId = null;
@@ -13,6 +36,163 @@ let liveRunId = null;
 let recentRuns = [];
 let activeOverlay = null;
 let lastOverlayFocus = null;
+
+// Load saved settings from localStorage
+const loadPollingSettings = () => {
+  try {
+    const saved = localStorage.getItem(POLLING_SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      pollingConfig = { ...DEFAULT_POLLING_CONFIG, ...parsed };
+    }
+  } catch (e) {
+    console.warn("Failed to load polling settings:", e);
+  }
+};
+
+const loadPreviewSettings = () => {
+  try {
+    const saved = localStorage.getItem(PREVIEW_SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      previewConfig = { ...DEFAULT_PREVIEW_CONFIG, ...parsed };
+    }
+    // Default live preview off on macOS to reduce WindowServer load
+    if (navigator.platform?.toLowerCase().includes("mac") && !saved) {
+      previewConfig.enableLivePreview = false;
+    }
+  } catch (e) {
+    console.warn("Failed to load preview settings:", e);
+  }
+};
+
+const savePreviewSettings = () => {
+  try {
+    localStorage.setItem(PREVIEW_SETTINGS_KEY, JSON.stringify(previewConfig));
+  } catch (e) {
+    console.warn("Failed to save preview settings:", e);
+  }
+};
+
+// Adaptive polling: switch between idle and active intervals
+const getCurrentPollInterval = () => {
+  return isRunActive ? pollingConfig.activePollIntervalMs : pollingConfig.idlePollIntervalMs;
+};
+
+const scheduleStatusPoll = () => {
+  if (statusPollTimer) {
+    clearTimeout(statusPollTimer);
+  }
+  const interval = getCurrentPollInterval();
+  statusPollTimer = setTimeout(async () => {
+    await fetchStatus();
+    scheduleStatusPoll();
+  }, interval);
+};
+
+const restartPolling = () => {
+  scheduleStatusPoll();
+};
+
+// Run state management
+const setRunActive = (active, runId = null) => {
+  const wasActive = isRunActive;
+  if (active && runId) {
+    activeRunIds.add(runId);
+  } else if (!active && runId) {
+    activeRunIds.delete(runId);
+  }
+  isRunActive = activeRunIds.size > 0;
+
+  // Update UI indicator if present
+  const indicator = document.getElementById("run-active-indicator");
+  if (indicator) {
+    indicator.classList.toggle("active", isRunActive);
+    indicator.title = isRunActive
+      ? `${activeRunIds.size} active run(s)`
+      : "No active runs";
+  }
+
+  // Update preview visibility when run state changes
+  updatePreviewVisibility();
+
+  // Restart polling if state changed
+  if (wasActive !== isRunActive) {
+    console.log(`Run state changed: ${wasActive} -> ${isRunActive}`);
+    restartPolling();
+  }
+};
+
+// Fetch active runs from server to initialize state
+const fetchActiveRuns = async () => {
+  try {
+    const response = await fetch("/api/runs/active");
+    if (!response.ok) return;
+    const data = await response.json();
+    activeRunIds.clear();
+    (data.run_ids || []).forEach((id) => activeRunIds.add(id));
+    isRunActive = data.is_active || false;
+    updatePreviewVisibility();
+    restartPolling();
+  } catch (error) {
+    console.warn("Failed to fetch active runs:", error);
+  }
+};
+
+// Preview visibility management - hide when idle, show when active
+const updatePreviewVisibility = () => {
+  const showPreview = isRunActive && previewConfig.enableLivePreview;
+  paneMap.forEach((pane, machineId) => {
+    const previewEl = document.getElementById(`preview-${machineId}`);
+    const placeholderEl = document.getElementById(`preview-placeholder-${machineId}`);
+    if (previewEl) {
+      if (showPreview) {
+        previewEl.classList.remove("preview-hidden");
+      } else {
+        previewEl.classList.add("preview-hidden");
+      }
+    }
+    if (placeholderEl) {
+      placeholderEl.style.display = showPreview ? "none" : "block";
+    }
+  });
+};
+
+// Check if preview update is allowed (throttling)
+const canUpdatePreview = (machineId) => {
+  if (!previewConfig.enableLivePreview) return false;
+  const now = Date.now();
+  const lastUpdate = lastPreviewUpdate.get(machineId) || 0;
+  if (now - lastUpdate < previewConfig.previewThrottleMs) {
+    return false;
+  }
+  lastPreviewUpdate.set(machineId, now);
+  return true;
+};
+
+// Throttle function for UI updates
+const throttle = (fn, delay) => {
+  let lastCall = 0;
+  let timeoutId = null;
+  return (...args) => {
+    const now = Date.now();
+    const remaining = delay - (now - lastCall);
+    if (remaining <= 0) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastCall = now;
+      fn(...args);
+    } else if (!timeoutId) {
+      timeoutId = setTimeout(() => {
+        lastCall = Date.now();
+        timeoutId = null;
+        fn(...args);
+      }, remaining);
+    }
+  };
+};
 
 const showToast = (message, type = "info") => {
   const container = document.getElementById("toast-container");
@@ -137,11 +317,20 @@ const setPaneMetrics = (machineId, html) => {
   if (metrics) metrics.innerHTML = html;
 };
 
-const setPreviewImage = (machineId, src) => {
+const setPreviewImage = (machineId, src, force = false) => {
   const img = document.getElementById(`preview-${machineId}`);
   if (!img) return;
+  // Force is used for final images (not live previews)
+  if (!force && !previewConfig.enableLivePreview) {
+    return;
+  }
   img.src = src || "";
-  img.style.display = src ? "block" : "none";
+  // Use CSS class instead of inline style for proper preview hiding
+  if (src) {
+    img.classList.remove("preview-hidden");
+  } else {
+    img.classList.add("preview-hidden");
+  }
 };
 
 const updateCheckpointLabel = (checkpoint) => {
@@ -518,6 +707,15 @@ settingsButton?.addEventListener("click", async () => {
         checkpointsInput.value = (comfy.checkpoint_urls || []).join("\n");
       }
     }
+    // Load polling and preview settings into form
+    const enableLivePreviewInput = document.getElementById("enable-live-preview");
+    const idlePollInput = document.getElementById("idle-poll-interval");
+    const activePollInput = document.getElementById("active-poll-interval");
+    const previewThrottleInput = document.getElementById("preview-throttle");
+    if (enableLivePreviewInput) enableLivePreviewInput.checked = previewConfig.enableLivePreview;
+    if (idlePollInput) idlePollInput.value = Math.round(pollingConfig.idlePollIntervalMs / 1000);
+    if (activePollInput) activePollInput.value = pollingConfig.activePollIntervalMs;
+    if (previewThrottleInput) previewThrottleInput.value = previewConfig.previewThrottleMs;
     setPolicyFeedback("", "");
     toggleOverlay("settings");
   } catch (error) {
@@ -581,6 +779,31 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
         checkpoint_urls: checkpointUrls,
       }),
     });
+    // Save polling and preview settings from form
+    const enableLivePreviewInput = document.getElementById("enable-live-preview");
+    const idlePollInput = document.getElementById("idle-poll-interval");
+    const activePollInput = document.getElementById("active-poll-interval");
+    const previewThrottleInput = document.getElementById("preview-throttle");
+    if (enableLivePreviewInput) {
+      previewConfig.enableLivePreview = enableLivePreviewInput.checked;
+    }
+    if (idlePollInput) {
+      pollingConfig.idlePollIntervalMs = parseInt(idlePollInput.value, 10) * 1000;
+    }
+    if (activePollInput) {
+      pollingConfig.activePollIntervalMs = parseInt(activePollInput.value, 10);
+    }
+    if (previewThrottleInput) {
+      previewConfig.previewThrottleMs = parseInt(previewThrottleInput.value, 10);
+    }
+    savePreviewSettings();
+    try {
+      localStorage.setItem(POLLING_SETTINGS_KEY, JSON.stringify(pollingConfig));
+    } catch (e) {
+      console.warn("Failed to save polling settings:", e);
+    }
+    updatePreviewVisibility();
+    restartPolling();
     setPolicyFeedback("Settings saved.", "");
     closeOverlay("settings");
   } catch (error) {
@@ -628,6 +851,18 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
   });
 });
 
+// Handle run lifecycle events for adaptive polling
+socket.on("run_lifecycle", (event) => {
+  if (!event || !event.type) return;
+  if (event.type === "run_start") {
+    setRunActive(true, event.run_id);
+    console.log("Run started:", event.run_id);
+  } else if (event.type === "run_end") {
+    setRunActive(false, event.run_id);
+    console.log("Run ended:", event.run_id);
+  }
+});
+
 socket.on("agent_event", (event) => {
   if (!event || !event.type) return;
   if (!event.type.startsWith("image_")) return;
@@ -645,14 +880,16 @@ socket.on("agent_event", (event) => {
     );
   }
   if (event.type === "image_preview") {
-    if (payload.image_b64) {
+    // Apply throttling to preview updates to reduce CPU/GPU load
+    if (payload.image_b64 && canUpdatePreview(machineId)) {
       setPreviewImage(machineId, `data:image/jpeg;base64,${payload.image_b64}`);
     }
   }
   if (event.type === "image_complete") {
     const images = payload.images || [];
     if (images.length > 0 && images[0].image_b64) {
-      setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`);
+      // Force show final image even if live preview is disabled
+      setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`, true);
     }
     const metricsHtml = `
       <div><strong>Queue:</strong> ${formatMetric(payload.queue_latency_ms, " ms")}</div>
@@ -698,9 +935,15 @@ document.getElementById("options-toggle")?.addEventListener("click", () => {
 });
 
 applyOptionsLayout();
+
+// Initialize settings and adaptive polling
+loadPollingSettings();
+loadPreviewSettings();
 fetchStatus();
-setInterval(fetchStatus, STATUS_POLL_MS);
+scheduleStatusPoll();
 fetchRecentRuns();
+// Fetch initial run state
+fetchActiveRuns();
 
 const params = new URLSearchParams(window.location.search);
 const runId = params.get("run_id");
