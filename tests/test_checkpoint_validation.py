@@ -40,3 +40,26 @@ def test_validate_checkpoint_url_caches(monkeypatch):
     assert calls.count == 1
     assert first["valid"] is True
     assert second["valid"] is True
+
+
+def test_checkpoint_validation_allows_redirect_without_extension(monkeypatch):
+    url = "https://huggingface.co/foo/bar/resolve/main/sd_xl_base_1.0.safetensors"
+    resolved = "https://cas-bridge.example.com/3d6f7c00078891"
+    headers = {
+        "Content-Disposition": 'inline; filename="sd_xl_base_1.0.safetensors"',
+        "Content-Length": "1234",
+    }
+
+    def fake_head(u, allow_redirects=True, timeout=10):
+        assert u == url
+        return DummyResponse(status_code=200, url=resolved, headers=headers)
+
+    monkeypatch.setattr(central_app.requests, "head", fake_head)
+    monkeypatch.setattr(
+        central_app.requests, "get", lambda *a, **k: DummyResponse(status_code=200, url=resolved, headers=headers)
+    )
+
+    result = central_app._validate_checkpoint_url(url, force=True)
+    assert result["valid"] is True
+    assert result["error"] is None
+    assert result["resolved_url"] == resolved
