@@ -9,6 +9,7 @@ const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
 const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
+const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
 
@@ -35,6 +36,7 @@ let liveRunId = null;
 let recentRuns = [];
 let activeOverlay = null;
 let lastOverlayFocus = null;
+let checkpointCatalog = [];
 
 // Fallback reason display strings
 const FALLBACK_REASONS = {
@@ -207,6 +209,66 @@ const formatTimestamp = (isoString) => {
 const formatMetric = (value, unit, decimals = 1) => {
   if (value == null || Number.isNaN(value)) return "n/a";
   return `${value.toFixed(decimals)}${unit}`;
+};
+
+const formatBytes = (bytes) => {
+  if (bytes == null || Number.isNaN(bytes)) return "n/a";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+};
+
+const renderCheckpointValidation = (items) => {
+  const list = document.getElementById("checkpoint-validation-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "helper";
+    empty.textContent = "No checkpoints configured.";
+    list.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "checkpoint-validation-item";
+    const dot = document.createElement("span");
+    dot.className = `status-dot ${item.valid ? "ok" : "error"}`;
+    const content = document.createElement("div");
+    const title = document.createElement("div");
+    title.textContent = item.name || item.url;
+    const meta = document.createElement("div");
+    meta.className = "checkpoint-validation-meta";
+    const statusText = item.valid ? "Valid" : item.error || "Invalid";
+    const resolved = item.resolved_url ? `Resolved: ${item.resolved_url}` : "";
+    const size = item.size_bytes != null ? `Size: ${formatBytes(item.size_bytes)}` : "Size: n/a";
+    const etag = item.etag ? `ETag: ${item.etag}` : "";
+    const modified = item.last_modified ? `Last-Modified: ${item.last_modified}` : "";
+    meta.textContent = [statusText, resolved, size, etag, modified].filter(Boolean).join(" · ");
+    content.appendChild(title);
+    content.appendChild(meta);
+    row.appendChild(dot);
+    row.appendChild(content);
+    list.appendChild(row);
+  });
+};
+
+const loadCheckpointCatalog = async (force = false) => {
+  try {
+    const response = await fetch(
+      `${CHECKPOINT_CATALOG_ENDPOINT}${force ? "?refresh=1" : ""}`,
+    );
+    if (!response.ok) return;
+    const data = await response.json();
+    checkpointCatalog = data.items || [];
+    renderCheckpointValidation(checkpointCatalog);
+  } catch (error) {
+    console.warn("Failed to load checkpoint catalog", error);
+  }
 };
 
 const formatDelta = (value, baselineValue, higherIsBetter, unit, decimals = 1) => {
@@ -1080,9 +1142,10 @@ settingsButton?.addEventListener("click", async () => {
       if (modelsInput) modelsInput.value = comfy.models_path || "";
       if (cacheInput) cacheInput.value = comfy.central_cache_path || "";
       if (checkpointsInput) {
-        checkpointsInput.value = (comfy.checkpoint_urls || []).join("\n");
+        checkpointsInput.value = (comfy.comfyui_checkpoints || comfy.checkpoint_urls || []).join("\n");
       }
     }
+    await loadCheckpointCatalog();
     // Load polling settings into form
     const idlePollInput = document.getElementById("idle-poll-interval");
     const activePollInput = document.getElementById("active-poll-interval");
@@ -1097,6 +1160,10 @@ settingsButton?.addEventListener("click", async () => {
 
 document.getElementById("refresh-runs")?.addEventListener("click", async () => {
   await fetchRecentRuns();
+});
+
+document.getElementById("recheck-checkpoints")?.addEventListener("click", async () => {
+  await loadCheckpointCatalog(true);
 });
 
 document.querySelectorAll("[data-overlay-close]").forEach((button) => {
@@ -1149,7 +1216,7 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
         base_url: baseInput?.value || "",
         models_path: modelsInput?.value || "",
         central_cache_path: cacheInput?.value || "",
-        checkpoint_urls: checkpointUrls,
+        comfyui_checkpoints: checkpointUrls,
       }),
     });
     // Save polling settings from form

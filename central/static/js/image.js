@@ -5,6 +5,7 @@ const BASELINE_KEY = "bench-race-baseline-run";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
 const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
+const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
 const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
 
@@ -36,6 +37,8 @@ let liveRunId = null;
 let recentRuns = [];
 let activeOverlay = null;
 let lastOverlayFocus = null;
+let checkpointCatalog = [];
+const checkpointSyncState = new Map();
 
 // Load saved settings from localStorage
 const loadPollingSettings = () => {
@@ -216,6 +219,85 @@ const formatMetric = (value, unit, decimals = 1) => {
   return `${value.toFixed(decimals)}${unit}`;
 };
 
+const formatBytes = (bytes) => {
+  if (bytes == null || Number.isNaN(bytes)) return "n/a";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+};
+
+const renderCheckpointValidation = (items) => {
+  const list = document.getElementById("checkpoint-validation-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "helper";
+    empty.textContent = "No checkpoints configured.";
+    list.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "checkpoint-validation-item";
+    const dot = document.createElement("span");
+    dot.className = `status-dot ${item.valid ? "ok" : "error"}`;
+    const content = document.createElement("div");
+    const title = document.createElement("div");
+    title.textContent = item.name || item.url;
+    const meta = document.createElement("div");
+    meta.className = "checkpoint-validation-meta";
+    const statusText = item.valid ? "Valid" : item.error || "Invalid";
+    const resolved = item.resolved_url ? `Resolved: ${item.resolved_url}` : "";
+    const size = item.size_bytes != null ? `Size: ${formatBytes(item.size_bytes)}` : "Size: n/a";
+    const etag = item.etag ? `ETag: ${item.etag}` : "";
+    const modified = item.last_modified ? `Last-Modified: ${item.last_modified}` : "";
+    meta.textContent = [statusText, resolved, size, etag, modified].filter(Boolean).join(" · ");
+    content.appendChild(title);
+    content.appendChild(meta);
+    row.appendChild(dot);
+    row.appendChild(content);
+    list.appendChild(row);
+  });
+};
+
+const renderCheckpointOptions = (items) => {
+  const select = document.getElementById("checkpoint");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const current = select.value;
+  select.innerHTML = "";
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.name;
+    option.textContent = item.name;
+    select.appendChild(option);
+  });
+  if (current && items.some((item) => item.name === current)) {
+    select.value = current;
+  }
+};
+
+const loadCheckpointCatalog = async (force = false) => {
+  try {
+    const response = await fetch(
+      `${CHECKPOINT_CATALOG_ENDPOINT}${force ? "?refresh=1" : ""}`,
+    );
+    if (!response.ok) return;
+    const data = await response.json();
+    checkpointCatalog = data.items || [];
+    const validItems = checkpointCatalog.filter((item) => item.valid);
+    renderCheckpointOptions(validItems);
+    renderCheckpointValidation(checkpointCatalog);
+    updateCheckpointLabel(document.getElementById("checkpoint")?.value || "");
+  } catch (error) {
+    console.warn("Failed to load checkpoint catalog", error);
+  }
+};
+
 const isEditableTarget = (target) =>
   target instanceof HTMLInputElement ||
   target instanceof HTMLTextAreaElement ||
@@ -312,6 +394,12 @@ const setPaneStatus = (machineId, statusClass, statusText) => {
   }
 };
 
+const setPaneSyncStatus = (machineId, message, percent = null) => {
+  const percentText = percent != null ? ` ${percent.toFixed(1)}%` : "";
+  setPaneStatus(machineId, "syncing", `Syncing${percentText}`);
+  setPaneMetrics(machineId, `<span class="muted">${message}</span>`);
+};
+
 const setPaneMetrics = (machineId, html) => {
   const metrics = document.getElementById(`metrics-${machineId}`);
   if (metrics) metrics.innerHTML = html;
@@ -386,6 +474,20 @@ const fetchStatus = async () => {
   } catch (error) {
     console.error("Failed to fetch status", error);
   }
+};
+
+const syncCheckpointsAll = async (checkpointNames) => {
+  const payload = { checkpoint_names: checkpointNames };
+  const response = await fetch("/api/image/sync_checkpoints", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || "Sync failed");
+  }
+  return response.json();
 };
 
 const handleJobResults = (results) => {
@@ -681,6 +783,31 @@ refreshButton?.addEventListener("click", async () => {
   await fetchStatus();
 });
 
+const syncAllButton = document.getElementById("sync-checkpoints");
+syncAllButton?.addEventListener("click", async () => {
+  if (!(syncAllButton instanceof HTMLButtonElement)) return;
+  const selected = document.getElementById("checkpoint")?.value || "";
+  let checkpointNames = [];
+  if (selected) {
+    checkpointNames = [selected];
+  } else {
+    checkpointNames = checkpointCatalog.filter((item) => item.valid).map((item) => item.name);
+  }
+  if (!checkpointNames.length) {
+    showToast("Select a checkpoint first.", "error");
+    return;
+  }
+  syncAllButton.disabled = true;
+  try {
+    await syncCheckpointsAll(checkpointNames);
+    showToast("Checkpoint sync started.", "info");
+  } catch (error) {
+    showToast(error.message || "Sync failed.", "error");
+  } finally {
+    syncAllButton.disabled = false;
+  }
+});
+
 historyButton?.addEventListener("click", async () => {
   await fetchRecentRuns();
   toggleOverlay("history");
@@ -704,9 +831,10 @@ settingsButton?.addEventListener("click", async () => {
       if (modelsInput) modelsInput.value = comfy.models_path || "";
       if (cacheInput) cacheInput.value = comfy.central_cache_path || "";
       if (checkpointsInput) {
-        checkpointsInput.value = (comfy.checkpoint_urls || []).join("\n");
+        checkpointsInput.value = (comfy.comfyui_checkpoints || comfy.checkpoint_urls || []).join("\n");
       }
     }
+    await loadCheckpointCatalog();
     // Load polling and preview settings into form
     const enableLivePreviewInput = document.getElementById("enable-live-preview");
     const idlePollInput = document.getElementById("idle-poll-interval");
@@ -725,6 +853,10 @@ settingsButton?.addEventListener("click", async () => {
 
 document.getElementById("refresh-runs")?.addEventListener("click", async () => {
   await fetchRecentRuns();
+});
+
+document.getElementById("recheck-checkpoints")?.addEventListener("click", async () => {
+  await loadCheckpointCatalog(true);
 });
 
 document.querySelectorAll("[data-overlay-close]").forEach((button) => {
@@ -776,7 +908,7 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
         base_url: baseInput?.value || "",
         models_path: modelsInput?.value || "",
         central_cache_path: cacheInput?.value || "",
-        checkpoint_urls: checkpointUrls,
+        comfyui_checkpoints: checkpointUrls,
       }),
     });
     // Save polling and preview settings from form
@@ -836,10 +968,21 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
     if (!(target instanceof HTMLButtonElement)) return;
     const machineId = target.id.replace("sync-", "");
     target.disabled = true;
+    const checkpoint = document.getElementById("checkpoint")?.value || "";
+    if (!checkpoint) {
+      showToast("Select a checkpoint first.", "error");
+      target.disabled = false;
+      return;
+    }
     try {
-      const response = await fetch(`/api/machines/${encodeURIComponent(machineId)}/sync_image`, {
-        method: "POST",
-      });
+      const response = await fetch(
+        `/api/machines/${encodeURIComponent(machineId)}/sync_image_checkpoints`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ checkpoint_names: [checkpoint] }),
+        },
+      );
       if (!response.ok) throw new Error("Sync failed");
       showToast("Sync started.", "info");
       await fetchStatus();
@@ -872,6 +1015,40 @@ socket.on("agent_event", (event) => {
   if (viewingMode === "live" && liveRunId && liveRunId !== runId) return;
   const machineId = event.machine_id;
   if (!machineId) return;
+
+  if (event.type === "image_checkpoint_sync_start") {
+    checkpointSyncState.set(machineId, { active: true, name: payload.items?.[0] });
+    setPaneSyncStatus(machineId, "Starting checkpoint sync...");
+    return;
+  }
+  if (event.type === "image_checkpoint_sync_progress") {
+    const name = payload.name || payload.model;
+    if (name) {
+      checkpointSyncState.set(machineId, { active: true, name, percent: payload.percent });
+    }
+    const message = name ? `${name}: ${payload.message || "Syncing"}` : payload.message || "Syncing";
+    setPaneSyncStatus(machineId, message, payload.percent);
+    if (payload.error) {
+      setPaneMetrics(machineId, `<span class="muted">Error: ${payload.error}</span>`);
+    }
+    return;
+  }
+  if (event.type === "image_checkpoint_sync_done") {
+    const results = payload.results || [];
+    if (results.length) {
+      const lines = results.map((result) => {
+        if (result.status === "error") {
+          return `${result.name}: error`;
+        }
+        return `${result.name}: ${result.status}`;
+      });
+      setPaneMetrics(machineId, `<span class="muted">${lines.join(" · ")}</span>`);
+      const hasError = results.some((result) => result.status === "error");
+      setPaneStatus(machineId, hasError ? "missing" : "ready", hasError ? "Sync error" : "Sync complete");
+    }
+    fetchStatus();
+    return;
+  }
 
   if (event.type === "image_progress") {
     setPaneMetrics(
@@ -939,6 +1116,7 @@ applyOptionsLayout();
 // Initialize settings and adaptive polling
 loadPollingSettings();
 loadPreviewSettings();
+loadCheckpointCatalog();
 fetchStatus();
 scheduleStatusPoll();
 fetchRecentRuns();

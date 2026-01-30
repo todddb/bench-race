@@ -72,6 +72,7 @@ WS_CLIENTS: Dict[str, WebSocket] = {}
 # Track running jobs (job_id -> asyncio.Task)
 RUNNING_JOBS: Dict[str, asyncio.Task] = {}
 SYNC_TASKS: Dict[str, asyncio.Task] = {}
+CHECKPOINT_SYNC_STATUS: Dict[str, Any] = {"active": False, "results": []}
 
 
 class SyncRequest(BaseModel):
@@ -95,6 +96,19 @@ class ComfyTxt2ImgRequest(BaseModel):
 class ComfySyncRequest(BaseModel):
     checkpoints: List[str] = Field(default_factory=list)
     central_base_url: Optional[str] = None
+
+
+class ComfyCheckpointItem(BaseModel):
+    name: str
+    url: str
+    resolved_url: Optional[str] = None
+    size_bytes: Optional[int] = None
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
+
+
+class ComfyCheckpointSyncRequest(BaseModel):
+    items: List[ComfyCheckpointItem] = Field(default_factory=list)
 
 
 # ---------------------------
@@ -142,6 +156,129 @@ def _list_checkpoints() -> List[str]:
     if not path.exists():
         return []
     return sorted([p.name for p in path.iterdir() if p.is_file()])
+
+
+def _list_checkpoint_items() -> List[Dict[str, Any]]:
+    path = _comfy_checkpoints_dir()
+    if not path.exists():
+        return []
+    items = []
+    for entry in path.iterdir():
+        if not entry.is_file():
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        items.append(
+            {
+                "name": entry.name,
+                "size_bytes": stat.st_size,
+                "path": str(entry),
+                "mtime": int(stat.st_mtime),
+            }
+        )
+    return sorted(items, key=lambda item: item["name"])
+
+
+def _should_skip_checkpoint(path: Path, size_bytes: Optional[int]) -> bool:
+    if not path.exists():
+        return False
+    if size_bytes is None:
+        return True
+    try:
+        return path.stat().st_size == size_bytes
+    except OSError:
+        return False
+
+
+async def _download_checkpoint_file(
+    item: ComfyCheckpointItem,
+    checkpoints_dir: Path,
+    client: httpx.AsyncClient,
+    progress_cb: Optional[Any] = None,
+) -> Dict[str, Any]:
+    url = item.resolved_url or item.url
+    target_path = checkpoints_dir / item.name
+    tmp_path = checkpoints_dir / f"{item.name}.part"
+    if _should_skip_checkpoint(target_path, item.size_bytes):
+        return {"name": item.name, "status": "skipped", "error": None}
+
+    headers: Dict[str, str] = {}
+    mode = "wb"
+    existing_size = 0
+    if tmp_path.exists():
+        try:
+            existing_size = tmp_path.stat().st_size
+        except OSError:
+            existing_size = 0
+    if existing_size:
+        headers["Range"] = f"bytes={existing_size}-"
+        mode = "ab"
+
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
+    bytes_downloaded = existing_size
+    last_emit = 0.0
+    last_percent = None
+
+    async with client.stream("GET", url, headers=headers, timeout=timeout) as resp:
+        if resp.status_code >= 400:
+            return {"name": item.name, "status": "error", "error": f"HTTP {resp.status_code}"}
+        if resp.status_code == 200 and headers.get("Range"):
+            tmp_path.unlink(missing_ok=True)
+            bytes_downloaded = 0
+            mode = "wb"
+
+        with open(tmp_path, mode) as f:
+            async for chunk in resp.aiter_bytes(chunk_size=8 * 1024 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                bytes_downloaded += len(chunk)
+                if progress_cb:
+                    total = item.size_bytes
+                    percent = None
+                    if total:
+                        percent = min(100.0, (bytes_downloaded / total) * 100.0)
+                    now = time.time()
+                    if percent is not None and (last_percent is None or percent - last_percent >= 1 or percent >= 100):
+                        last_percent = percent
+                    if now - last_emit >= 1 or (percent is not None and percent >= 100):
+                        last_emit = now
+                        await progress_cb(
+                            {
+                                "name": item.name,
+                                "percent": percent,
+                                "bytes_downloaded": bytes_downloaded,
+                                "bytes_total": total,
+                                "message": "Downloading",
+                            }
+                        )
+
+    tmp_path.replace(target_path)
+
+    if item.size_bytes is not None:
+        try:
+            final_size = target_path.stat().st_size
+        except OSError:
+            final_size = None
+        if final_size is None or final_size != item.size_bytes:
+            target_path.unlink(missing_ok=True)
+            return {"name": item.name, "status": "error", "error": "Downloaded size mismatch"}
+
+    meta = {
+        "resolved_url": item.resolved_url or item.url,
+        "etag": item.etag,
+        "last_modified": item.last_modified,
+        "size_bytes": item.size_bytes,
+    }
+    meta_path = checkpoints_dir / f"{item.name}.meta.json"
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2))
+    except OSError:
+        pass
+
+    return {"name": item.name, "status": "downloaded", "error": None}
 
 
 def _build_comfy_workflow(
@@ -270,6 +407,11 @@ async def comfy_health():
     }
 
 
+@app.get("/api/comfy/checkpoints")
+async def comfy_checkpoints():
+    return {"items": _list_checkpoint_items()}
+
+
 @app.post("/api/comfy/txt2img")
 async def comfy_txt2img(req: ComfyTxt2ImgRequest):
     job_id = str(uuid.uuid4())
@@ -309,6 +451,11 @@ async def comfy_sync(req: ComfySyncRequest):
         except Exception as exc:
             return {"error": f"Failed to download {checkpoint}: {exc}"}, 500
     return {"ok": True, "downloaded": missing}
+
+
+@app.get("/api/comfy/sync_status")
+async def comfy_sync_status():
+    return CHECKPOINT_SYNC_STATUS
 
 
 # ---------------------------
@@ -625,6 +772,11 @@ async def _broadcast_sync_event(sync_id: str, event_type: str, payload: Dict) ->
     await _broadcast_event(ev)
 
 
+async def _broadcast_checkpoint_sync_event(sync_id: str, event_type: str, payload: Dict) -> None:
+    ev = Event(job_id=sync_id, type=event_type, payload=payload)
+    await _broadcast_event(ev)
+
+
 async def _pull_ollama_model(sync_id: str, model: str, base_url: str) -> None:
     url = base_url.rstrip("/") + "/api/pull"
     payload = {"name": model, "stream": True}
@@ -706,6 +858,59 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
         await _broadcast_sync_event(sync_id, "sync_error", {"message": str(exc)})
 
 
+async def _sync_image_checkpoints(sync_id: str, items: List[ComfyCheckpointItem]) -> None:
+    checkpoints_dir = _comfy_checkpoints_dir()
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_SYNC_STATUS["active"] = True
+    CHECKPOINT_SYNC_STATUS["results"] = []
+    try:
+        await _broadcast_checkpoint_sync_event(
+            sync_id,
+            "image_checkpoint_sync_start",
+            {"items": [item.name for item in items]},
+        )
+
+        async def _progress(payload: Dict[str, Any]) -> None:
+            CHECKPOINT_SYNC_STATUS["last_progress"] = payload
+            await _broadcast_checkpoint_sync_event(sync_id, "image_checkpoint_sync_progress", payload)
+
+        results = []
+        async with httpx.AsyncClient() as client:
+            for item in items:
+                await _broadcast_checkpoint_sync_event(
+                    sync_id,
+                    "image_checkpoint_sync_progress",
+                    {"name": item.name, "percent": None, "message": "Queued"},
+                )
+                result = await _download_checkpoint_file(item, checkpoints_dir, client, progress_cb=_progress)
+                results.append(result)
+                await _broadcast_checkpoint_sync_event(
+                    sync_id,
+                    "image_checkpoint_sync_progress",
+                    {
+                        "name": item.name,
+                        "percent": 100 if result["status"] == "downloaded" else None,
+                        "message": result["status"].capitalize(),
+                        "error": result.get("error"),
+                    },
+                )
+
+        CHECKPOINT_SYNC_STATUS["results"] = results
+        CHECKPOINT_SYNC_STATUS["active"] = False
+        await _broadcast_checkpoint_sync_event(
+            sync_id,
+            "image_checkpoint_sync_done",
+            {"results": results},
+        )
+    except Exception as exc:
+        CHECKPOINT_SYNC_STATUS["active"] = False
+        await _broadcast_checkpoint_sync_event(
+            sync_id,
+            "image_checkpoint_sync_done",
+            {"results": [], "error": str(exc)},
+        )
+
+
 # ---------------------------
 # Jobs endpoint
 # ---------------------------
@@ -747,6 +952,23 @@ async def sync_models(req: SyncRequest):
         SYNC_TASKS.pop(sync_id, None)
         if t.exception():
             log.exception("Sync %s terminated with exception", sync_id)
+
+    task.add_done_callback(_on_done)
+    return {"sync_id": sync_id}
+
+
+@app.post("/api/comfy/sync_checkpoints")
+async def comfy_sync_checkpoints(req: ComfyCheckpointSyncRequest):
+    if not req.items:
+        return {"error": "No checkpoint items provided"}, 400
+    sync_id = str(uuid.uuid4())
+    task = asyncio.create_task(_sync_image_checkpoints(sync_id, req.items))
+    SYNC_TASKS[sync_id] = task
+
+    def _on_done(t: asyncio.Task):
+        SYNC_TASKS.pop(sync_id, None)
+        if t.exception():
+            log.exception("Checkpoint sync %s terminated with exception", sync_id)
 
     task.add_done_callback(_on_done)
     return {"sync_id": sync_id}
