@@ -35,6 +35,12 @@ ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
 CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
 MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
 COMFY_SETTINGS_PATH = CENTRAL_DIR / "config" / "comfyui.yaml"
+DEFAULT_CHECKPOINT_URL = (
+    "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/"
+    "sd_xl_base_1.0.safetensors"
+)
+CHECKPOINT_VALIDATION_TTL_S = 600
+CHECKPOINT_VALIDATION_CACHE: Dict[str, Dict[str, Any]] = {}
 
 import sys
 if str(ROOT_DIR) not in sys.path:
@@ -217,7 +223,8 @@ def _default_comfy_settings() -> Dict[str, Any]:
         "base_url": "",
         "models_path": "",
         "central_cache_path": str(CENTRAL_DIR / "model_cache" / "comfyui"),
-        "checkpoint_urls": [],
+        "checkpoint_urls": [DEFAULT_CHECKPOINT_URL],
+        "comfyui_checkpoints": [DEFAULT_CHECKPOINT_URL],
     }
 
 
@@ -230,6 +237,11 @@ def _load_comfy_settings() -> Dict[str, Any]:
     settings = _default_comfy_settings()
     if isinstance(comfy, dict):
         settings.update({k: v for k, v in comfy.items() if v is not None})
+    checkpoint_urls = settings.get("comfyui_checkpoints") or settings.get("checkpoint_urls") or []
+    if not checkpoint_urls:
+        checkpoint_urls = [DEFAULT_CHECKPOINT_URL]
+    settings["comfyui_checkpoints"] = checkpoint_urls
+    settings["checkpoint_urls"] = checkpoint_urls
     return settings
 
 
@@ -266,13 +278,127 @@ def _checkpoint_filename_from_url(url: str) -> str:
 
 def _checkpoint_entries(settings: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
     conf = settings or _load_comfy_settings()
-    urls = conf.get("checkpoint_urls") or []
+    urls = conf.get("comfyui_checkpoints") or conf.get("checkpoint_urls") or []
     entries = []
     for line in urls:
         entry = _checkpoint_entry_from_line(line)
         if entry:
             entries.append(entry)
     return entries
+
+
+def _extract_content_length(headers: Dict[str, str]) -> Optional[int]:
+    if not headers:
+        return None
+    content_range = headers.get("Content-Range") or headers.get("content-range")
+    if content_range:
+        match = re.search(r"/(\d+)", content_range)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    content_length = headers.get("Content-Length") or headers.get("content-length")
+    if content_length:
+        try:
+            return int(content_length)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_http_error(status: int, reason: Optional[str]) -> str:
+    if reason:
+        return f"HTTP {status}: {reason}"
+    return f"HTTP {status}"
+
+
+def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    cached = CHECKPOINT_VALIDATION_CACHE.get(url)
+    if cached and not force and now - cached["checked_at"] < CHECKPOINT_VALIDATION_TTL_S:
+        return cached["result"]
+
+    result = {
+        "url": url,
+        "resolved_url": None,
+        "valid": False,
+        "error": None,
+        "status": None,
+        "size_bytes": None,
+        "etag": None,
+        "last_modified": None,
+    }
+
+    if not url or not url.startswith(("http://", "https://")):
+        result["error"] = "URL must start with http:// or https://"
+    elif not url.split("?")[0].lower().endswith(".safetensors"):
+        result["error"] = "URL must end with .safetensors"
+    else:
+        response = None
+        try:
+            response = requests.head(url, allow_redirects=True, timeout=10)
+            if response.status_code in (405, 501):
+                response = None
+        except requests.RequestException:
+            response = None
+
+        if response is None:
+            try:
+                response = requests.get(
+                    url,
+                    allow_redirects=True,
+                    headers={"Range": "bytes=0-0"},
+                    stream=True,
+                    timeout=(10, 60),
+                )
+            except requests.RequestException as exc:
+                result["error"] = f"Request failed: {exc}"
+                response = None
+
+        if response is not None:
+            result["status"] = response.status_code
+            result["resolved_url"] = response.url
+            if response.status_code >= 400:
+                result["error"] = _format_http_error(response.status_code, response.reason)
+            else:
+                resolved_name = response.url.split("?")[0].lower()
+                if not resolved_name.endswith(".safetensors"):
+                    result["error"] = "Resolved URL must end with .safetensors"
+                else:
+                    result["valid"] = True
+                    result["etag"] = response.headers.get("ETag") or response.headers.get("etag")
+                    result["last_modified"] = response.headers.get("Last-Modified") or response.headers.get(
+                        "last-modified"
+                    )
+                    result["size_bytes"] = _extract_content_length(response.headers)
+            response.close()
+
+    CHECKPOINT_VALIDATION_CACHE[url] = {"result": result, "checked_at": now}
+    return result
+
+
+def _checkpoint_catalog(settings: Optional[Dict[str, Any]] = None, force: bool = False) -> List[Dict[str, Any]]:
+    entries = _checkpoint_entries(settings)
+    items = []
+    for entry in entries:
+        url = entry["url"]
+        validation = _validate_checkpoint_url(url, force=force)
+        resolved_url = validation.get("resolved_url") or url
+        items.append(
+            {
+                "name": _checkpoint_filename_from_url(resolved_url),
+                "url": url,
+                "resolved_url": validation.get("resolved_url"),
+                "size_bytes": validation.get("size_bytes"),
+                "etag": validation.get("etag"),
+                "last_modified": validation.get("last_modified"),
+                "valid": validation.get("valid", False),
+                "error": validation.get("error"),
+                "status": validation.get("status"),
+            }
+        )
+    return items
 
 
 def _list_cached_checkpoints(settings: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -841,11 +967,7 @@ def inference():
 @app.get("/image")
 def image():
     settings = _load_comfy_settings()
-    checkpoint_options = _list_cached_checkpoints(settings)
-    if not checkpoint_options:
-        checkpoint_options = [
-            _checkpoint_filename_from_url(entry["url"]) for entry in _checkpoint_entries(settings)
-        ]
+    checkpoint_options = [item["name"] for item in _checkpoint_catalog(settings) if item.get("valid")]
     return render_template("image.html", machines=MACHINES, checkpoint_options=checkpoint_options)
 
 
@@ -988,6 +1110,14 @@ def api_image_status():
                 }
             )
     return jsonify({"checkpoint": checkpoint, "machines": statuses})
+
+
+@app.get("/api/image/checkpoints")
+def api_image_checkpoints():
+    settings = _load_comfy_settings()
+    force = request.args.get("refresh") == "1"
+    items = _checkpoint_catalog(settings, force=force)
+    return jsonify({"items": items})
 
 
 @app.get("/api/runs")
@@ -1180,6 +1310,82 @@ def api_sync_image_models(machine_id: str):
         return jsonify(sync_resp.json())
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/machines/<machine_id>/sync_image_checkpoints")
+def api_sync_image_checkpoints(machine_id: str):
+    payload = request.get_json(force=True) or {}
+    checkpoint_names = payload.get("checkpoint_names") or []
+    if not isinstance(checkpoint_names, list):
+        return jsonify({"error": "checkpoint_names must be a list"}), 400
+
+    settings = _load_comfy_settings()
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    catalog = _checkpoint_catalog(settings)
+    valid_items = {item["name"]: item for item in catalog if item.get("valid")}
+    if checkpoint_names:
+        missing = [name for name in checkpoint_names if name not in valid_items]
+        if missing:
+            return jsonify({"error": f"Unknown or invalid checkpoints: {', '.join(missing)}"}), 400
+        items = [valid_items[name] for name in checkpoint_names]
+    else:
+        items = list(valid_items.values())
+
+    if not items:
+        return jsonify({"error": "No valid checkpoints to sync"}), 400
+
+    try:
+        sync_resp = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints",
+            json={"items": items},
+            timeout=5,
+        )
+        sync_resp.raise_for_status()
+        return jsonify(sync_resp.json())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/image/sync_checkpoints")
+def api_sync_image_checkpoints_all():
+    payload = request.get_json(force=True) or {}
+    checkpoint_names = payload.get("checkpoint_names") or []
+    if not isinstance(checkpoint_names, list):
+        return jsonify({"error": "checkpoint_names must be a list"}), 400
+
+    settings = _load_comfy_settings()
+    catalog = _checkpoint_catalog(settings)
+    valid_items = {item["name"]: item for item in catalog if item.get("valid")}
+    if checkpoint_names:
+        missing = [name for name in checkpoint_names if name not in valid_items]
+        if missing:
+            return jsonify({"error": f"Unknown or invalid checkpoints: {', '.join(missing)}"}), 400
+        items = [valid_items[name] for name in checkpoint_names]
+    else:
+        items = list(valid_items.values())
+
+    if not items:
+        return jsonify({"error": "No valid checkpoints to sync"}), 400
+
+    results = []
+    for machine in MACHINES:
+        machine_id = machine.get("machine_id")
+        if not machine_id:
+            continue
+        try:
+            sync_resp = requests.post(
+                f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints",
+                json={"items": items},
+                timeout=5,
+            )
+            sync_resp.raise_for_status()
+            results.append({"machine_id": machine_id, "ok": True, "response": sync_resp.json()})
+        except Exception as exc:
+            results.append({"machine_id": machine_id, "ok": False, "error": str(exc)})
+    return jsonify({"items": results})
 
 
 @app.post("/api/start_llm")
@@ -1530,7 +1736,11 @@ def api_set_comfy_settings():
     payload = request.get_json(force=True) or {}
     settings = _default_comfy_settings()
     settings.update({k: v for k, v in payload.items() if v is not None})
-    settings["checkpoint_urls"] = settings.get("checkpoint_urls") or []
+    checkpoint_urls = settings.get("comfyui_checkpoints") or settings.get("checkpoint_urls") or []
+    if not checkpoint_urls:
+        checkpoint_urls = [DEFAULT_CHECKPOINT_URL]
+    settings["checkpoint_urls"] = checkpoint_urls
+    settings["comfyui_checkpoints"] = checkpoint_urls
     _save_comfy_settings(settings)
     return jsonify({"ok": True, "settings": settings})
 

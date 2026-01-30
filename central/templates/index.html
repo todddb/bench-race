@@ -196,6 +196,13 @@
             <label for="comfy-checkpoints" class="control-label">Checkpoint URL List</label>
             <div class="help-text">One URL per line. Optional |sha256 after URL.</div>
             <textarea id="comfy-checkpoints" class="settings-textarea" rows="6"></textarea>
+            <div class="checkpoint-validation">
+              <div class="checkpoint-validation-header">
+                <span class="helper">Validation status</span>
+                <button id="recheck-checkpoints" class="btn btn-secondary btn-small" type="button">Re-check</button>
+              </div>
+              <div id="checkpoint-validation-list" class="checkpoint-validation-list"></div>
+            </div>
           </div>
           <div class="drawer-section">
             <h4 class="drawer-section-title">Performance</h4>
