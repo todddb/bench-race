@@ -223,6 +223,25 @@ body.options-collapsed .prompt-section { margin-top: 0; }
 body.options-collapsed .controls.card { padding-bottom: 12px; }
 body.options-expanded textarea.prompt { min-height: 220px; }
 
+/* Preview visibility for adaptive polling */
+.preview-hidden { display: none !important; }
+.preview-placeholder { min-height: 240px; background: #0b1020; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.2); display: flex; align-items: center; justify-content: center; color: #64748b; font-size: 12px; }
+.preview-placeholder::before { content: "Preview disabled when idle"; }
+
+/* Run active indicator */
+#run-active-indicator { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; margin-left: 8px; transition: background 0.2s ease; }
+#run-active-indicator.active { background: #22c55e; box-shadow: 0 0 8px rgba(34, 197, 94, 0.6); animation: pulse 1.5s ease infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+/* Polling settings form in settings drawer */
+.polling-settings { margin-top: 12px; padding: 12px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
+.polling-settings .setting-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+.polling-settings .setting-row:last-child { margin-bottom: 0; }
+.polling-settings .setting-label { font-size: 12px; color: #374151; font-weight: 500; }
+.polling-settings .setting-input { width: 80px; padding: 4px 8px; font-size: 12px; border-radius: 4px; border: 1px solid #d1d5db; }
+.polling-settings .setting-checkbox { width: 16px; height: 16px; }
+.polling-settings .setting-helper { font-size: 11px; color: #6b7280; margin-top: 4px; }
+
 /* Responsive: single-column grid on narrow screens */
 @media (max-width: 560px) {
   .grid { grid-template-columns: 1fr; }

@@ -5,12 +5,26 @@ const syncState = new Map();
 const liveOutput = new Map();
 const liveMetrics = new Map();
 const liveState = new Map();
-const STATUS_POLL_MS = 12000;
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
 const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
+const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
+
+// Adaptive polling configuration
+const DEFAULT_POLLING_CONFIG = {
+  idlePollIntervalMs: 30000,   // 30s when no runs active
+  activePollIntervalMs: 2000,  // 2s when runs active
+  uiUpdateThrottleMs: 500,     // Throttle UI updates to max 2/sec
+};
+let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
+
+// Global run state tracking
+let isRunActive = false;
+const activeRunIds = new Set();
+let statusPollTimer = null;
+let lastUiUpdate = 0;
 
 let baselineRunId = localStorage.getItem(BASELINE_KEY);
 let baselineRun = null;
@@ -28,6 +42,112 @@ const FALLBACK_REASONS = {
   missing_model: "Model not installed on Ollama",
   stream_error: "Streaming error occurred",
   unknown: "Unknown reason",
+};
+
+// Load saved polling settings from localStorage
+const loadPollingSettings = () => {
+  try {
+    const saved = localStorage.getItem(POLLING_SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      pollingConfig = { ...DEFAULT_POLLING_CONFIG, ...parsed };
+    }
+  } catch (e) {
+    console.warn("Failed to load polling settings:", e);
+  }
+};
+
+const savePollingSettings = () => {
+  try {
+    localStorage.setItem(POLLING_SETTINGS_KEY, JSON.stringify(pollingConfig));
+  } catch (e) {
+    console.warn("Failed to save polling settings:", e);
+  }
+};
+
+// Adaptive polling: switch between idle and active intervals
+const getCurrentPollInterval = () => {
+  return isRunActive ? pollingConfig.activePollIntervalMs : pollingConfig.idlePollIntervalMs;
+};
+
+const scheduleStatusPoll = () => {
+  if (statusPollTimer) {
+    clearTimeout(statusPollTimer);
+  }
+  const interval = getCurrentPollInterval();
+  statusPollTimer = setTimeout(async () => {
+    await fetchStatus();
+    scheduleStatusPoll();
+  }, interval);
+};
+
+const restartPolling = () => {
+  scheduleStatusPoll();
+};
+
+// Run state management
+const setRunActive = (active, runId = null) => {
+  const wasActive = isRunActive;
+  if (active && runId) {
+    activeRunIds.add(runId);
+  } else if (!active && runId) {
+    activeRunIds.delete(runId);
+  }
+  isRunActive = activeRunIds.size > 0;
+
+  // Update UI indicator if present
+  const indicator = document.getElementById("run-active-indicator");
+  if (indicator) {
+    indicator.classList.toggle("active", isRunActive);
+    indicator.title = isRunActive
+      ? `${activeRunIds.size} active run(s)`
+      : "No active runs";
+  }
+
+  // Restart polling if state changed
+  if (wasActive !== isRunActive) {
+    console.log(`Run state changed: ${wasActive} -> ${isRunActive}`);
+    restartPolling();
+  }
+};
+
+// Fetch active runs from server to initialize state
+const fetchActiveRuns = async () => {
+  try {
+    const response = await fetch("/api/runs/active");
+    if (!response.ok) return;
+    const data = await response.json();
+    activeRunIds.clear();
+    (data.run_ids || []).forEach((id) => activeRunIds.add(id));
+    isRunActive = data.is_active || false;
+    restartPolling();
+  } catch (error) {
+    console.warn("Failed to fetch active runs:", error);
+  }
+};
+
+// Throttle function for UI updates
+const throttle = (fn, delay) => {
+  let lastCall = 0;
+  let timeoutId = null;
+  return (...args) => {
+    const now = Date.now();
+    const remaining = delay - (now - lastCall);
+    if (remaining <= 0) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastCall = now;
+      fn(...args);
+    } else if (!timeoutId) {
+      timeoutId = setTimeout(() => {
+        lastCall = Date.now();
+        timeoutId = null;
+        fn(...args);
+      }, remaining);
+    }
+  };
 };
 
 const showToast = (message, type = "info") => {
@@ -754,6 +874,18 @@ socket.on("status", (msg) => {
   document.getElementById("status").innerText = msg.ok ? "Connected" : "Not connected";
 });
 
+// Handle run lifecycle events for adaptive polling
+socket.on("run_lifecycle", (event) => {
+  if (!event || !event.type) return;
+  if (event.type === "run_start") {
+    setRunActive(true, event.run_id);
+    console.log("Run started:", event.run_id);
+  } else if (event.type === "run_end") {
+    setRunActive(false, event.run_id);
+    console.log("Run ended:", event.run_id);
+  }
+});
+
 socket.on("connect", async () => {
   try {
     const response = await fetch("/api/machines");
@@ -770,6 +902,8 @@ socket.on("connect", async () => {
     await fetchStatus();
     await loadBaselineRun();
     await fetchRecentRuns();
+    // Initialize run state and start adaptive polling
+    await fetchActiveRuns();
   } catch (error) {
     console.error("Failed to load machines", error);
   }
@@ -949,6 +1083,11 @@ settingsButton?.addEventListener("click", async () => {
         checkpointsInput.value = (comfy.checkpoint_urls || []).join("\n");
       }
     }
+    // Load polling settings into form
+    const idlePollInput = document.getElementById("idle-poll-interval");
+    const activePollInput = document.getElementById("active-poll-interval");
+    if (idlePollInput) idlePollInput.value = Math.round(pollingConfig.idlePollIntervalMs / 1000);
+    if (activePollInput) activePollInput.value = pollingConfig.activePollIntervalMs;
     setPolicyFeedback("", "");
     toggleOverlay("settings");
   } catch (error) {
@@ -1013,6 +1152,17 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
         checkpoint_urls: checkpointUrls,
       }),
     });
+    // Save polling settings from form
+    const idlePollInput = document.getElementById("idle-poll-interval");
+    const activePollInput = document.getElementById("active-poll-interval");
+    if (idlePollInput) {
+      pollingConfig.idlePollIntervalMs = parseInt(idlePollInput.value, 10) * 1000;
+    }
+    if (activePollInput) {
+      pollingConfig.activePollIntervalMs = parseInt(activePollInput.value, 10);
+    }
+    savePollingSettings();
+    restartPolling();
     if (data.missing && Object.keys(data.missing).length > 0) {
       const lines = Object.entries(data.missing).map(
         ([model, machines]) => `${model}: missing on ${machines.join(", ")}`,
@@ -1130,9 +1280,10 @@ document.getElementById("run-view-export-json")?.addEventListener("click", () =>
   window.location.href = `/api/runs/${encodeURIComponent(viewingRunId)}/export.json`;
 });
 
-setInterval(() => {
-  fetchStatus();
-}, STATUS_POLL_MS);
+// Initialize adaptive polling (replaces fixed setInterval)
+// Load polling settings and start adaptive polling
+loadPollingSettings();
+scheduleStatusPoll();
 
 const params = new URLSearchParams(window.location.search);
 const runId = params.get("run_id");
