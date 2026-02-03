@@ -244,6 +244,39 @@ def _summarize_comfy_payload(workflow: Dict[str, Any]) -> str:
         return "unable to summarize"
 
 
+def _validate_comfy_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate and clean ComfyUI workflow to ensure only valid nodes are included.
+
+    ComfyUI requires that the prompt graph contains ONLY node IDs, where each node
+    is a dict with a "class_type" property. Any other keys (like "outputs", metadata, etc.)
+    will cause a 400 invalid_prompt error.
+
+    Returns a cleaned workflow with only valid nodes.
+    """
+    if not isinstance(workflow, dict):
+        return workflow
+
+    cleaned = {}
+    stripped_keys = []
+
+    for key, value in workflow.items():
+        # Valid nodes must be dicts with a "class_type" property
+        if isinstance(value, dict) and "class_type" in value:
+            cleaned[key] = value
+        else:
+            stripped_keys.append(key)
+
+    if stripped_keys:
+        log.warning(
+            "Stripped non-node keys from ComfyUI workflow before sending: %s. "
+            "These keys do not have 'class_type' and would cause invalid_prompt error.",
+            stripped_keys
+        )
+
+    return cleaned
+
+
 def _should_skip_checkpoint(path: Path, size_bytes: Optional[int]) -> bool:
     if not path.exists():
         return False
@@ -344,6 +377,12 @@ async def _download_checkpoint_file(
     return {"name": item.name, "status": "downloaded", "error": None}
 
 
+# ComfyUI workflow output node metadata (stored separately from workflow graph)
+# This is NOT sent to ComfyUI - it's metadata for our internal use
+COMFY_OUTPUT_NODE = "7"  # SaveImage node ID
+COMFY_OUTPUT_INDEX = 0   # Output slot index
+
+
 def _build_comfy_workflow(
     prompt: str,
     checkpoint: str,
@@ -352,6 +391,7 @@ def _build_comfy_workflow(
     width: int,
     height: int,
 ) -> Dict[str, Any]:
+    """Build ComfyUI workflow graph with ONLY valid nodes (no metadata keys)."""
     return {
         "1": {
             "class_type": "CheckpointLoaderSimple",
@@ -392,7 +432,6 @@ def _build_comfy_workflow(
             "class_type": "SaveImage",
             "inputs": {"images": ["6", 0], "filename_prefix": "bench_race"},
         },
-        "outputs": {"7": ["7", 0]},
     }
 
 
@@ -678,15 +717,19 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 req.width,
                 req.height,
             )
-            # Save debug payload if enabled
-            debug_file = _save_comfy_debug_payload(workflow, req.run_id)
+
+            # Validate and clean workflow (strip any non-node keys)
+            cleaned_workflow = _validate_comfy_workflow(workflow)
+
+            # Save debug payload if enabled (save the cleaned version that will be sent)
+            debug_file = _save_comfy_debug_payload(cleaned_workflow, req.run_id)
             if debug_file:
                 log.info("Saved ComfyUI payload to debug file: %s", debug_file)
 
             try:
                 resp = await client.post(
                     f"{base_url}/prompt",
-                    json={"prompt": workflow, "client_id": client_id},
+                    json={"prompt": cleaned_workflow, "client_id": client_id},
                 )
                 resp.raise_for_status()
                 prompt_id = resp.json().get("prompt_id")
@@ -698,7 +741,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 except Exception:
                     response_body = "<unable to read response body>"
 
-                payload_summary = _summarize_comfy_payload(workflow)
+                payload_summary = _summarize_comfy_payload(cleaned_workflow)
 
                 # Log comprehensive diagnostics
                 log.error(
@@ -724,7 +767,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 return
             except Exception as exc:
                 # Handle other errors (connection errors, timeouts, etc.)
-                payload_summary = _summarize_comfy_payload(workflow)
+                payload_summary = _summarize_comfy_payload(cleaned_workflow)
                 log.error(
                     "ComfyUI POST /prompt failed: exception=%s, payload_summary=%s, debug_file=%s",
                     exc,
