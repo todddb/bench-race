@@ -1,7 +1,28 @@
 comfyui:
+  # Base URL for ComfyUI API (usually empty, uses agent-local config)
   base_url: ''
-  models_path: ''
+
+  # Path where central caches downloaded checkpoints before serving to agents
   central_cache_path: central/model_cache/comfyui
+
+  # Default path where agents cache downloaded checkpoints (repo-relative)
+  # Agents can override this in their agent.yaml
+  agent_cache_path: agent/model_cache/comfyui
+
+  # Default path where ComfyUI scans for checkpoints (repo-relative)
+  # For embedded ComfyUI: agent/third_party/comfyui/models/checkpoints
+  # For system ComfyUI: override in agent.yaml (e.g., /opt/comfyui/models/checkpoints)
+  comfyui_models_path: agent/third_party/comfyui/models/checkpoints
+
+  # Deprecated: use comfyui_models_path instead
+  models_path: ''
+
+  # List of checkpoint URLs to download and sync
+  # Supports multiple formats:
+  #   - Simple: https://example.com/checkpoint.safetensors
+  #   - With label: sdxl-base-1.0 | https://example.com/sd_xl_base_1.0.safetensors
+  #   - With hash: https://example.com/checkpoint.safetensors | sha256:abc123...
+  #   - Full: sdxl-base-1.0 | https://example.com/sd_xl_base_1.0.safetensors | sha256:abc123...
   checkpoint_urls: &id001
   - https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors
   comfyui_checkpoints: *id001

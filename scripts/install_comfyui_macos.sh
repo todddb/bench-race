@@ -39,8 +39,23 @@ log "Installing dependencies"
 log "Installing PyTorch (macOS default build)"
 "$VENV_DIR/bin/pip" install torch torchvision
 
-log "ComfyUI installed."
+# Create required directories for checkpoint sync
+CACHE_DIR="$REPO_ROOT/agent/model_cache/comfyui"
+CHECKPOINTS_DIR="$COMFY_DIR/models/checkpoints"
+
+log "Creating checkpoint directories"
+mkdir -p "$CACHE_DIR"
+mkdir -p "$CHECKPOINTS_DIR"
+
+log "ComfyUI installed at $COMFY_DIR"
+log "Checkpoint cache: $CACHE_DIR"
+log "ComfyUI models: $CHECKPOINTS_DIR"
+log ""
 log "Next steps:"
-log "1) Copy agent/config/agent.example.yaml to agent/config/agent.yaml and set comfyui.checkpoints_dir."
-log "2) Download SDXL checkpoints into your checkpoints directory."
-log "3) Start the agent with: bin/control agent start"
+log "1) Copy agent/config/agent.example.yaml to agent/config/agent.yaml"
+log "   The default paths are already set to use repo-relative directories."
+log "2) Copy central/config/comfyui.example.yaml to central/config/comfyui.yaml"
+log "   (This will happen automatically on first central startup if missing)"
+log "3) Start the agent: bin/control agent start"
+log "4) Start the central: bin/control central start"
+log "5) Use the central UI to sync checkpoints to agents (no manual downloads needed!)"
