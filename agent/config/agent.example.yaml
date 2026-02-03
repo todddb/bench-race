@@ -31,3 +31,7 @@ comfyui:
   host: "127.0.0.1"
   port: 8188
   checkpoints_dir: "/opt/comfyui/models/checkpoints"
+  # Enable debug logging for ComfyUI /prompt failures
+  # Saves full request payloads to logs/debug/ for reproduction
+  # Can also be enabled via COMFY_DEBUG=1 environment variable
+  debug: true
