@@ -259,21 +259,80 @@ def _comfy_cache_dir(settings: Optional[Dict[str, Any]] = None) -> Path:
     return path
 
 
+def _checkpoint_filename_from_url(url: str) -> str:
+    """Extract filename from URL (without query params)."""
+    name = url.split("?")[0].rstrip("/").split("/")[-1]
+    return name or url
+
+
+def _generate_label_from_filename(filename: str) -> str:
+    """Generate human-friendly label from checkpoint filename.
+
+    Examples:
+        sd_xl_base_1.0.safetensors -> sdxl-base-1.0
+        flux-dev.safetensors -> flux-dev
+        my_model_v2.safetensors -> my-model-v2
+    """
+    # Remove .safetensors extension
+    name = filename.replace(".safetensors", "")
+    # Replace underscores with hyphens and normalize
+    name = name.replace("_", "-")
+    # Collapse multiple hyphens
+    name = re.sub(r"-+", "-", name)
+    # Remove leading/trailing hyphens
+    name = name.strip("-")
+    return name or filename
+
+
 def _checkpoint_entry_from_line(line: str) -> Optional[Dict[str, str]]:
+    """Parse checkpoint config line into entry dict.
+
+    Supports formats:
+    - <url>                          # Plain URL (backwards compatible)
+    - <url> | <sha256>              # URL with hash (backwards compatible)
+    - <url> | <label>               # URL with custom label
+    - <label> | <url>               # Label first, then URL
+    - <url> | <label> | <sha256>    # URL, label, and hash
+
+    Returns dict with keys: url, label (optional), sha256 (optional), filename
+    """
     if not line:
         return None
     parts = [part.strip() for part in line.split("|") if part.strip()]
     if not parts:
         return None
-    entry = {"url": parts[0]}
-    if len(parts) > 1:
-        entry["sha256"] = parts[1]
+
+    # Determine which part is the URL (must start with http:// or https://)
+    url_idx = None
+    for idx, part in enumerate(parts):
+        if part.startswith(("http://", "https://")):
+            url_idx = idx
+            break
+
+    if url_idx is None:
+        # No valid URL found, treat first part as URL for backwards compatibility
+        url_idx = 0
+
+    entry = {"url": parts[url_idx]}
+    filename = _checkpoint_filename_from_url(entry["url"])
+    entry["filename"] = filename
+
+    # Parse remaining parts
+    for idx, part in enumerate(parts):
+        if idx == url_idx:
+            continue
+        # Check if it's a SHA256 hash (64 hex chars)
+        if len(part) == 64 and all(c in "0123456789abcdefABCDEF" for c in part):
+            entry["sha256"] = part
+        else:
+            # Treat as custom label
+            entry["label"] = part
+
+    # Generate default label if not provided
+    if "label" not in entry:
+        entry["label"] = _generate_label_from_filename(filename)
+
     return entry
-
-
-def _checkpoint_filename_from_url(url: str) -> str:
-    name = url.split("?")[0].rstrip("/").split("/")[-1]
-    return name or url
 
 
 def _checkpoint_entries(settings: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
@@ -313,7 +372,17 @@ def _format_http_error(status: int, reason: Optional[str]) -> str:
     return f"HTTP {status}"
 
 
-def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
+def _validate_checkpoint_url(url: str, filename: str, force: bool = False) -> Dict[str, Any]:
+    """Validate checkpoint URL and metadata.
+
+    Args:
+        url: The checkpoint download URL
+        filename: The intended checkpoint filename (must end with .safetensors)
+        force: Force revalidation even if cached
+
+    Returns:
+        Dict with validation result including valid, error, size_bytes, etag, etc.
+    """
     now = time.time()
     cached = CHECKPOINT_VALIDATION_CACHE.get(url)
     if cached and not force and now - cached["checked_at"] < CHECKPOINT_VALIDATION_TTL_S:
@@ -332,8 +401,8 @@ def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
 
     if not url or not url.startswith(("http://", "https://")):
         result["error"] = "URL must start with http:// or https://"
-    elif not url.split("?")[0].lower().endswith(".safetensors"):
-        result["error"] = "URL must end with .safetensors"
+    elif not filename.lower().endswith(".safetensors"):
+        result["error"] = "Checkpoint filename must end with .safetensors"
     else:
         response = None
         try:
@@ -362,8 +431,7 @@ def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
             if response.status_code >= 400:
                 result["error"] = _format_http_error(response.status_code, response.reason)
             else:
-                original_name = url.split("?")[0].lower()
-                resolved_name = response.url.split("?")[0].lower()
+                # Check Content-Disposition header for filename validation
                 content_disp = response.headers.get("Content-Disposition") or response.headers.get(
                     "content-disposition"
                 )
@@ -378,15 +446,10 @@ def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
                     elif match_plain:
                         filename_from_header = match_plain.group("name")
 
-                def _has_safetensors(name: Optional[str]) -> bool:
-                    return bool(name and name.split("?")[0].lower().endswith(".safetensors"))
-
-                if not (
-                    _has_safetensors(resolved_name)
-                    or _has_safetensors(original_name)
-                    or _has_safetensors(filename_from_header)
-                ):
-                    result["error"] = "Resolved URL must end with .safetensors"
+                # Validate Content-Disposition filename if present
+                # (allows HF/Xet signed URLs whose path doesn't end with .safetensors)
+                if filename_from_header and not filename_from_header.lower().endswith(".safetensors"):
+                    result["error"] = f"Content-Disposition filename must end with .safetensors (got: {filename_from_header})"
                 else:
                     result["valid"] = True
                     result["etag"] = response.headers.get("ETag") or response.headers.get("etag")
@@ -401,15 +464,30 @@ def _validate_checkpoint_url(url: str, force: bool = False) -> Dict[str, Any]:
 
 
 def _checkpoint_catalog(settings: Optional[Dict[str, Any]] = None, force: bool = False) -> List[Dict[str, Any]]:
+    """Build checkpoint catalog with id, label, and filename.
+
+    Returns list of checkpoint objects with:
+    - id: SHA256 hash of URL (stable internal identifier)
+    - label: Human-friendly name shown in UI
+    - filename: Exact filename expected by ComfyUI
+    - url, resolved_url, size_bytes, etag, last_modified, valid, error, status
+    """
     entries = _checkpoint_entries(settings)
     items = []
     for entry in entries:
         url = entry["url"]
-        validation = _validate_checkpoint_url(url, force=force)
-        resolved_url = validation.get("resolved_url") or url
+        filename = entry["filename"]
+        label = entry["label"]
+
+        # Generate stable ID from URL (SHA256 hash)
+        checkpoint_id = hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+        validation = _validate_checkpoint_url(url, filename, force=force)
         items.append(
             {
-                "name": _checkpoint_filename_from_url(resolved_url),
+                "id": checkpoint_id,
+                "label": label,
+                "filename": filename,
                 "url": url,
                 "resolved_url": validation.get("resolved_url"),
                 "size_bytes": validation.get("size_bytes"),
@@ -418,9 +496,33 @@ def _checkpoint_catalog(settings: Optional[Dict[str, Any]] = None, force: bool =
                 "valid": validation.get("valid", False),
                 "error": validation.get("error"),
                 "status": validation.get("status"),
+                # Keep "name" for backwards compatibility (deprecated)
+                "name": filename,
             }
         )
     return items
+
+
+def _find_checkpoint_by_id(checkpoint_id: str, settings: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Find checkpoint in catalog by ID.
+
+    Args:
+        checkpoint_id: The checkpoint ID (SHA256 hash of URL) or filename (for backwards compat)
+        settings: Optional settings dict
+
+    Returns:
+        Checkpoint object with id, label, filename, etc., or None if not found
+    """
+    catalog = _checkpoint_catalog(settings)
+    # Try to find by ID first
+    checkpoint = next((item for item in catalog if item["id"] == checkpoint_id), None)
+    # Fall back to filename match for backwards compatibility
+    if not checkpoint:
+        checkpoint = next((item for item in catalog if item["filename"] == checkpoint_id), None)
+    # Fall back to name match for backwards compatibility
+    if not checkpoint:
+        checkpoint = next((item for item in catalog if item.get("name") == checkpoint_id), None)
+    return checkpoint
 
 
 def _list_cached_checkpoints(settings: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1094,7 +1196,17 @@ def api_status():
 
 @app.get("/api/image/status")
 def api_image_status():
-    checkpoint = request.args.get("checkpoint") or ""
+    checkpoint_id = request.args.get("checkpoint") or ""
+    # Look up checkpoint by ID to get filename
+    checkpoint_filename = ""
+    if checkpoint_id:
+        checkpoint_obj = _find_checkpoint_by_id(checkpoint_id)
+        if checkpoint_obj:
+            checkpoint_filename = checkpoint_obj["filename"]
+        else:
+            # Fall back to treating it as a filename for backwards compatibility
+            checkpoint_filename = checkpoint_id
+
     statuses = []
     for m in MACHINES:
         last_checked = time.time()
@@ -1103,7 +1215,7 @@ def api_image_status():
             r.raise_for_status()
             cap = r.json()
             checkpoints = cap.get("checkpoints") or []
-            has_checkpoint = bool(checkpoint and checkpoint in checkpoints)
+            has_checkpoint = bool(checkpoint_filename and checkpoint_filename in checkpoints)
             statuses.append(
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
@@ -1112,7 +1224,7 @@ def api_image_status():
                     "comfy_running": cap.get("running", False),
                     "checkpoints": checkpoints,
                     "has_checkpoint": has_checkpoint,
-                    "missing_checkpoint": checkpoint if checkpoint and not has_checkpoint else None,
+                    "missing_checkpoint": checkpoint_id if checkpoint_id and not has_checkpoint else None,
                     "last_checked": last_checked,
                     "error": cap.get("error"),
                 }
@@ -1126,12 +1238,12 @@ def api_image_status():
                     "comfy_running": False,
                     "checkpoints": [],
                     "has_checkpoint": False,
-                    "missing_checkpoint": checkpoint or None,
+                    "missing_checkpoint": checkpoint_id or None,
                     "last_checked": last_checked,
                     "error": str(e),
                 }
             )
-    return jsonify({"checkpoint": checkpoint, "machines": statuses})
+    return jsonify({"checkpoint": checkpoint_id, "machines": statuses})
 
 
 @app.get("/api/image/checkpoints")
@@ -1337,8 +1449,8 @@ def api_sync_image_models(machine_id: str):
 @app.post("/api/machines/<machine_id>/sync_image_checkpoints")
 def api_sync_image_checkpoints(machine_id: str):
     payload = request.get_json(force=True) or {}
-    checkpoint_names = payload.get("checkpoint_names") or []
-    if not isinstance(checkpoint_names, list):
+    checkpoint_ids = payload.get("checkpoint_names") or []  # Name kept for backwards compat
+    if not isinstance(checkpoint_ids, list):
         return jsonify({"error": "checkpoint_names must be a list"}), 400
 
     settings = _load_comfy_settings()
@@ -1347,14 +1459,29 @@ def api_sync_image_checkpoints(machine_id: str):
         return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
 
     catalog = _checkpoint_catalog(settings)
-    valid_items = {item["name"]: item for item in catalog if item.get("valid")}
-    if checkpoint_names:
-        missing = [name for name in checkpoint_names if name not in valid_items]
+    # Build lookup by ID, filename, and name for backwards compatibility
+    valid_items_by_id = {item["id"]: item for item in catalog if item.get("valid")}
+    valid_items_by_filename = {item["filename"]: item for item in catalog if item.get("valid")}
+    valid_items_by_name = {item["name"]: item for item in catalog if item.get("valid")}
+
+    if checkpoint_ids:
+        items = []
+        missing = []
+        for checkpoint_id in checkpoint_ids:
+            # Try lookup by ID first, then filename, then name
+            item = (
+                valid_items_by_id.get(checkpoint_id)
+                or valid_items_by_filename.get(checkpoint_id)
+                or valid_items_by_name.get(checkpoint_id)
+            )
+            if item:
+                items.append(item)
+            else:
+                missing.append(checkpoint_id)
         if missing:
             return jsonify({"error": f"Unknown or invalid checkpoints: {', '.join(missing)}"}), 400
-        items = [valid_items[name] for name in checkpoint_names]
     else:
-        items = list(valid_items.values())
+        items = list(valid_items_by_id.values())
 
     if not items:
         return jsonify({"error": "No valid checkpoints to sync"}), 400
@@ -1374,20 +1501,35 @@ def api_sync_image_checkpoints(machine_id: str):
 @app.post("/api/image/sync_checkpoints")
 def api_sync_image_checkpoints_all():
     payload = request.get_json(force=True) or {}
-    checkpoint_names = payload.get("checkpoint_names") or []
-    if not isinstance(checkpoint_names, list):
+    checkpoint_ids = payload.get("checkpoint_names") or []  # Name kept for backwards compat
+    if not isinstance(checkpoint_ids, list):
         return jsonify({"error": "checkpoint_names must be a list"}), 400
 
     settings = _load_comfy_settings()
     catalog = _checkpoint_catalog(settings)
-    valid_items = {item["name"]: item for item in catalog if item.get("valid")}
-    if checkpoint_names:
-        missing = [name for name in checkpoint_names if name not in valid_items]
+    # Build lookup by ID, filename, and name for backwards compatibility
+    valid_items_by_id = {item["id"]: item for item in catalog if item.get("valid")}
+    valid_items_by_filename = {item["filename"]: item for item in catalog if item.get("valid")}
+    valid_items_by_name = {item["name"]: item for item in catalog if item.get("valid")}
+
+    if checkpoint_ids:
+        items = []
+        missing = []
+        for checkpoint_id in checkpoint_ids:
+            # Try lookup by ID first, then filename, then name
+            item = (
+                valid_items_by_id.get(checkpoint_id)
+                or valid_items_by_filename.get(checkpoint_id)
+                or valid_items_by_name.get(checkpoint_id)
+            )
+            if item:
+                items.append(item)
+            else:
+                missing.append(checkpoint_id)
         if missing:
             return jsonify({"error": f"Unknown or invalid checkpoints: {', '.join(missing)}"}), 400
-        items = [valid_items[name] for name in checkpoint_names]
     else:
-        items = list(valid_items.values())
+        items = list(valid_items_by_id.values())
 
     if not items:
         return jsonify({"error": "No valid checkpoints to sync"}), 400
@@ -1529,7 +1671,7 @@ def api_start_image():
     payload = request.get_json(force=True) or {}
 
     prompt = payload.get("prompt", "")
-    checkpoint = payload.get("checkpoint", "")
+    checkpoint_id = payload.get("checkpoint", "")
     seed_mode = payload.get("seed_mode", "fixed")
     seed = payload.get("seed")
     steps = int(payload.get("steps", 30))
@@ -1541,9 +1683,17 @@ def api_start_image():
     if seed_mode == "random" or seed is None:
         seed = random.randint(1, 2**31 - 1)
 
-    # Validate checkpoint name is provided (URL not required at run time - only for sync)
-    if not checkpoint:
-        return jsonify({"error": "Missing checkpoint name"}), 400
+    # Validate checkpoint ID is provided
+    if not checkpoint_id:
+        return jsonify({"error": "Missing checkpoint"}), 400
+
+    # Look up checkpoint by ID to get filename and label
+    checkpoint_obj = _find_checkpoint_by_id(checkpoint_id)
+    if not checkpoint_obj:
+        return jsonify({"error": f"Checkpoint not found: {checkpoint_id}"}), 400
+
+    checkpoint_filename = checkpoint_obj["filename"]
+    checkpoint_label = checkpoint_obj["label"]
 
     run_timestamp = datetime.now(timezone.utc)
     run_id = _new_run_id(run_timestamp)
@@ -1553,11 +1703,13 @@ def api_start_image():
         "run_id": run_id,
         "timestamp": run_timestamp.isoformat(),
         "type": "image",
-        "model": checkpoint,
+        "model": checkpoint_label,  # Display label in UI
         "prompt_text": prompt,
         "prompt_hash": prompt_hash,
         "settings": {
-            "checkpoint": checkpoint,
+            "checkpoint": checkpoint_label,  # Store label for display
+            "checkpoint_id": checkpoint_id,  # Store ID for reference
+            "checkpoint_filename": checkpoint_filename,  # Store filename for reference
             "seed_mode": seed_mode,
             "seed": seed,
             "steps": steps,
@@ -1580,7 +1732,8 @@ def api_start_image():
             health.raise_for_status()
             cap = health.json()
             checkpoints = cap.get("checkpoints") or []
-            if checkpoint and checkpoint not in checkpoints:
+            # Check if checkpoint filename exists on agent
+            if checkpoint_filename and checkpoint_filename not in checkpoints:
                 run_record["machines"].append(
                     {
                         "machine_id": m.get("machine_id"),
@@ -1592,12 +1745,13 @@ def api_start_image():
                 results.append({"machine_id": m.get("machine_id"), "skipped": True, "reason": "checkpoint_not_synced"})
                 continue
 
+            # Send filename to agent (ComfyUI expects exact filename)
             resp = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/api/comfy/txt2img",
                 json={
                     "run_id": run_id,
                     "prompt": prompt,
-                    "checkpoint": checkpoint,
+                    "checkpoint": checkpoint_filename,  # Pass filename to agent
                     "seed": seed,
                     "steps": steps,
                     "width": width,
@@ -1623,7 +1777,7 @@ def api_start_image():
                     "label": m.get("label"),
                     "status": "pending",
                     "job_id": agent_job_id,
-                    "checkpoint": checkpoint,
+                    "checkpoint": checkpoint_label,  # Store label for display
                 }
             )
         except Exception as exc:

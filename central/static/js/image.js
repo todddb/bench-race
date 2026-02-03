@@ -248,7 +248,15 @@ const renderCheckpointValidation = (items) => {
     dot.className = `status-dot ${item.valid ? "ok" : "error"}`;
     const content = document.createElement("div");
     const title = document.createElement("div");
-    title.textContent = item.name || item.url;
+    // Display label with filename in secondary text
+    title.textContent = item.label || item.name || item.url;
+    if (item.label && item.filename && item.label !== item.filename) {
+      const filenameSub = document.createElement("span");
+      filenameSub.style.fontSize = "0.85em";
+      filenameSub.style.color = "var(--text-secondary, #666)";
+      filenameSub.textContent = ` (${item.filename})`;
+      title.appendChild(filenameSub);
+    }
     const meta = document.createElement("div");
     meta.className = "checkpoint-validation-meta";
     const statusText = item.valid ? "Valid" : item.error || "Invalid";
@@ -272,11 +280,17 @@ const renderCheckpointOptions = (items) => {
   select.innerHTML = "";
   items.forEach((item) => {
     const option = document.createElement("option");
-    option.value = item.name;
-    option.textContent = item.name;
+    // Store by ID (stable across configs), display label
+    option.value = item.id || item.name; // Fallback to name for backwards compat
+    option.textContent = item.label || item.name;
+    // Add filename as data attribute for tooltip/reference
+    if (item.filename) {
+      option.setAttribute("data-filename", item.filename);
+      option.setAttribute("title", `File: ${item.filename}`);
+    }
     select.appendChild(option);
   });
-  if (current && items.some((item) => item.name === current)) {
+  if (current && items.some((item) => (item.id || item.name) === current)) {
     select.value = current;
   }
 };
@@ -421,9 +435,17 @@ const setPreviewImage = (machineId, src, force = false) => {
   }
 };
 
-const updateCheckpointLabel = (checkpoint) => {
+const updateCheckpointLabel = (checkpointId) => {
+  // Find checkpoint in catalog by ID to get label
+  let label = checkpointId || "--";
+  if (checkpointId && checkpointCatalog.length > 0) {
+    const found = checkpointCatalog.find((item) => (item.id || item.name) === checkpointId);
+    if (found) {
+      label = found.label || found.name || checkpointId;
+    }
+  }
   document.querySelectorAll(".model-fit").forEach((el) => {
-    el.textContent = checkpoint ? `Checkpoint: ${checkpoint}` : "Checkpoint: --";
+    el.textContent = `Checkpoint: ${label}`;
   });
 };
 
