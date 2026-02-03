@@ -1541,10 +1541,9 @@ def api_start_image():
     if seed_mode == "random" or seed is None:
         seed = random.randint(1, 2**31 - 1)
 
-    settings = _load_comfy_settings()
-    checkpoint_error = _ensure_checkpoint_cached(checkpoint, settings)
-    if checkpoint_error:
-        return jsonify({"error": checkpoint_error}), 400
+    # Validate checkpoint name is provided (URL not required at run time - only for sync)
+    if not checkpoint:
+        return jsonify({"error": "Missing checkpoint name"}), 400
 
     run_timestamp = datetime.now(timezone.utc)
     run_id = _new_run_id(run_timestamp)
@@ -1587,10 +1586,10 @@ def api_start_image():
                         "machine_id": m.get("machine_id"),
                         "label": m.get("label"),
                         "status": "blocked",
-                        "error": "Missing checkpoint",
+                        "error": "Checkpoint not synced to agent",
                     }
                 )
-                results.append({"machine_id": m.get("machine_id"), "skipped": True, "reason": "missing_checkpoint"})
+                results.append({"machine_id": m.get("machine_id"), "skipped": True, "reason": "checkpoint_not_synced"})
                 continue
 
             resp = requests.post(

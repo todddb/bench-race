@@ -591,7 +591,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
             Event(
                 job_id=job_id,
                 type="image_error",
-                payload={"run_id": req.run_id, "message": "Checkpoint missing on agent"},
+                payload={"run_id": req.run_id, "message": "Checkpoint not synced to agent"},
             )
         )
         return
