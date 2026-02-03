@@ -73,6 +73,10 @@ embeddings/
 outputs/
 sdxl_models/
 
+# Model caches (checkpoints downloaded by central/agent)
+central/model_cache/
+agent/model_cache/
+
 
 # Runtime
 run/*.pid

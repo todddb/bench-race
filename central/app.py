@@ -221,8 +221,10 @@ def _get_active_runs() -> Dict[str, Any]:
 def _default_comfy_settings() -> Dict[str, Any]:
     return {
         "base_url": "",
-        "models_path": "",
+        "models_path": "",  # Deprecated, use comfyui_models_path
         "central_cache_path": str(CENTRAL_DIR / "model_cache" / "comfyui"),
+        "agent_cache_path": str(ROOT_DIR / "agent" / "model_cache" / "comfyui"),
+        "comfyui_models_path": str(ROOT_DIR / "agent" / "third_party" / "comfyui" / "models" / "checkpoints"),
         "checkpoint_urls": [DEFAULT_CHECKPOINT_URL],
         "comfyui_checkpoints": [DEFAULT_CHECKPOINT_URL],
     }
@@ -230,7 +232,17 @@ def _default_comfy_settings() -> Dict[str, Any]:
 
 def _load_comfy_settings() -> Dict[str, Any]:
     if not COMFY_SETTINGS_PATH.exists():
-        return _default_comfy_settings()
+        # Auto-copy example config if missing
+        example_path = COMFY_SETTINGS_PATH.parent / "comfyui.example.yaml"
+        if example_path.exists():
+            COMFY_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(example_path, COMFY_SETTINGS_PATH)
+            log.warning(
+                f"Created {COMFY_SETTINGS_PATH.name} from example. "
+                "Please review and customize checkpoint URLs if needed."
+            )
+        else:
+            return _default_comfy_settings()
     with open(COMFY_SETTINGS_PATH, "r", encoding="utf-8") as f:
         payload = yaml.safe_load(f) or {}
     comfy = payload.get("comfyui") if isinstance(payload, dict) else {}

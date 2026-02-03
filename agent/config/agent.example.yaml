@@ -30,7 +30,16 @@ comfyui:
   enabled: true
   host: "127.0.0.1"
   port: 8188
-  checkpoints_dir: "/opt/comfyui/models/checkpoints"
+
+  # Path where agent caches downloaded checkpoints (before symlinking to ComfyUI)
+  # Default: agent/model_cache/comfyui (repo-relative)
+  cache_path: "agent/model_cache/comfyui"
+
+  # Path where ComfyUI scans for checkpoints
+  # Default: agent/third_party/comfyui/models/checkpoints (repo-relative embedded ComfyUI)
+  # Override for system installs: /opt/comfyui/models/checkpoints
+  checkpoints_dir: "agent/third_party/comfyui/models/checkpoints"
+
   # Enable debug logging for ComfyUI /prompt failures
   # Saves full request payloads to logs/debug/ for reproduction
   # Can also be enabled via COMFY_DEBUG=1 environment variable

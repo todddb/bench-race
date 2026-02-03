@@ -146,11 +146,23 @@ def _comfy_base_url() -> str:
 
 
 def _comfy_checkpoints_dir() -> Path:
+    """Returns the path where ComfyUI scans for checkpoints."""
     comfy = _comfy_config()
     path = comfy.get("checkpoints_dir") or ""
     if path:
         return Path(path)
-    return Path.home() / "comfyui" / "models" / "checkpoints"
+    # Default to repo-relative embedded ComfyUI
+    return ROOT_DIR / "agent" / "third_party" / "comfyui" / "models" / "checkpoints"
+
+
+def _comfy_cache_dir() -> Path:
+    """Returns the path where agent caches downloaded checkpoints before symlinking."""
+    comfy = _comfy_config()
+    path = comfy.get("cache_path") or ""
+    if path:
+        return Path(path)
+    # Default to repo-relative cache
+    return ROOT_DIR / "agent" / "model_cache" / "comfyui"
 
 
 def _list_checkpoints() -> List[str]:
@@ -290,13 +302,14 @@ def _should_skip_checkpoint(path: Path, size_bytes: Optional[int]) -> bool:
 
 async def _download_checkpoint_file(
     item: ComfyCheckpointItem,
-    checkpoints_dir: Path,
+    cache_dir: Path,
     client: httpx.AsyncClient,
     progress_cb: Optional[Any] = None,
 ) -> Dict[str, Any]:
+    """Downloads checkpoint to cache directory."""
     url = item.resolved_url or item.url
-    target_path = checkpoints_dir / item.name
-    tmp_path = checkpoints_dir / f"{item.name}.part"
+    target_path = cache_dir / item.name
+    tmp_path = cache_dir / f"{item.name}.part"
     if _should_skip_checkpoint(target_path, item.size_bytes):
         return {"name": item.name, "status": "skipped", "error": None}
 
@@ -368,13 +381,130 @@ async def _download_checkpoint_file(
         "last_modified": item.last_modified,
         "size_bytes": item.size_bytes,
     }
-    meta_path = checkpoints_dir / f"{item.name}.meta.json"
+    meta_path = cache_dir / f"{item.name}.meta.json"
     try:
         meta_path.write_text(json.dumps(meta, indent=2))
     except OSError:
         pass
 
     return {"name": item.name, "status": "downloaded", "error": None}
+
+
+def _ensure_comfyui_checkpoint_visible(filename: str, cache_dir: Path, comfy_dir: Path) -> Dict[str, Any]:
+    """
+    Ensures a checkpoint in the cache is visible to ComfyUI by creating a symlink or copy.
+
+    Args:
+        filename: The checkpoint filename
+        cache_dir: Where the checkpoint is cached
+        comfy_dir: Where ComfyUI scans for checkpoints
+
+    Returns:
+        Dict with status and error (if any)
+    """
+    cache_path = cache_dir / filename
+    comfy_path = comfy_dir / filename
+
+    if not cache_path.exists():
+        return {"status": "error", "error": f"Checkpoint not in cache: {cache_path}"}
+
+    # Create ComfyUI checkpoints dir if missing
+    comfy_dir.mkdir(parents=True, exist_ok=True)
+
+    # If already exists and is valid, skip
+    if comfy_path.exists():
+        if comfy_path.is_symlink():
+            if comfy_path.resolve() == cache_path.resolve():
+                return {"status": "ok", "method": "symlink_exists"}
+        try:
+            # Verify it's the same file (by size)
+            if comfy_path.stat().st_size == cache_path.stat().st_size:
+                return {"status": "ok", "method": "file_exists"}
+        except OSError:
+            pass
+        # Remove stale link/file
+        comfy_path.unlink(missing_ok=True)
+
+    # Try symlink first (preferred)
+    try:
+        comfy_path.symlink_to(cache_path)
+        log.info(f"Created symlink: {comfy_path} -> {cache_path}")
+        return {"status": "ok", "method": "symlink"}
+    except (OSError, NotImplementedError) as e:
+        log.warning(f"Symlink failed ({e}), falling back to copy")
+
+    # Fallback to copy
+    try:
+        import shutil
+        shutil.copy2(cache_path, comfy_path)
+        log.info(f"Copied checkpoint: {cache_path} -> {comfy_path}")
+        return {"status": "ok", "method": "copy"}
+    except OSError as e:
+        return {"status": "error", "error": f"Failed to copy: {e}"}
+
+
+async def _verify_checkpoint_in_object_info(filename: str) -> Dict[str, Any]:
+    """
+    Verifies that ComfyUI sees the checkpoint in its object_info.
+
+    Args:
+        filename: The checkpoint filename to verify
+
+    Returns:
+        Dict with 'visible' (bool) and diagnostic info
+    """
+    base_url = _comfy_base_url()
+    comfy_dir = _comfy_checkpoints_dir()
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{base_url}/object_info")
+            if resp.status_code != 200:
+                return {
+                    "visible": False,
+                    "error": f"Failed to fetch object_info: HTTP {resp.status_code}",
+                }
+
+            obj_info = resp.json()
+            # Navigate to CheckpointLoaderSimple input options
+            checkpoint_loader = obj_info.get("CheckpointLoaderSimple", {})
+            input_spec = checkpoint_loader.get("input", {})
+            required = input_spec.get("required", {})
+            ckpt_name_spec = required.get("ckpt_name", [])
+
+            # ckpt_name_spec is typically: [["file1.safetensors", "file2.safetensors", ...]]
+            available_checkpoints = []
+            if isinstance(ckpt_name_spec, list) and len(ckpt_name_spec) > 0:
+                available_checkpoints = ckpt_name_spec[0] if isinstance(ckpt_name_spec[0], list) else []
+
+            visible = filename in available_checkpoints
+
+            if not visible:
+                # Provide diagnostic information
+                log.warning(
+                    f"ComfyUI does not see checkpoint '{filename}'. "
+                    f"Available: {available_checkpoints}. "
+                    f"Expected path: {comfy_dir / filename}"
+                )
+                # List actual files in directory for diagnosis
+                try:
+                    actual_files = [p.name for p in comfy_dir.iterdir() if p.is_file()] if comfy_dir.exists() else []
+                except OSError:
+                    actual_files = []
+
+                return {
+                    "visible": False,
+                    "available_checkpoints": available_checkpoints,
+                    "expected_path": str(comfy_dir / filename),
+                    "actual_files_in_dir": actual_files,
+                    "comfy_dir": str(comfy_dir),
+                }
+
+            return {"visible": True}
+
+    except Exception as exc:
+        log.exception("Failed to verify checkpoint in object_info")
+        return {"visible": False, "error": str(exc)}
 
 
 # ComfyUI workflow output node metadata (stored separately from workflow graph)
@@ -533,23 +663,33 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
 
 @app.post("/api/comfy/sync")
 async def comfy_sync(req: ComfySyncRequest):
-    checkpoints_dir = _comfy_checkpoints_dir()
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _comfy_cache_dir()
+    comfy_dir = _comfy_checkpoints_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    comfy_dir.mkdir(parents=True, exist_ok=True)
     base_url = req.central_base_url or CFG.get("central_base_url") or ""
     if not base_url:
         return {"error": "central_base_url not configured"}, 400
     missing = []
     for checkpoint in req.checkpoints:
-        path = checkpoints_dir / checkpoint
-        if path.exists():
+        # Check if already in ComfyUI dir (skip if exists)
+        comfy_path = comfy_dir / checkpoint
+        cache_path = cache_dir / checkpoint
+        if comfy_path.exists():
             continue
         missing.append(checkpoint)
         try:
+            # Step 1: Download to cache
             url = base_url.rstrip("/") + f"/api/comfy/checkpoints/{checkpoint}"
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=60.0, pool=60.0)) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
-                path.write_bytes(resp.content)
+                cache_path.write_bytes(resp.content)
+
+            # Step 2: Ensure visible in ComfyUI
+            visibility = _ensure_comfyui_checkpoint_visible(checkpoint, cache_dir, comfy_dir)
+            if visibility["status"] == "error":
+                return {"error": f"Failed to make {checkpoint} visible: {visibility.get('error')}"}, 500
         except Exception as exc:
             return {"error": f"Failed to download {checkpoint}: {exc}"}, 500
     return {"ok": True, "downloaded": missing}
@@ -1015,8 +1155,10 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
 
 
 async def _sync_image_checkpoints(sync_id: str, items: List[ComfyCheckpointItem]) -> None:
-    checkpoints_dir = _comfy_checkpoints_dir()
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _comfy_cache_dir()
+    comfy_dir = _comfy_checkpoints_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    comfy_dir.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_SYNC_STATUS["active"] = True
     CHECKPOINT_SYNC_STATUS["results"] = []
     try:
@@ -1038,7 +1180,16 @@ async def _sync_image_checkpoints(sync_id: str, items: List[ComfyCheckpointItem]
                     "image_checkpoint_sync_progress",
                     {"name": item.name, "percent": None, "message": "Queued"},
                 )
-                result = await _download_checkpoint_file(item, checkpoints_dir, client, progress_cb=_progress)
+                # Step 1: Download to cache
+                result = await _download_checkpoint_file(item, cache_dir, client, progress_cb=_progress)
+
+                # Step 2: Ensure visible in ComfyUI (symlink/copy)
+                if result["status"] in ("downloaded", "skipped"):
+                    visibility = _ensure_comfyui_checkpoint_visible(item.name, cache_dir, comfy_dir)
+                    if visibility["status"] == "error":
+                        result["status"] = "error"
+                        result["error"] = visibility.get("error", "Failed to make checkpoint visible")
+
                 results.append(result)
                 await _broadcast_checkpoint_sync_event(
                     sync_id,
@@ -1051,12 +1202,25 @@ async def _sync_image_checkpoints(sync_id: str, items: List[ComfyCheckpointItem]
                     },
                 )
 
+        # Step 3: Verify ComfyUI sees the checkpoints (optional verification)
+        verification_results = []
+        for item in items:
+            verification = await _verify_checkpoint_in_object_info(item.name)
+            verification_results.append({
+                "name": item.name,
+                "visible": verification.get("visible", False),
+                "diagnostics": verification if not verification.get("visible") else None,
+            })
+            if not verification.get("visible"):
+                log.warning(f"Post-sync verification: {item.name} not visible in ComfyUI object_info")
+
         CHECKPOINT_SYNC_STATUS["results"] = results
+        CHECKPOINT_SYNC_STATUS["verification"] = verification_results
         CHECKPOINT_SYNC_STATUS["active"] = False
         await _broadcast_checkpoint_sync_event(
             sync_id,
             "image_checkpoint_sync_done",
-            {"results": results},
+            {"results": results, "verification": verification_results},
         )
     except Exception as exc:
         CHECKPOINT_SYNC_STATUS["active"] = False
