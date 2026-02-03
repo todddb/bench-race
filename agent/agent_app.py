@@ -5,8 +5,10 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional
@@ -179,6 +181,67 @@ def _list_checkpoint_items() -> List[Dict[str, Any]]:
             }
         )
     return sorted(items, key=lambda item: item["name"])
+
+
+def _comfy_debug_enabled() -> bool:
+    """Check if ComfyUI debug logging is enabled (via env var or config)."""
+    # Check environment variable first
+    env_debug = os.getenv("COMFY_DEBUG", "").strip()
+    if env_debug in ("1", "true", "True", "TRUE", "yes", "Yes", "YES"):
+        return True
+    # Check config
+    comfy = _comfy_config()
+    return comfy.get("debug", False)
+
+
+def _comfy_debug_dir() -> Path:
+    """Get the debug directory for ComfyUI payloads."""
+    debug_dir = AGENT_DIR / "logs" / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir
+
+
+def _rotate_debug_files(debug_dir: Path, pattern: str, max_files: int = 50):
+    """Keep only the most recent N debug files matching the pattern."""
+    files = sorted(debug_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old_file in files[max_files:]:
+        try:
+            old_file.unlink()
+        except Exception as e:
+            log.warning("Failed to delete old debug file %s: %s", old_file, e)
+
+
+def _save_comfy_debug_payload(workflow: Dict[str, Any], run_id: str) -> Optional[str]:
+    """Save ComfyUI workflow payload to debug file with rotation. Returns file path or None."""
+    if not _comfy_debug_enabled():
+        return None
+
+    try:
+        debug_dir = _comfy_debug_dir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"comfy_prompt_{run_id}_{timestamp}.json"
+        filepath = debug_dir / filename
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(workflow, f, indent=2)
+
+        # Rotate old files
+        _rotate_debug_files(debug_dir, "comfy_prompt_*.json", max_files=50)
+
+        return str(filepath)
+    except Exception as e:
+        log.error("Failed to save debug payload: %s", e)
+        return None
+
+
+def _summarize_comfy_payload(workflow: Dict[str, Any]) -> str:
+    """Create a summary of the ComfyUI workflow payload for logging."""
+    try:
+        top_level_keys = list(workflow.keys())
+        node_count = len(workflow) if isinstance(workflow, dict) else 0
+        return f"keys={top_level_keys}, node_count={node_count}"
+    except Exception:
+        return "unable to summarize"
 
 
 def _should_skip_checkpoint(path: Path, size_bytes: Optional[int]) -> bool:
@@ -615,6 +678,11 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 req.width,
                 req.height,
             )
+            # Save debug payload if enabled
+            debug_file = _save_comfy_debug_payload(workflow, req.run_id)
+            if debug_file:
+                log.info("Saved ComfyUI payload to debug file: %s", debug_file)
+
             try:
                 resp = await client.post(
                     f"{base_url}/prompt",
@@ -622,12 +690,57 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 )
                 resp.raise_for_status()
                 prompt_id = resp.json().get("prompt_id")
-            except Exception as exc:
+            except httpx.HTTPStatusError as exc:
+                # Enhanced error logging for HTTP errors
+                status_code = exc.response.status_code
+                try:
+                    response_body = exc.response.text[:8192]  # First 8KB
+                except Exception:
+                    response_body = "<unable to read response body>"
+
+                payload_summary = _summarize_comfy_payload(workflow)
+
+                # Log comprehensive diagnostics
+                log.error(
+                    "ComfyUI POST /prompt failed: status=%d, response_body=%s, payload_summary=%s, debug_file=%s",
+                    status_code,
+                    response_body,
+                    payload_summary,
+                    debug_file or "not saved",
+                )
+
+                # Include full error details in the broadcast message
+                error_msg = f"ComfyUI rejected prompt (HTTP {status_code}): {response_body}"
+                if debug_file:
+                    error_msg += f"\nDebug payload saved to: {debug_file}"
+
                 await _broadcast_event(
                     Event(
                         job_id=job_id,
                         type="image_error",
-                        payload={"run_id": req.run_id, "message": f"Failed to submit: {exc}"},
+                        payload={"run_id": req.run_id, "message": error_msg},
+                    )
+                )
+                return
+            except Exception as exc:
+                # Handle other errors (connection errors, timeouts, etc.)
+                payload_summary = _summarize_comfy_payload(workflow)
+                log.error(
+                    "ComfyUI POST /prompt failed: exception=%s, payload_summary=%s, debug_file=%s",
+                    exc,
+                    payload_summary,
+                    debug_file or "not saved",
+                )
+
+                error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
+                if debug_file:
+                    error_msg += f"\nDebug payload saved to: {debug_file}"
+
+                await _broadcast_event(
+                    Event(
+                        job_id=job_id,
+                        type="image_error",
+                        payload={"run_id": req.run_id, "message": error_msg},
                     )
                 )
                 return

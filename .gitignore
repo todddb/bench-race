@@ -78,6 +78,7 @@ sdxl_models/
 run/*.pid
 run/pids/*.pid
 logs/*.log
+logs/debug/
 !run/.keep
 !logs/.keep
 
