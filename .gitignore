@@ -87,3 +87,8 @@ agent/config/agent.yaml
 central/runs/
 central/runs/*.json
 
+# Machine-local config (do not commit)
+central/config/machines.yaml
+central/config/comfyui.yaml
+central/config/model_policy.yaml
+central/config/*.bak.*
