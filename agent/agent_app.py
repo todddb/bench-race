@@ -41,6 +41,13 @@ from agent.logging_utils import init_logging, get_logger, HOSTNAME
 from agent.middleware import ws_logger
 from agent.http_client import comfyui_client, ollama_client
 from agent.http_logging_asgi import HTTPLoggingASGIMiddleware
+from agent.comfy_ws import (
+    wait_for_prompt as comfy_wait_for_prompt,
+    check_queue_status as comfy_check_queue_status,
+    extract_images_from_history,
+    ProgressEvent,
+    ComfyWSResult,
+)
 
 # ---------------------------
 # Logging
@@ -585,12 +592,35 @@ def _build_comfy_workflow(
     }
 
 
-async def _fetch_comfy_image(client: httpx.AsyncClient, base_url: str, filename: str) -> Optional[bytes]:
+async def _fetch_comfy_image(
+    client: httpx.AsyncClient,
+    base_url: str,
+    filename: str,
+    subfolder: str = "",
+    img_type: str = "output",
+) -> Optional[bytes]:
+    """
+    Fetch an image from ComfyUI's /view endpoint.
+
+    Args:
+        client: httpx.AsyncClient for making requests
+        base_url: ComfyUI base URL
+        filename: Image filename from history
+        subfolder: Subfolder (if any) from history
+        img_type: Type of image (usually 'output', sometimes 'input' or 'temp')
+
+    Returns:
+        Image bytes or None if fetch failed
+    """
     try:
-        resp = await client.get(f"{base_url}/view", params={"filename": filename, "type": "output"})
+        params = {"filename": filename, "type": img_type}
+        if subfolder:
+            params["subfolder"] = subfolder
+        resp = await client.get(f"{base_url}/view", params=params)
         resp.raise_for_status()
         return resp.content
-    except Exception:
+    except Exception as e:
+        log.warning(f"Failed to fetch image {filename}: {e}")
         return None
 
 
@@ -1134,132 +1164,242 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 )
                 return
 
-            ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://") + f"/ws?clientId={client_id}"
+            # Define progress callback to track steps and broadcast events
+            async def on_progress_async(progress: ProgressEvent):
+                nonlocal current_step, max_step_observed, first_step_logged, started_at
+                current_step = progress.current_step
+                total_steps_ws = progress.total_steps
 
-            try:
-                async with websockets.connect(ws_url) as ws:
-                    async for msg in ws:
-                        if isinstance(msg, bytes):
-                            if started_at is None:
-                                started_at = time.perf_counter()
-                            if current_step % 4 == 0 and current_step != last_preview_step:
-                                last_preview_step = current_step
-                                try:
-                                    image = Image.open(io.BytesIO(msg))
-                                    buf = io.BytesIO()
-                                    image.convert("RGB").save(buf, format="JPEG", quality=80)
-                                    preview_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                                    await _broadcast_event(
-                                        Event(
-                                            job_id=job_id,
-                                            type="image_preview",
-                                            payload={
-                                                "run_id": req.run_id,
-                                                "step": current_step,
-                                                "total_steps": req.steps,
-                                                "filename": f"preview_{repeat_index + 1}.jpg",
-                                                "image_b64": preview_b64,
-                                            },
-                                        )
-                                    )
-                                except Exception:
-                                    continue
-                            continue
+                # Mark started_at on first progress
+                if started_at is None:
+                    started_at = time.perf_counter()
+                    queue_latency_ms = (started_at - submit_time) * 1000.0
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_started",
+                            payload={
+                                "run_id": req.run_id,
+                                "queue_latency_ms": queue_latency_ms,
+                                "started_at": time.time(),
+                            },
+                        )
+                    )
 
-                        try:
-                            data = json.loads(msg)
-                        except Exception:
-                            continue
-                        msg_type = data.get("type")
-                        if msg_type == "execution_start":
-                            started_at = time.perf_counter()
-                            queue_latency_ms = (started_at - submit_time) * 1000.0
-                            await _broadcast_event(
-                                Event(
-                                    job_id=job_id,
-                                    type="image_started",
-                                    payload={
-                                        "run_id": req.run_id,
-                                        "queue_latency_ms": queue_latency_ms,
-                                        "started_at": time.time(),
-                                    },
-                                )
+                # Track maximum step observed
+                if current_step > max_step_observed:
+                    max_step_observed = current_step
+
+                # Log first step (IMPORTANT for detecting "0 steps" issue)
+                if current_step >= 1 and not first_step_logged:
+                    first_step_logged = True
+                    slog.info(
+                        "job_first_step",
+                        job_id=job_id,
+                        step=current_step,
+                        total_steps=total_steps_ws,
+                    )
+
+                # Log progress periodically (every 2 steps, or step 1 and final step)
+                if current_step == 1 or current_step == total_steps_ws or current_step % 2 == 0:
+                    slog.info(
+                        "job_progress",
+                        job_id=job_id,
+                        step=current_step,
+                        total_steps=total_steps_ws,
+                        percent=round((current_step / total_steps_ws) * 100, 1) if total_steps_ws > 0 else 0,
+                    )
+
+                await _broadcast_event(
+                    Event(
+                        job_id=job_id,
+                        type="image_progress",
+                        payload={
+                            "run_id": req.run_id,
+                            "step": current_step,
+                            "total_steps": total_steps_ws,
+                        },
+                    )
+                )
+
+            # Define preview callback for step images
+            async def on_preview_async(image_bytes: bytes, step: int, total: int):
+                nonlocal last_preview_step
+                if step % 4 == 0 and step != last_preview_step:
+                    last_preview_step = step
+                    try:
+                        image = Image.open(io.BytesIO(image_bytes))
+                        buf = io.BytesIO()
+                        image.convert("RGB").save(buf, format="JPEG", quality=80)
+                        preview_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                        await _broadcast_event(
+                            Event(
+                                job_id=job_id,
+                                type="image_preview",
+                                payload={
+                                    "run_id": req.run_id,
+                                    "step": step,
+                                    "total_steps": total or req.steps,
+                                    "filename": f"preview_{repeat_index + 1}.jpg",
+                                    "image_b64": preview_b64,
+                                },
                             )
-                        elif msg_type == "progress":
-                            progress_data = data.get("data") or {}
-                            current_step = int(progress_data.get("value", current_step))
-                            total_steps = int(progress_data.get("max", req.steps))
+                        )
+                    except Exception as e:
+                        log.debug(f"Preview processing error: {e}")
 
-                            # Track maximum step observed
-                            if current_step > max_step_observed:
-                                max_step_observed = current_step
+            # Wrap sync callbacks for the async tracker
+            progress_events = []
+            preview_events = []
 
-                            # Log first step (IMPORTANT for detecting "0 steps" issue)
-                            if current_step >= 1 and not first_step_logged:
-                                first_step_logged = True
-                                slog.info(
-                                    "job_first_step",
-                                    job_id=job_id,
-                                    step=current_step,
-                                    total_steps=total_steps,
-                                )
+            def on_progress_sync(progress: ProgressEvent):
+                progress_events.append(progress)
 
-                            # Log progress periodically (every 2 steps, or step 1 and final step)
-                            if current_step == 1 or current_step == total_steps or current_step % 2 == 0:
-                                slog.info(
-                                    "job_progress",
-                                    job_id=job_id,
-                                    step=current_step,
-                                    total_steps=total_steps,
-                                    percent=round((current_step / total_steps) * 100, 1) if total_steps > 0 else 0,
-                                )
+            def on_preview_sync(image_bytes: bytes, step: int, total: int):
+                preview_events.append((image_bytes, step, total))
 
-                            await _broadcast_event(
-                                Event(
-                                    job_id=job_id,
-                                    type="image_progress",
-                                    payload={
-                                        "run_id": req.run_id,
-                                        "step": current_step,
-                                        "total_steps": total_steps,
-                                    },
-                                )
-                            )
-                        elif msg_type in {"execution_success", "execution_error"}:
-                            break
-            except Exception as exc:
+            # Wait for completion using proper websocket tracking with prompt_id filtering
+            slog.info(
+                "job_waiting_completion",
+                job_id=job_id,
+                prompt_id=prompt_id,
+                timeout_seconds=300.0,
+            )
+
+            ws_result: ComfyWSResult = await comfy_wait_for_prompt(
+                prompt_id=prompt_id,
+                client_id=client_id,
+                base_url=base_url,
+                http_client=client,
+                timeout_seconds=300.0,  # 5 minutes timeout
+                on_progress=on_progress_sync,
+                on_preview=on_preview_sync,
+                structured_logger=slog,
+            )
+
+            # Process any queued progress/preview events
+            for progress in progress_events:
+                await on_progress_async(progress)
+            for preview_data in preview_events:
+                await on_preview_async(*preview_data)
+
+            # Update max_step from tracker result
+            if ws_result.max_step > max_step_observed:
+                max_step_observed = ws_result.max_step
+
+            # Check for errors
+            if ws_result.error:
+                # Get queue status for better diagnostics
+                queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
+
+                slog.error(
+                    "job_failed",
+                    job_id=job_id,
+                    error=ws_result.error,
+                    prompt_id=prompt_id,
+                    max_step=ws_result.max_step,
+                    events_seen=ws_result.events_seen,
+                    execution_time_ms=ws_result.execution_time_ms,
+                    history_status=ws_result.history_status,
+                    queue_status=queue_status,
+                )
                 await _broadcast_event(
                     Event(
                         job_id=job_id,
                         type="image_error",
-                        payload={"run_id": req.run_id, "message": f"ComfyUI stream error: {exc}"},
+                        payload={"run_id": req.run_id, "message": ws_result.error},
                     )
                 )
                 return
 
+            if not ws_result.completed:
+                # Not an error but also not completed - check queue and history for debugging
+                queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
+
+                slog.warning(
+                    "job_incomplete",
+                    job_id=job_id,
+                    prompt_id=prompt_id,
+                    events_seen=ws_result.events_seen,
+                    max_step=ws_result.max_step,
+                    history_status=ws_result.history_status,
+                    queue_status=queue_status,
+                )
+                await _broadcast_event(
+                    Event(
+                        job_id=job_id,
+                        type="image_error",
+                        payload={"run_id": req.run_id, "message": "Job did not complete - no outputs found"},
+                    )
+                )
+                return
+
+            # Fetch history and extract images
             try:
                 history_resp = await client.get(f"{base_url}/history/{prompt_id}")
                 history_resp.raise_for_status()
                 history = history_resp.json() or {}
+
+                # Use helper to extract image info
+                image_infos = extract_images_from_history(history, prompt_id)
+
+                if not image_infos:
+                    # No images found even though completion said success
+                    queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
+                    slog.warning(
+                        "job_suspicious_zero_images",
+                        job_id=job_id,
+                        prompt_id=prompt_id,
+                        history_output_keys=list(history.get(prompt_id, {}).get("outputs", {}).keys()),
+                        queue_status=queue_status,
+                        warning="Job completed but no images found in history outputs",
+                    )
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_error",
+                            payload={"run_id": req.run_id, "message": "Job completed but no images found in outputs"},
+                        )
+                    )
+                    return
+
+                # Download each image
                 images = []
-                for outputs in history.values():
-                    for node in (outputs.get("outputs") or {}).values():
-                        for image_info in node.get("images", []):
-                            filename = image_info.get("filename")
-                            if not filename:
-                                continue
-                            image_bytes = await _fetch_comfy_image(client, base_url, filename)
-                            if not image_bytes:
-                                continue
-                            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                            images.append(
-                                {
-                                    "filename": filename,
-                                    "image_b64": image_b64,
-                                }
-                            )
+                for img_info in image_infos:
+                    filename = img_info["filename"]
+                    subfolder = img_info.get("subfolder", "")
+                    img_type = img_info.get("type", "output")
+
+                    image_bytes = await _fetch_comfy_image(
+                        client, base_url, filename,
+                        subfolder=subfolder, img_type=img_type
+                    )
+                    if not image_bytes:
+                        log.warning(f"Failed to fetch image: {filename}")
+                        continue
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    images.append(
+                        {
+                            "filename": filename,
+                            "image_b64": image_b64,
+                        }
+                    )
                 total_images.extend(images)
+
+                slog.info(
+                    "job_images_fetched",
+                    job_id=job_id,
+                    prompt_id=prompt_id,
+                    num_images=len(images),
+                )
+
             except Exception as exc:
+                slog.error(
+                    "job_failed",
+                    job_id=job_id,
+                    error=f"Failed to fetch images: {exc}",
+                    prompt_id=prompt_id,
+                )
                 await _broadcast_event(
                     Event(
                         job_id=job_id,
