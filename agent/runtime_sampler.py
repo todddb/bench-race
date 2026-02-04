@@ -63,6 +63,7 @@ class RuntimeSampler:
         self.vram_used_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
         self.vram_total_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
         self.system_mem_used_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
+        self.ram_used_bytes: Deque[Optional[int]] = deque(maxlen=self.buffer_len)
         self.timestamps: Deque[float] = deque(maxlen=self.buffer_len)
         self._nvml, self._nvml_handle = _try_load_nvml()
         self._thread: Optional[threading.Thread] = None
@@ -72,9 +73,10 @@ class RuntimeSampler:
     def _sample_cpu(self) -> float:
         return float(psutil.cpu_percent(interval=None))
 
-    def _sample_system_memory(self) -> float:
+    def _sample_system_memory(self) -> Tuple[int, float]:
         mem = psutil.virtual_memory()
-        return float(mem.used) / (1024 * 1024)
+        used_bytes = int(mem.used)
+        return used_bytes, float(used_bytes) / (1024 * 1024)
 
     def _sample_gpu(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         if self._nvml and self._nvml_handle:
@@ -85,7 +87,9 @@ class RuntimeSampler:
 
     def sample_once(self) -> None:
         self.cpu_pct.append(self._sample_cpu())
-        self.system_mem_used_mib.append(self._sample_system_memory())
+        used_bytes, used_mib = self._sample_system_memory()
+        self.ram_used_bytes.append(used_bytes)
+        self.system_mem_used_mib.append(used_mib)
         gpu_pct, vram_used, vram_total = self._sample_gpu()
         self.gpu_pct.append(gpu_pct)
         self.vram_used_mib.append(vram_used)
@@ -118,6 +122,7 @@ class RuntimeSampler:
             "vram_used_mib": list(self.vram_used_mib),
             "vram_total_mib": list(self.vram_total_mib),
             "system_mem_used_mib": list(self.system_mem_used_mib),
+            "ram_used_bytes": list(self.ram_used_bytes),
             "timestamps": list(self.timestamps),
             "gpu_metrics_available": self._gpu_metrics_available and has_gpu_samples,
         }
