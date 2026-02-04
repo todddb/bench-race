@@ -1154,7 +1154,24 @@ def admin():
 
 @app.get("/api/machines")
 def api_machines():
-    return jsonify(MACHINES)
+    machines: List[Dict[str, Any]] = []
+    for m in MACHINES:
+        machine = dict(m)
+        try:
+            r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+            r.raise_for_status()
+            cap = r.json()
+            cap["agent_reachable"] = True
+            machine["agent_reachable"] = True
+            machine["capabilities"] = cap
+        except Exception as e:
+            machine["agent_reachable"] = False
+            machine["capabilities"] = {
+                "agent_reachable": False,
+                "error": str(e),
+            }
+        machines.append(machine)
+    return jsonify(machines)
 
 
 @app.get("/api/capabilities")
@@ -1226,6 +1243,8 @@ def api_status():
                         "agent_reachable": True,
                         "comfyui_gpu_ok": cap.get("comfyui_gpu_ok"),
                         "comfyui_cpu_ok": cap.get("comfyui_cpu_ok"),
+                        "total_system_ram_bytes": cap.get("total_system_ram_bytes"),
+                        "system_memory_gb": cap.get("system_memory_gb"),
                     },
                     "model_fit": {
                         **fit,
