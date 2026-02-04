@@ -135,8 +135,16 @@
                   <div class="model-fit" id="model-fit-{{ m.machine_id }}">Checkpoint: --</div>
                 </div>
                 <div class="pane-status">
+                  {% if m.agent_reachable is defined and m.agent_reachable == true %}
+                  <span class="status-dot ready" id="status-dot-{{ m.machine_id }}" title="Online"></span>
+                  <span class="status-text" id="status-text-{{ m.machine_id }}">Online</span>
+                  {% elif m.agent_reachable is defined and m.agent_reachable == false %}
+                  <span class="status-dot offline" id="status-dot-{{ m.machine_id }}" title="Offline"></span>
+                  <span class="status-text" id="status-text-{{ m.machine_id }}">Offline</span>
+                  {% else %}
                   <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
                   <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
+                  {% endif %}
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Checkpoints</button>
                 </div>
               </div>

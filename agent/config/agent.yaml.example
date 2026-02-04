@@ -1,32 +1,43 @@
 # agent/config/agent.yaml.example
 #
-# Per-machine configuration for a bench-race agent.
+# Minimal per-machine configuration for a bench-race agent.
 # This file is intentionally NOT tracked when copied to agent.yaml.
 #
-# Central controls required models and policies.
-# This file only configures how the agent runs and connects to Ollama.
+# Hardware specs (CPU, RAM, GPU, VRAM) are auto-detected at runtime.
+# Model lists are defined centrally in: central/config/model_policy.yaml
+
+# ============================================================================
+# REQUIRED FIELDS
+# ============================================================================
 
 # Unique ID for this machine (must match central machines.yaml)
+# Default: sanitized hostname (e.g., "macbook-pro" or "linux-workstation")
 machine_id: "example-machine"
 
 # Human-friendly label shown in the UI
-label: "Example Machine (GPU / RAM)"
+# Default: Generated from hostname + detected specs (e.g., "Macbook Pro (M4, 128GB)")
+label: "Example Machine"
+
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
 
 # Address/port the agent HTTP server binds to
 bind_host: "0.0.0.0"
 bind_port: 9001
 
 # Base URL for the local Ollama instance
-# In most cases this should be localhost
 ollama_base_url: "http://127.0.0.1:11434"
 
-# Central base URL (used for ComfyUI checkpoint sync)
+# Central base URL (used for ComfyUI checkpoint sync and registration)
 central_base_url: "http://127.0.0.1:8080"
 
-# Platform metadata for scheduling
-architecture: "nvidia_linux"
+# ============================================================================
+# OPTIONAL CONFIGURATION
+# ============================================================================
 
-# ComfyUI configuration
+# ComfyUI configuration (optional)
+# If enabled, agent will attempt to use ComfyUI for image generation
 comfyui:
   enabled: true
   host: "127.0.0.1"
@@ -34,26 +45,16 @@ comfyui:
   checkpoints_dir: "/opt/comfyui/models/checkpoints"
   install_dir: "/opt/comfyui"
   allow_cpu_fallback: false
-  cpu_fallback_on:
-    - "cuda_unsupported_arch"
 
-# Runtime sampler configuration (CPU/GPU/VRAM usage)
+# Runtime sampler configuration (optional)
+# Samples CPU/GPU/VRAM usage for UI metrics
 runtime_sampler:
   enabled: true
   interval_s: 1
   buffer_len: 120
 
-# Optional: override if Ollama is remote or non-standard
-# ollama_timeout_s: 2.0
-
-# NOTE:
-# Model lists are no longer defined here.
-# Required models are defined centrally in:
-#   central/config/model_policy.yaml
-#
-# Any model lists found here will be ignored or deprecated.
-
-# Deprecated (kept for reference only)
-# llm_models:
-#   - llama3.1:8b-instruct-q8_0
-#   - llama3.1:70b-instruct-q4_K_M
+# Optional: Tags for filtering/grouping machines
+# tags:
+#   - gpu
+#   - linux
+#   - production
