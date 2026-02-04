@@ -98,6 +98,21 @@ Alternatively, use the setup scripts:
 ./scripts/setup_venv_central.sh
 ```
 
+### ComfyUI (Linux) installer notes
+
+`scripts/install_comfyui_linux.sh` detects NVIDIA compute capability and selects a compatible PyTorch channel. Brand-new GPUs (e.g., sm_121) require nightly CUDA wheels (cu130). You can override the installer without editing the script:
+
+```bash
+# Force nightly cu130
+BENCH_TORCH_CHANNEL=nightly-cu130 ./scripts/install_comfyui_linux.sh
+
+# Or use an explicit index URL
+BENCH_TORCH_INDEX_URL=https://download.pytorch.org/whl/nightly/cu130 ./scripts/install_comfyui_linux.sh
+
+# Control which packages are installed (default: torch only)
+BENCH_TORCH_PACKAGES="torch torchvision" ./scripts/install_comfyui_linux.sh
+```
+
 > **Tip**: You can use a single venv if preferred:
 > ```bash
 > python3 -m venv .venv
