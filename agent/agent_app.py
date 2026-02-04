@@ -37,9 +37,10 @@ from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # 
 from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
 
 # Import agent-specific modules
-from agent.logging_utils import init_logging, get_logger
-from agent.middleware import RequestLoggingMiddleware, ws_logger
+from agent.logging_utils import init_logging, get_logger, HOSTNAME
+from agent.middleware import ws_logger
 from agent.http_client import comfyui_client, ollama_client
+from agent.http_logging_asgi import HTTPLoggingASGIMiddleware
 
 # ---------------------------
 # Logging
@@ -79,8 +80,12 @@ slog = init_logging(agent_id=machine_id)
 # ---------------------------
 app = FastAPI(title="bench-race agent")
 
-# Add request logging middleware
-app.add_middleware(RequestLoggingMiddleware)
+# Add ASGI-safe HTTP logging middleware
+app.add_middleware(
+    HTTPLoggingASGIMiddleware,
+    agent_id=machine_id,
+    hostname=HOSTNAME,
+)
 
 # Manage connected websocket clients
 # Each entry: client_id -> WebSocket
