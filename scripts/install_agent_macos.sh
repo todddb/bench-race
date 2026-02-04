@@ -137,10 +137,10 @@ prompt_for_agent_id() {
     local default_id="$1"
     local agent_id
 
-    echo ""
-    log_info "Enter a unique machine ID for this agent"
-    log_info "This ID must match the machine_id in central/config/machines.yaml"
-    read -rp "Machine ID [${default_id}]: " agent_id
+    echo "" >&2
+    log_info "Enter a unique machine ID for this agent" >&2
+    log_info "This ID must match the machine_id in central/config/machines.yaml" >&2
+    read -rp "Machine ID [${default_id}]: " agent_id </dev/tty
     agent_id="${agent_id:-${default_id}}"
     sanitize_id "$agent_id"
 }
@@ -149,10 +149,10 @@ prompt_for_label() {
     local default_label="$1"
     local label
 
-    echo ""
-    log_info "Enter a human-friendly label for this machine"
-    log_info "This label will be displayed in the UI"
-    read -rp "Label [${default_label}]: " label
+    echo "" >&2
+    log_info "Enter a human-friendly label for this machine" >&2
+    log_info "This label will be displayed in the UI" >&2
+    read -rp "Label [${default_label}]: " label </dev/tty
     echo "${label:-${default_label}}"
 }
 
@@ -160,9 +160,9 @@ prompt_for_central_url() {
     local default_url="http://127.0.0.1:8080"
     local url
 
-    echo ""
-    log_info "Enter the URL of the central server"
-    read -rp "Central URL [${default_url}]: " url
+    echo "" >&2
+    log_info "Enter the URL of the central server" >&2
+    read -rp "Central URL [${default_url}]: " url </dev/tty
     echo "${url:-${default_url}}"
 }
 
@@ -228,6 +228,29 @@ EOF
 setup_python_venv() {
     log_info "Setting up Python virtual environment..."
 
+    # Check Python version
+    local python_version
+    python_version=$(python3 --version 2>&1 | awk '{print $2}')
+    local major_minor
+    major_minor=$(echo "$python_version" | cut -d. -f1,2)
+
+    log_info "Detected Python version: ${python_version}"
+
+    # Warn if Python 3.14+ (too new, may have compatibility issues)
+    if [[ "${major_minor}" == "3.14" ]] || [[ "${major_minor}" > "3.14" ]]; then
+        log_warning "Python ${python_version} detected - this version is very new and may have compatibility issues"
+        log_warning "Recommended: Python 3.11, 3.12, or 3.13"
+        log_warning "If you encounter errors, try using an older Python version:"
+        log_warning "  python3.12 -m venv ${AGENT_DIR}/.venv"
+        echo ""
+        read -rp "Continue anyway? (y/N): " -n 1 -r </dev/tty
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_error "Installation aborted by user"
+            return 1
+        fi
+    fi
+
     if [[ ! -d "${AGENT_DIR}/.venv" ]]; then
         python3 -m venv "${AGENT_DIR}/.venv"
         log_success "Created Python venv at ${AGENT_DIR}/.venv"
@@ -242,6 +265,9 @@ setup_python_venv() {
     pip install --quiet --upgrade pip
     pip install --quiet -r "${AGENT_DIR}/requirements.txt" || {
         log_error "Failed to install Python dependencies"
+        log_error "If using Python 3.14+, try removing the venv and using Python 3.12:"
+        log_error "  rm -rf ${AGENT_DIR}/.venv"
+        log_error "  python3.12 -m venv ${AGENT_DIR}/.venv"
         return 1
     }
 
@@ -264,7 +290,8 @@ start_agent_background() {
     echo "$agent_pid" > /tmp/agent-install-test.pid
 
     log_info "Agent PID: ${agent_pid}"
-    sleep 3 # Give it time to start
+    log_info "Waiting for agent to start..."
+    sleep 5 # Give it more time to start (increased from 3)
 }
 
 stop_agent_background() {
