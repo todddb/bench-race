@@ -1,0 +1,82 @@
+name: Installer Script Checks
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'scripts/install_*.sh'
+      - '.github/workflows/installer-checks.yml'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'scripts/install_*.sh'
+      - '.github/workflows/installer-checks.yml'
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: './scripts'
+          severity: warning
+          ignore_paths: |
+            scripts/third_party
+            scripts/vendor
+
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check install_agent.sh syntax
+        run: bash -n scripts/install_agent.sh
+
+      - name: Check install_central.sh syntax
+        run: bash -n scripts/install_central.sh
+
+  dry-run-test:
+    name: Dry Run Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Dry run install_agent.sh
+        run: |
+          bash scripts/install_agent.sh --dry-run --yes \
+            --agent-id "test-agent" \
+            --label "Test Agent" \
+            --central-url "http://localhost:8080" \
+            --skip-ollama \
+            --skip-comfyui
+
+      - name: Dry run install_central.sh
+        run: |
+          bash scripts/install_central.sh --dry-run --yes
+
+  macos-syntax:
+    name: macOS Compatibility Check
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check install_agent.sh syntax on macOS
+        run: bash -n scripts/install_agent.sh
+
+      - name: Check install_central.sh syntax on macOS
+        run: bash -n scripts/install_central.sh
+
+      - name: Verify help output (agent)
+        run: bash scripts/install_agent.sh --help
+
+      - name: Verify help output (central)
+        run: bash scripts/install_central.sh --help

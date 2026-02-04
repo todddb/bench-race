@@ -76,51 +76,109 @@ ollama pull llama3.1:8b-instruct-q8_0
 
 ## Installation
 
+bench-race provides automated installer scripts for both agent and central components.
+
+### Quick Start
+
 ```bash
 # Clone the repository
 git clone https://github.com/todddb/bench-race.git
 cd bench-race
 
-# Create virtual environment for the agent
+# Install agent (with Ollama and ComfyUI)
+./scripts/install_agent.sh --central-url http://<central-host>:8080
+
+# Install central server
+./scripts/install_central.sh
+```
+
+The installers are **idempotent** - you can safely re-run them to update your installation.
+
+### Agent Installation
+
+The agent installer (`scripts/install_agent.sh`) sets up everything needed on agent machines:
+- Platform detection (macOS/Linux, architecture, GPU support)
+- Ollama installation and configuration
+- ComfyUI with GPU-aware PyTorch selection
+- Python environment and dependencies
+- Agent configuration with automatic hardware detection
+
+**Options:**
+```bash
+./scripts/install_agent.sh [OPTIONS]
+
+Options:
+  --agent-id ID         Agent identifier (default: hostname)
+  --label "Label"       Human-readable label for UI
+  --central-url URL     Central server URL (default: http://127.0.0.1:8080)
+  --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
+  --yes                 Non-interactive mode (use defaults)
+  --no-service          Skip systemd/launchctl service installation
+  --update              Update existing installation
+  --skip-ollama         Skip Ollama installation
+  --skip-comfyui        Skip ComfyUI installation
+```
+
+**Examples:**
+```bash
+# Interactive installation (prompts for configuration)
+./scripts/install_agent.sh
+
+# Non-interactive with all options
+./scripts/install_agent.sh \
+  --agent-id "gpu-server-1" \
+  --label "GPU Server 1 (RTX 4090, 64GB)" \
+  --central-url http://192.168.1.100:8080 \
+  --yes
+
+# Update existing installation
+./scripts/install_agent.sh --update
+
+# Install without Ollama or ComfyUI (minimal agent only)
+./scripts/install_agent.sh --skip-ollama --skip-comfyui
+```
+
+### Central Installation
+
+The central installer (`scripts/install_central.sh`) sets up the central server:
+- Python environment and dependencies
+- Configuration files (machines.yaml, model_policy.yaml)
+- Web UI server
+
+**Options:**
+```bash
+./scripts/install_central.sh [OPTIONS]
+
+Options:
+  --yes                 Non-interactive mode
+  --no-service          Skip systemd/launchctl service installation
+  --update              Update existing installation
+  --platform PLATFORM   Override platform detection (macos|linux)
+```
+
+**Example:**
+```bash
+# Install central server
+./scripts/install_central.sh --yes
+```
+
+### Manual Installation
+
+If you prefer manual setup:
+
+```bash
+# Agent setup
 python3 -m venv agent/.venv
 source agent/.venv/bin/activate
 pip install -r agent/requirements.txt
 deactivate
 
-# Create virtual environment for central
+# Central setup
 python3 -m venv central/.venv
 source central/.venv/bin/activate
 pip install -r central/requirements.txt
 deactivate
 ```
-
-Alternatively, use the setup scripts:
-```bash
-./scripts/setup_venv_agent.sh
-./scripts/setup_venv_central.sh
-```
-
-### ComfyUI (Linux) installer notes
-
-`scripts/install_comfyui_linux.sh` detects NVIDIA compute capability and selects a compatible PyTorch channel. Brand-new GPUs (e.g., sm_121) require nightly CUDA wheels (cu130). You can override the installer without editing the script:
-
-```bash
-# Force nightly cu130
-BENCH_TORCH_CHANNEL=nightly-cu130 ./scripts/install_comfyui_linux.sh
-
-# Or use an explicit index URL
-BENCH_TORCH_INDEX_URL=https://download.pytorch.org/whl/nightly/cu130 ./scripts/install_comfyui_linux.sh
-
-# Control which packages are installed (default: torch only)
-BENCH_TORCH_PACKAGES="torch torchvision" ./scripts/install_comfyui_linux.sh
-```
-
-> **Tip**: You can use a single venv if preferred:
-> ```bash
-> python3 -m venv .venv
-> source .venv/bin/activate
-> pip install -r agent/requirements.txt -r central/requirements.txt
-> ```
 
 ---
 
