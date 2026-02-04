@@ -68,22 +68,55 @@ class RuntimeSampler:
         self._nvml, self._nvml_handle = _try_load_nvml()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._gpu_metrics_available = self._nvml is not None or _powermetrics_gpu_available()
+        self._nvidia_smi_available = bool(shutil.which("nvidia-smi"))
+        self._gpu_metrics_available = (
+            self._nvml is not None or self._nvidia_smi_available or _powermetrics_gpu_available()
+        )
 
     def _sample_cpu(self) -> float:
         return float(psutil.cpu_percent(interval=None))
 
     def _sample_system_memory(self) -> Tuple[int, float]:
         mem = psutil.virtual_memory()
-        used_bytes = int(mem.used)
+        used_bytes = int(mem.total - mem.available)
         return used_bytes, float(used_bytes) / (1024 * 1024)
+
+    def _sample_nvidia_smi(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        if not self._nvidia_smi_available:
+            return None, None, None
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.5,
+            )
+        except Exception:
+            return None, None, None
+        if result.returncode != 0 or not result.stdout.strip():
+            return None, None, None
+        parts = [part.strip() for part in result.stdout.splitlines()[0].split(",")]
+        if len(parts) < 3:
+            return None, None, None
+        try:
+            util = float(parts[0])
+            used = float(parts[1])
+            total = float(parts[2])
+        except ValueError:
+            return None, None, None
+        return util, used, total
 
     def _sample_gpu(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         if self._nvml and self._nvml_handle:
             util = self._nvml.nvmlDeviceGetUtilizationRates(self._nvml_handle)
             mem = self._nvml.nvmlDeviceGetMemoryInfo(self._nvml_handle)
             return float(util.gpu), float(mem.used) / (1024 * 1024), float(mem.total) / (1024 * 1024)
-        return None, None, None
+        return self._sample_nvidia_smi()
 
     def sample_once(self) -> None:
         self.cpu_pct.append(self._sample_cpu())

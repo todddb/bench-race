@@ -7,7 +7,11 @@ def test_runtime_sampler_schema(monkeypatch):
     monkeypatch.setattr("psutil.cpu_percent", lambda interval=None: 12.5)
     monkeypatch.setattr(
         "psutil.virtual_memory",
-        lambda: SimpleNamespace(used=1024 * 1024 * 3, total=1024 * 1024 * 8),
+        lambda: SimpleNamespace(
+            used=1024 * 1024 * 3,
+            total=1024 * 1024 * 8,
+            available=1024 * 1024 * 5,
+        ),
     )
 
     sampler = RuntimeSampler(RuntimeSamplerConfig(interval_s=1, buffer_len=3))
