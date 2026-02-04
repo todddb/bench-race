@@ -119,24 +119,8 @@
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
                   <div class="model-fit" id="model-fit-{{ m.machine_id }}">
-                    <span class="fit-badge">Fit: --</span>
-                    <span class="fit-score">--</span>
-                  </div>
-                  <div class="runtime-sparklines" id="runtime-sparklines-{{ m.machine_id }}">
-                    <div class="sparkline-block">
-                      <div class="sparkline-label">Utilization</div>
-                      <svg class="sparkline" id="sparkline-util-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
-                      <div class="sparkline-placeholder" id="sparkline-util-placeholder-{{ m.machine_id }}">
-                        Metrics unavailable
-                      </div>
-                    </div>
-                    <div class="sparkline-block">
-                      <div class="sparkline-label">Memory</div>
-                      <svg class="sparkline" id="sparkline-mem-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
-                      <div class="sparkline-placeholder" id="sparkline-mem-placeholder-{{ m.machine_id }}">
-                        Metrics unavailable
-                      </div>
-                    </div>
+                    <span class="fit-badge">FIT: --</span>
+                    <span class="fit-score"></span>
                   </div>
                 </div>
                 <div class="pane-status">
@@ -161,8 +145,26 @@
                 <ul class="progress-log" id="sync-progress-log-{{ m.machine_id }}"></ul>
               </div>
               <pre class="output" id="out-{{ m.machine_id }}"></pre>
-              <div class="metrics" id="metrics-{{ m.machine_id }}">
-                <span class="muted">Waiting…</span>
+              <div class="footer-row">
+                <div class="metrics" id="metrics-{{ m.machine_id }}">
+                  <span class="muted">Waiting…</span>
+                </div>
+                <div class="mini-sparklines" id="runtime-sparklines-{{ m.machine_id }}">
+                  <div class="sparkline-block">
+                    <div class="sparkline-label">UTIL (%)</div>
+                    <svg class="sparkline" id="sparkline-util-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                    <div class="sparkline-placeholder" id="sparkline-util-placeholder-{{ m.machine_id }}">
+                      Metrics unavailable
+                    </div>
+                  </div>
+                  <div class="sparkline-block">
+                    <div class="sparkline-label">MEM (%)</div>
+                    <svg class="sparkline" id="sparkline-mem-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                    <div class="sparkline-placeholder" id="sparkline-mem-placeholder-{{ m.machine_id }}">
+                      Metrics unavailable
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             {% endfor %}
