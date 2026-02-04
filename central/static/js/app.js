@@ -449,27 +449,52 @@ function updateModelFit(machine) {
   const fitEl = document.getElementById(`model-fit-${machine.machine_id}`);
   if (!fitEl) return;
   const fit = machine.model_fit || {};
-  const label = fit.label || "unknown";
+
+  // Determine label based on fit_ratio thresholds
+  const fitRatio = fit.fit_ratio;
+  let label = "unknown";
+  if (fitRatio != null) {
+    if (fitRatio < 1.0) {
+      label = "fail";
+    } else if (fitRatio < 1.2) {
+      label = "risk";
+    } else {
+      label = "good";
+    }
+  }
+
   fitEl.classList.remove("good", "marginal", "risk", "fail", "unknown");
   fitEl.classList.add(label);
   const badge = fitEl.querySelector(".fit-badge");
   const scoreEl = fitEl.querySelector(".fit-score");
   if (!badge || !scoreEl) return;
+
   if (label === "unknown") {
-    badge.textContent = "Fit: --";
-    scoreEl.textContent = "--";
+    badge.textContent = "FIT: --";
+    scoreEl.textContent = "";
     fitEl.title = "Model fit unavailable";
     return;
   }
-  const score = fit.fit_score != null ? fit.fit_score.toFixed(1) : "--";
-  badge.textContent = `Fit: ${label}`;
-  scoreEl.textContent = score;
+
+  // Display FIT as multiplier with label badge
+  const fitDisplay = fitRatio.toFixed(1) + "×";
+  const labelText = label.toUpperCase();
+  badge.textContent = `FIT: ${labelText}`;
+  scoreEl.textContent = fitDisplay;
+
+  // Updated tooltip with clearer explanation
   const tooltip = [
-    `Model size: ${formatBytes(fit.model_bytes)}`,
-    `Usable ${fit.memory_label || "VRAM"}: ${formatBytes(fit.usable_vram_bytes)}`,
+    "Fit = available memory / estimated model memory",
+    "Target: ≥ 1.0× (higher = more headroom)",
+    "",
+    `Current: ${fitDisplay}`,
+    `Available ${fit.memory_label || "VRAM"}: ${formatBytes(fit.usable_vram_bytes)}`,
     `Estimated peak: ${formatBytes(fit.estimated_peak_bytes)}`,
-    `Fit ratio: ${fit.fit_ratio ? fit.fit_ratio.toFixed(2) : "n/a"}`,
-    "Suggested actions: reduce batch, use fp16, smaller model, or choose more VRAM.",
+    "",
+    "Ranges:",
+    "  < 1.0× = FAIL (insufficient memory)",
+    "  1.0×–1.2× = RISK (tight fit)",
+    "  ≥ 1.2× = GOOD (safe headroom)",
   ];
   fitEl.title = tooltip.join("\n");
 }
@@ -555,7 +580,7 @@ const updateRuntimeMetrics = (machineId, metrics) => {
     // Show both CPU and GPU when GPU is available
     utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
     utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
-    utilTitle = "CPU (solid) + GPU (dashed) utilization";
+    utilTitle = "GPU utilization (%)";
     const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
     const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
     utilMeta = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
@@ -565,7 +590,7 @@ const updateRuntimeMetrics = (machineId, metrics) => {
   } else if (hasCpuUtil) {
     // Show only CPU when GPU is not available
     utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-    utilTitle = "CPU utilization (GPU metrics unavailable)";
+    utilTitle = "CPU utilization (%)";
     const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
     utilMeta = `CPU ${lastCpu ?? "n/a"}%`;
     if (DEBUG_UI) {
@@ -595,25 +620,46 @@ const updateRuntimeMetrics = (machineId, metrics) => {
   let memValues = [];
   let memTitle = "";
   let memMeta = "";
-  let memMax = 1;
+  let memMax = 100;  // Memory is now displayed as percentage
 
   if (hasVram) {
-    memValues = vramUsed;
-    memMax = Math.max(...vramTotal.filter((v) => v != null), 1);
-    memTitle = "VRAM usage";
-    const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
-    memMeta = `VRAM ${lastMem ?? "n/a"} MiB`;
+    // Convert VRAM to percentage: (used / total) * 100
+    memValues = vramUsed.map((used, i) => {
+      const total = vramTotal[i];
+      if (used == null || total == null || total === 0) return null;
+      return (used / total) * 100;
+    });
+    memTitle = "VRAM used (%)";
+    const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+    memMeta = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
     if (DEBUG_UI) {
-      console.log(`[${machineId}] Memory source: VRAM`);
+      console.log(`[${machineId}] Memory source: VRAM%`);
     }
   } else if (hasSystemMem) {
-    memValues = systemMem;
-    memMax = Math.max(...systemMem.filter((v) => v != null), 1);
-    memTitle = "System RAM usage (GPU metrics unavailable)";
-    const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
-    memMeta = `RAM ${lastMem ?? "n/a"} MiB`;
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Memory source: System RAM`);
+    // For system RAM, we need total_system_ram_bytes from capabilities
+    // If not available, show as N/A
+    const machine = statusCache.get(machineId);
+    const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
+
+    if (totalRamBytes) {
+      const totalRamMib = totalRamBytes / (1024 * 1024);
+      memValues = systemMem.map((used) => {
+        if (used == null || totalRamMib === 0) return null;
+        return (used / totalRamMib) * 100;
+      });
+      memTitle = "System RAM used (%)";
+      const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+      memMeta = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
+      if (DEBUG_UI) {
+        console.log(`[${machineId}] Memory source: System RAM%`);
+      }
+    } else {
+      // Total RAM not available, show as N/A
+      memTitle = "Memory telemetry unavailable";
+      memMeta = "Memory telemetry unavailable";
+      if (DEBUG_UI) {
+        console.log(`[${machineId}] Memory source: System RAM total unknown`);
+      }
     }
   } else {
     memTitle = "Metrics unavailable";
@@ -623,9 +669,10 @@ const updateRuntimeMetrics = (machineId, metrics) => {
     }
   }
 
-  memPlaceholder?.classList.toggle("hidden", hasMem);
-  memBlock?.classList.toggle("is-empty", !hasMem);
-  if (hasMem) {
+  const hasMemData = memValues.length > 0 && memValues.some((v) => v != null);
+  memPlaceholder?.classList.toggle("hidden", hasMemData);
+  memBlock?.classList.toggle("is-empty", !hasMemData);
+  if (hasMemData) {
     renderSparkline(memSvg, [{ values: memValues, className: "mem-line", maxValue: memMax }], { title: memTitle });
   }
   if (memSvg) memSvg.dataset.sparklineMeta = memMeta;
@@ -677,21 +724,37 @@ const openSparklineModal = (machineId, type) => {
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Memory`;
 
     if (hasVram) {
-      const memMax = Math.max(...vramTotal.filter((v) => v != null), 1);
-      const lastMem = vramUsed.filter((v) => v != null).slice(-1)[0];
-      if (modalMeta) modalMeta.textContent = `VRAM ${lastMem ?? "n/a"} MiB`;
-      renderSparkline(modalChart, [{ values: vramUsed, className: "mem-line", maxValue: memMax }], {
+      // Convert VRAM to percentage
+      const memValues = vramUsed.map((used, i) => {
+        const total = vramTotal[i];
+        if (used == null || total == null || total === 0) return null;
+        return (used / total) * 100;
+      });
+      const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+      if (modalMeta) modalMeta.textContent = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
+      renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
         width: 480,
         height: 120,
       });
     } else if (hasSystemMem) {
-      const memMax = Math.max(...systemMem.filter((v) => v != null), 1);
-      const lastMem = systemMem.filter((v) => v != null).slice(-1)[0];
-      if (modalMeta) modalMeta.textContent = `RAM ${lastMem ?? "n/a"} MiB (VRAM unavailable)`;
-      renderSparkline(modalChart, [{ values: systemMem, className: "mem-line", maxValue: memMax }], {
-        width: 480,
-        height: 120,
-      });
+      const machine = statusCache.get(machineId);
+      const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
+
+      if (totalRamBytes) {
+        const totalRamMib = totalRamBytes / (1024 * 1024);
+        const memValues = systemMem.map((used) => {
+          if (used == null || totalRamMib === 0) return null;
+          return (used / totalRamMib) * 100;
+        });
+        const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+        if (modalMeta) modalMeta.textContent = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
+        renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
+          width: 480,
+          height: 120,
+        });
+      } else {
+        if (modalMeta) modalMeta.textContent = "Memory telemetry unavailable";
+      }
     } else {
       if (modalMeta) modalMeta.textContent = "Metrics unavailable";
     }

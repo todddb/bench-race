@@ -107,10 +107,47 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .model-fit.fail { color: #dc2626; }
 .model-fit.unknown { color: #6b7280; }
 
-.runtime-sparklines { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
-.sparkline-block { display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
-.sparkline-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
-.sparkline { width: 120px; height: 24px; border-radius: 6px; background: #f8fafc; border: 1px solid #e2e8f0; cursor: pointer; }
+/* Footer row with metrics and sparklines side by side */
+.footer-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+
+/* Mini sparklines container - stacked vertically beside metrics */
+.mini-sparklines {
+  flex: 0 0 160px;
+  max-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sparkline-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sparkline-label {
+  font-size: 11px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.sparkline {
+  width: 160px;
+  height: 34px;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  cursor: pointer;
+  display: block;
+}
+
 .sparkline path { fill: none; stroke-width: 2; }
 .sparkline .cpu-line { stroke: #2563eb; }
 .sparkline .gpu-line { stroke: #16a34a; stroke-dasharray: 4 3; }
@@ -285,6 +322,8 @@ body.options-expanded textarea.prompt { min-height: 220px; }
   .grid { grid-template-columns: 1fr; }
   .service-controls { flex-direction: column; }
   .main-layout { flex-direction: column; }
+  .footer-row { flex-direction: column; }
+  .mini-sparklines { max-width: 100%; }
 }
 
 @media (max-width: 980px) {
