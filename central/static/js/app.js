@@ -13,6 +13,7 @@ const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
 const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
+const DEBUG_UI = false;
 
 // Adaptive polling configuration
 const DEFAULT_POLLING_CONFIG = {
@@ -199,11 +200,6 @@ const handleJobResults = (results) => {
 };
 
 const formatGb = (value) => (value == null ? "n/a" : `${value.toFixed(1)}GB`);
-const formatBytes = (value) => {
-  if (value == null) return "n/a";
-  const gib = value / (1024 ** 3);
-  return `${gib.toFixed(1)}GiB`;
-};
 
 const formatTimestamp = (isoString) => {
   if (!isoString) return "";
@@ -422,6 +418,7 @@ function updateMachineStatus(machine) {
     agentReachable = null; // Unknown state
   }
 
+  const previousStatus = text.textContent;
   dot.classList.remove("ready", "missing", "offline", "checking");
 
   // If reachability is unknown, show "Checking..."
@@ -439,8 +436,12 @@ function updateMachineStatus(machine) {
     text.textContent = "Missing model";
   } else {
     dot.classList.add("ready");
-    dot.title = "Ready";
-    text.textContent = "Ready";
+    dot.title = "Online";
+    text.textContent = "Online";
+  }
+
+  if (DEBUG_UI && previousStatus !== text.textContent) {
+    console.log(`[${machine.machine_id}] Status changed: ${previousStatus} -> ${text.textContent}`);
   }
 }
 
@@ -540,36 +541,94 @@ const updateRuntimeMetrics = (machineId, metrics) => {
 
   const cpuMax = 100;
   const gpuMax = 100;
-  const memMax = Math.max(...vramTotal.filter((v) => v != null), ...systemMem.filter((v) => v != null), 1);
 
-  utilPlaceholder?.classList.toggle("hidden", cpu.length > 0);
-  utilBlock?.classList.toggle("is-empty", cpu.length === 0);
-  renderSparkline(
-    utilSvg,
-    [
-      { values: cpu, className: "cpu-line", maxValue: cpuMax },
-      { values: gpu, className: "gpu-line", maxValue: gpuMax },
-    ],
-    { title: "CPU (solid) + GPU (dashed) utilization" },
-  );
+  // Determine utilization source: GPU if available, otherwise CPU
+  const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
+  const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
+  const hasUtil = hasGpuUtil || hasCpuUtil;
 
-  const memValues = vramUsed.some((v) => v != null) ? vramUsed : systemMem;
-  const memTitle = metrics.gpu_metrics_available
-    ? "VRAM usage"
-    : "Unified/system memory (GPU metrics unavailable)";
-  memPlaceholder?.classList.toggle("hidden", memValues.length > 0);
-  memBlock?.classList.toggle("is-empty", memValues.length === 0);
-  renderSparkline(
-    memSvg,
-    [{ values: memValues, className: "mem-line", maxValue: memMax }],
-    { title: memTitle },
-  );
+  let utilTitle = "";
+  let utilMeta = "";
+  const utilSeries = [];
 
-  const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
-  const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
-  const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
-  if (utilSvg) utilSvg.dataset.sparklineMeta = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
-  if (memSvg) memSvg.dataset.sparklineMeta = `Mem ${lastMem ?? "n/a"} MiB`;
+  if (hasGpuUtil) {
+    // Show both CPU and GPU when GPU is available
+    utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+    utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
+    utilTitle = "CPU (solid) + GPU (dashed) utilization";
+    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+    const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
+    utilMeta = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Utilization source: GPU + CPU`);
+    }
+  } else if (hasCpuUtil) {
+    // Show only CPU when GPU is not available
+    utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+    utilTitle = "CPU utilization (GPU metrics unavailable)";
+    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+    utilMeta = `CPU ${lastCpu ?? "n/a"}%`;
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Utilization source: CPU only (GPU unavailable)`);
+    }
+  } else {
+    utilTitle = "Metrics unavailable";
+    utilMeta = "Metrics unavailable";
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Utilization source: none available`);
+    }
+  }
+
+  utilPlaceholder?.classList.toggle("hidden", hasUtil);
+  utilBlock?.classList.toggle("is-empty", !hasUtil);
+  if (hasUtil) {
+    renderSparkline(utilSvg, utilSeries, { title: utilTitle });
+  }
+  if (utilSvg) utilSvg.dataset.sparklineMeta = utilMeta;
+
+  // Determine memory source: VRAM if available, otherwise system RAM, otherwise unavailable
+  const hasVram = vramUsed.some((v) => v != null && !Number.isNaN(v)) &&
+                  vramTotal.some((v) => v != null && !Number.isNaN(v));
+  const hasSystemMem = systemMem.some((v) => v != null && !Number.isNaN(v));
+  const hasMem = hasVram || hasSystemMem;
+
+  let memValues = [];
+  let memTitle = "";
+  let memMeta = "";
+  let memMax = 1;
+
+  if (hasVram) {
+    memValues = vramUsed;
+    memMax = Math.max(...vramTotal.filter((v) => v != null), 1);
+    memTitle = "VRAM usage";
+    const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
+    memMeta = `VRAM ${lastMem ?? "n/a"} MiB`;
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Memory source: VRAM`);
+    }
+  } else if (hasSystemMem) {
+    memValues = systemMem;
+    memMax = Math.max(...systemMem.filter((v) => v != null), 1);
+    memTitle = "System RAM usage (GPU metrics unavailable)";
+    const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
+    memMeta = `RAM ${lastMem ?? "n/a"} MiB`;
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Memory source: System RAM`);
+    }
+  } else {
+    memTitle = "Metrics unavailable";
+    memMeta = "Metrics unavailable";
+    if (DEBUG_UI) {
+      console.log(`[${machineId}] Memory source: none available`);
+    }
+  }
+
+  memPlaceholder?.classList.toggle("hidden", hasMem);
+  memBlock?.classList.toggle("is-empty", !hasMem);
+  if (hasMem) {
+    renderSparkline(memSvg, [{ values: memValues, className: "mem-line", maxValue: memMax }], { title: memTitle });
+  }
+  if (memSvg) memSvg.dataset.sparklineMeta = memMeta;
 };
 
 const openSparklineModal = (machineId, type) => {
@@ -584,31 +643,58 @@ const openSparklineModal = (machineId, type) => {
   const vramUsed = metrics.vram_used_mib || [];
   const vramTotal = metrics.vram_total_mib || [];
   const systemMem = metrics.system_mem_used_mib || [];
-  const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
-  const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
-  const lastMem = (vramUsed.some((v) => v != null) ? vramUsed : systemMem).filter((v) => v != null).slice(-1)[0];
+
   if (type === "util") {
     const cpuMax = 100;
     const gpuMax = 100;
+    const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
+    const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
+    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+    const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
+
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Utilization`;
-    if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
-    renderSparkline(
-      modalChart,
-      [
-        { values: cpu, className: "cpu-line", maxValue: cpuMax },
-        { values: gpu, className: "gpu-line", maxValue: gpuMax },
-      ],
-      { width: 480, height: 120 },
-    );
+
+    const utilSeries = [];
+    if (hasGpuUtil) {
+      utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+      utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
+      if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
+    } else if (hasCpuUtil) {
+      utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+      if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% (GPU unavailable)`;
+    } else {
+      if (modalMeta) modalMeta.textContent = "Metrics unavailable";
+    }
+
+    if (utilSeries.length > 0) {
+      renderSparkline(modalChart, utilSeries, { width: 480, height: 120 });
+    }
   } else {
-    const memValues = vramUsed.some((v) => v != null) ? vramUsed : systemMem;
-    const memMax = Math.max(...vramTotal.filter((v) => v != null), ...systemMem.filter((v) => v != null), 1);
+    const hasVram = vramUsed.some((v) => v != null && !Number.isNaN(v)) &&
+                    vramTotal.some((v) => v != null && !Number.isNaN(v));
+    const hasSystemMem = systemMem.some((v) => v != null && !Number.isNaN(v));
+
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Memory`;
-    if (modalMeta) modalMeta.textContent = `Mem ${lastMem ?? "n/a"} MiB`;
-    renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: memMax }], {
-      width: 480,
-      height: 120,
-    });
+
+    if (hasVram) {
+      const memMax = Math.max(...vramTotal.filter((v) => v != null), 1);
+      const lastMem = vramUsed.filter((v) => v != null).slice(-1)[0];
+      if (modalMeta) modalMeta.textContent = `VRAM ${lastMem ?? "n/a"} MiB`;
+      renderSparkline(modalChart, [{ values: vramUsed, className: "mem-line", maxValue: memMax }], {
+        width: 480,
+        height: 120,
+      });
+    } else if (hasSystemMem) {
+      const memMax = Math.max(...systemMem.filter((v) => v != null), 1);
+      const lastMem = systemMem.filter((v) => v != null).slice(-1)[0];
+      if (modalMeta) modalMeta.textContent = `RAM ${lastMem ?? "n/a"} MiB (VRAM unavailable)`;
+      renderSparkline(modalChart, [{ values: systemMem, className: "mem-line", maxValue: memMax }], {
+        width: 480,
+        height: 120,
+      });
+    } else {
+      if (modalMeta) modalMeta.textContent = "Metrics unavailable";
+    }
   }
   openOverlay("sparkline");
 };
