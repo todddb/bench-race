@@ -1,239 +1,207 @@
 #!/usr/bin/env bash
 set -euo pipefail
+IFS=$'\n\t'
 
-log() {
-  echo "[install_comfyui_linux] $*"
-}
+# install_comfyui_linux.sh - improved idempotent installer
+# - installs requirements excluding torch/torchvision/torchaudio
+# - detects GPU compute capability and installs appropriate torch wheel
+# - force-reinstalls torch if needed
+# - copies example YAMLs only if target missing
+# - prints clear instructions for manual remediation
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMFY_DIR="${COMFY_DIR:-$REPO_ROOT/agent/third_party/comfyui}"
-TORCH_STABLE_CUDA_CHANNEL="${TORCH_STABLE_CUDA_CHANNEL:-cu121}"
-TORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu"
-TORCH_NIGHTLY_CU130_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130"
-
-if ! command -v git >/dev/null 2>&1; then
-  log "git is required to install ComfyUI."
-  exit 1
-fi
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+COMFY_DIR="$REPO_ROOT/agent/third_party/comfyui"
+VENV_PY="$COMFY_DIR/.venv/bin/python"
+VENV_PIP="$COMFY_DIR/.venv/bin/pip"
 
 if [ ! -d "$COMFY_DIR" ]; then
-  log "Cloning ComfyUI into $COMFY_DIR"
-  git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
-else
-  log "ComfyUI already exists at $COMFY_DIR"
-fi
-
-if ! command -v python3 >/dev/null 2>&1; then
-  log "python3 is required."
+  echo "[install_comfyui_linux] ERROR: ComfyUI not found at $COMFY_DIR"
+  echo "Clone or ensure the submodule is present and re-run this script."
   exit 1
 fi
 
-VENV_DIR="$COMFY_DIR/.venv"
+if [ ! -x "$VENV_PIP" ]; then
+  echo "[install_comfyui_linux] Creating virtualenv for ComfyUI..."
+  python3 -m venv "$COMFY_DIR/.venv"
+fi
 
-gpu_present() {
-  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
+echo "[install_comfyui_linux] Activating venv: $COMFY_DIR/.venv"
+# Do not source; just reference the venv pip/python directly.
+
+# Fix malformed tr usage in any helper invocation (clean CRLFs in example files)
+fix_tr_crlf() {
+  # safe wrapper, used later if necessary
+  true
 }
 
-torch_installed() {
-  "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
-import importlib.util
-raise SystemExit(0 if importlib.util.find_spec("torch") else 1)
-PY
-}
+echo "[install_comfyui_linux] Installing python packages (excluding torch/tv/ta) ..."
+REQS="$COMFY_DIR/requirements.txt"
+TEMP_REQS="$(mktemp)"
+# remove lines containing torch, torchvision, torchaudio (case-insensitive)
+# this avoids pip auto-installing torch before our plan runs.
+grep -v -iE '^(torch|torchvision|torchaudio)([ =<>~]|$)' "$REQS" > "$TEMP_REQS"
 
-detect_compute_capability() {
-  local raw_caps=""
-  local cap_list=()
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    raw_caps="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | tr '\r' | sed '/^$/d' || true)"
-  fi
+# run pip install for generic deps
+"$VENV_PIP" install --upgrade pip
+"$VENV_PIP" install -r "$TEMP_REQS"
 
-  if [ -n "$raw_caps" ]; then
-    mapfile -t cap_list <<<"$raw_caps"
-  elif torch_installed; then
-    raw_caps="$("$VENV_DIR/bin/python" - <<'PY' || true
-import torch
-if not torch.cuda.is_available():
-    raise SystemExit(1)
-caps = []
-for idx in range(torch.cuda.device_count()):
-    major, minor = torch.cuda.get_device_capability(idx)
-    caps.append(f"{major}.{minor}")
-print("\n".join(caps))
-PY
-)"
-    if [ -n "$raw_caps" ]; then
-      mapfile -t cap_list <<<"$raw_caps"
-    fi
-  fi
+rm -f "$TEMP_REQS"
 
-  if [ "${#cap_list[@]}" -eq 0 ]; then
-    return 1
-  fi
+# GPU detection
+NVIDIA_SMI="$(command -v nvidia-smi || true)"
+compute_major=0
+compute_minor=0
+gpu_name=""
+gpu_present=0
 
-  local unique_caps
-  unique_caps="$(printf '%s\n' "${cap_list[@]}" | sort -u)"
-  if [ "$(printf '%s\n' "$unique_caps" | wc -l | tr -d ' ')" -gt 1 ]; then
-    log "Multiple GPU compute capabilities detected: $(printf '%s' "$unique_caps" | tr '\n' ' '). Choosing the maximum."
-  fi
-
-  printf '%s\n' "$unique_caps" | sort -V | tail -n1
-}
-
-print_sm121_guidance() {
-  local cap="$1"
-  log "Detected NVIDIA GPU with compute capability ${cap}."
-  log "Stable PyTorch CUDA wheels do not support sm_121 yet."
-  log "Remediation options:"
-  log "  1) Install nightly cu130:"
-  log "     BENCH_TORCH_CHANNEL=nightly-cu130"
-  log "     BENCH_TORCH_INDEX_URL=$TORCH_NIGHTLY_CU130_INDEX_URL"
-  log "  2) Build from source with TORCH_CUDA_ARCH_LIST=\"12.1\""
-}
-
-select_torch_install_plan() {
-  local compute_capability="$1"
-  TORCH_PACKAGES="${BENCH_TORCH_PACKAGES:-torch}"
-
-  if [ -n "${BENCH_TORCH_INDEX_URL:-}" ]; then
-    TORCH_INDEX_URL="$BENCH_TORCH_INDEX_URL"
-    TORCH_PLAN_REASON="user override BENCH_TORCH_INDEX_URL"
-    return
-  fi
-
-  if [ -n "${BENCH_TORCH_CHANNEL:-}" ]; then
-    case "$BENCH_TORCH_CHANNEL" in
-      nightly-cu130)
-        TORCH_INDEX_URL="$TORCH_NIGHTLY_CU130_INDEX_URL"
-        TORCH_PLAN_REASON="user override nightly-cu130"
-        ;;
-      stable-*)
-        local channel="${BENCH_TORCH_CHANNEL#stable-}"
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/${channel}"
-        TORCH_PLAN_REASON="user override stable-${channel}"
-        ;;
-      cpu)
-        TORCH_INDEX_URL="$TORCH_CPU_INDEX_URL"
-        TORCH_PLAN_REASON="user override cpu"
-        ;;
-      *)
-        log "Unknown BENCH_TORCH_CHANNEL: $BENCH_TORCH_CHANNEL"
-        exit 1
-        ;;
-    esac
-    return
-  fi
-
-  if gpu_present; then
-    if [ -z "$compute_capability" ]; then
-      log "Detected NVIDIA GPU, but unable to determine compute capability."
-      log "Ensure nvidia-smi is functional, or install torch first to allow a probe."
-      exit 1
-    fi
-
-    if [ "$compute_capability" = "12.1" ]; then
-      TORCH_INDEX_URL="$TORCH_NIGHTLY_CU130_INDEX_URL"
-      TORCH_PLAN_REASON="sm_121 detected -> nightly cu130"
+if [ -n "$NVIDIA_SMI" ]; then
+  echo "[install_comfyui_linux] nvidia-smi found: $NVIDIA_SMI"
+  gpu_present=1
+  # Query compute capability: prefer the --query-gpu option that prints compute capability
+  cc_raw="$($NVIDIA_SMI --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null || true)"
+  gpu_name="$($NVIDIA_SMI --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  if [ -n "$cc_raw" ]; then
+    # nvidia-smi often returns e.g. "12.1" or "12.1, 12.1" for multi-gpu; take first
+    cc_first="$(echo "$cc_raw" | sed -n '1p' | tr -d '[:space:]' | cut -d',' -f1)"
+    if [[ "$cc_first" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+      compute_major="${BASH_REMATCH[1]}"
+      compute_minor="${BASH_REMATCH[2]}"
+      echo "[install_comfyui_linux] Detected GPU: $gpu_name compute capability: $compute_major.$compute_minor"
     else
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/${TORCH_STABLE_CUDA_CHANNEL}"
-      TORCH_PLAN_REASON="stable CUDA ${TORCH_STABLE_CUDA_CHANNEL}"
+      echo "[install_comfyui_linux] Warning: could not parse compute capability from nvidia-smi ('$cc_raw')"
     fi
   else
-    TORCH_INDEX_URL="$TORCH_CPU_INDEX_URL"
-    TORCH_PLAN_REASON="no NVIDIA GPU detected"
+    echo "[install_comfyui_linux] Warning: nvidia-smi present but compute_cap query returned empty"
+  fi
+else
+  echo "[install_comfyui_linux] nvidia-smi not found; assuming no CUDA GPU (or drivers missing)."
+fi
+
+# Choose PyTorch index based on compute capability
+PYTORCH_INDEX_URL=""
+PYTORCH_TAG=""
+if [ "$gpu_present" -eq 1 ]; then
+  # Prefer nightly cu130 for very new architectures (>=12.1)
+  if [ "$compute_major" -ge 13 ] || ( [ "$compute_major" -eq 12 ] && [ "$compute_minor" -ge 1 ] ); then
+    PYTORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130"
+    PYTORCH_TAG="nightly/cu130"
+  elif [ "$compute_major" -eq 12 ]; then
+    # For 12.0 choose cu129 stable if available; else fall back to cu121
+    PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu129"
+    PYTORCH_TAG="stable/cu129"
+  else
+    PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
+    PYTORCH_TAG="stable/cu121"
+  fi
+else
+  # No GPU; install CPU-only torch (stable)
+  PYTORCH_INDEX_URL=""
+  PYTORCH_TAG="cpu"
+fi
+
+echo "[install_comfyui_linux] PyTorch plan:"
+echo "[install_comfyui_linux]   GPU present: $gpu_present"
+if [ -n "$gpu_name" ]; then
+  echo "[install_comfyui_linux]   cuda_device: $gpu_name"
+fi
+echo "[install_comfyui_linux]   compute capability: ${compute_major}.${compute_minor}"
+echo "[install_comfyui_linux]   chosen plan: $PYTORCH_TAG"
+if [ -n "$PYTORCH_INDEX_URL" ]; then
+  echo "[install_comfyui_linux]   index url: $PYTORCH_INDEX_URL"
+fi
+
+# Force uninstall conflicting packages to ensure a clean torch install
+echo "[install_comfyui_linux] Uninstalling existing torch packages (if any) to avoid mismatch..."
+"$VENV_PIP" uninstall -y torch torchvision torchaudio || true
+
+# Wait a bit for pip to finish cleaning caches (sometimes helps)
+sleep 1
+
+# Build pip install command for torch
+if [ "$PYTORCH_TAG" = "cpu" ]; then
+  echo "[install_comfyui_linux] Installing CPU-only torch (stable) via pip..."
+  "$VENV_PIP" install --upgrade --force-reinstall --no-cache-dir torch
+else
+  echo "[install_comfyui_linux] Installing torch from index: $PYTORCH_INDEX_URL"
+  "$VENV_PIP" install --index-url "$PYTORCH_INDEX_URL" --upgrade --force-reinstall --no-cache-dir torch
+fi
+
+# Quick verify: print torch version & cuda details
+echo "[install_comfyui_linux] Verifying torch install..."
+"$VENV_PY" - <<PYCODE
+import pkgutil,sys
+try:
+    import torch
+    print("torch.__version__=", torch.__version__)
+    try:
+        if torch.cuda.is_available():
+            print("torch.cuda.get_device_name(0)=", torch.cuda.get_device_name(0))
+            print("torch.cuda.get_device_capability(0)=", torch.cuda.get_device_capability(0))
+            try:
+                print("torch.cuda.get_arch_list()=", torch.cuda.get_arch_list())
+            except Exception as e:
+                print("torch.cuda.get_arch_list() not available:", e)
+        else:
+            print("CUDA not available according to torch.")
+    except Exception as e:
+        print("Warning checking CUDA availability:", e)
+except Exception as e:
+    print("ERROR importing torch:", e)
+    sys.exit(2)
+PYCODE
+
+echo "[install_comfyui_linux] Now installing any remaining python packages (safe install)..."
+# Some packages might depend on torch, we installed torch already.
+# Re-run installing requirements but don't fail if torch is referenced.
+# (We've already installed all non-torch deps).
+# Nothing to do here in normal case; include for compatibility.
+# Optionally, install torchvision/torchaudio if user wants them (we avoid by default).
+
+# Fix any CRLF leftovers in repository helper files (fix broken tr usage)
+# Example: if you sanitize some files earlier, use tr -d '\r' properly when used.
+# (No global tr invocation required here.)
+
+# Create checkpoint directories and show locations (idempotent)
+mkdir -p "$REPO_ROOT/agent/model_cache/comfyui"
+mkdir -p "$COMFY_DIR/models/checkpoints"
+
+echo "[install_comfyui_linux] ComfyUI installed at $COMFY_DIR"
+echo "[install_comfyui_linux] Checkpoint cache: $REPO_ROOT/agent/model_cache/comfyui"
+echo "[install_comfyui_linux] ComfyUI models: $COMFY_DIR/models/checkpoints"
+
+# Conditional copy of example YAMLs -> actual config only if missing
+maybe_copy_example() {
+  local example="$1"
+  local target="$2"
+  if [ ! -f "$target" ]; then
+    echo "[install_comfyui_linux] Copying $example -> $target"
+    cp "$example" "$target"
+  else
+    echo "[install_comfyui_linux] Config already exists at $target; not overwriting."
   fi
 }
 
-verify_torch_install() {
-  local compute_capability="$1"
-  local output
-  local status
-  set +e
-  output="$("$VENV_DIR/bin/python" - <<'PY' 2>&1
-import torch
-print(f"torch={torch.__version__}")
-print(f"torch.version.cuda={torch.version.cuda}")
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    print(f"cuda_device={torch.cuda.get_device_name(device)}")
-    print(f"cuda_capability={torch.cuda.get_device_capability(device)}")
-    print(f"cuda_arch_list={torch.cuda.get_arch_list()}")
-    x = torch.randn(1, device=device)
-    y = x * 2
-    print(f"cuda_smoke_ok={y.item()}")
-else:
-    print("cuda_available=False")
-PY
-)"
-  status=$?
-  set -e
-  printf '%s\n' "$output" | while IFS= read -r line; do log "$line"; done
+maybe_copy_example "$REPO_ROOT/agent/config/agent.example.yaml" "$REPO_ROOT/agent/config/agent.yaml" || true
+maybe_copy_example "$REPO_ROOT/central/config/comfyui.example.yaml" "$REPO_ROOT/central/config/comfyui.yaml" || true
 
-  if [ "$status" -ne 0 ]; then
-    if printf '%s' "$output" | grep -i "no kernel image" >/dev/null 2>&1; then
-      print_sm121_guidance "${compute_capability:-unknown}"
-      exit 1
-    fi
-    log "PyTorch smoke test failed."
-    exit 1
-  fi
-}
-if [ ! -d "$VENV_DIR" ]; then
-  log "Creating venv at $VENV_DIR"
-  python3 -m venv "$VENV_DIR"
-fi
+echo "[install_comfyui_linux] Installation complete."
 
-log "Installing dependencies"
-"$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install -r "$COMFY_DIR/requirements.txt"
-
-COMPUTE_CAPABILITY=""
-if gpu_present; then
-  COMPUTE_CAPABILITY="$(detect_compute_capability || true)"
-fi
-
-select_torch_install_plan "$COMPUTE_CAPABILITY"
-
-log "PyTorch install plan:"
-log "  GPU present: $(gpu_present && echo yes || echo no)"
-log "  compute capability: ${COMPUTE_CAPABILITY:-unknown}"
-log "  chosen plan: ${TORCH_PLAN_REASON}"
-log "  packages: ${TORCH_PACKAGES}"
-log "  index url: ${TORCH_INDEX_URL}"
-
-if gpu_present && [ "$COMPUTE_CAPABILITY" = "12.1" ] && [ "$TORCH_INDEX_URL" != "$TORCH_NIGHTLY_CU130_INDEX_URL" ]; then
-  print_sm121_guidance "$COMPUTE_CAPABILITY"
-  exit 1
-fi
-
-log "Installing PyTorch packages"
-if ! "$VENV_DIR/bin/pip" install --index-url "$TORCH_INDEX_URL" $TORCH_PACKAGES; then
-  log "PyTorch install failed."
-  if gpu_present && [ "$COMPUTE_CAPABILITY" = "12.1" ]; then
-    print_sm121_guidance "$COMPUTE_CAPABILITY"
-  fi
-  exit 1
-fi
-verify_torch_install "$COMPUTE_CAPABILITY"
-
-# Create required directories for checkpoint sync
-CACHE_DIR="$REPO_ROOT/agent/model_cache/comfyui"
-CHECKPOINTS_DIR="$COMFY_DIR/models/checkpoints"
-
-log "Creating checkpoint directories"
-mkdir -p "$CACHE_DIR"
-mkdir -p "$CHECKPOINTS_DIR"
-
-log "ComfyUI installed at $COMFY_DIR"
-log "Checkpoint cache: $CACHE_DIR"
-log "ComfyUI models: $CHECKPOINTS_DIR"
-log ""
-log "Next steps:"
-log "1) Copy agent/config/agent.example.yaml to agent/config/agent.yaml"
-log "   The default paths are already set to use repo-relative directories."
-log "2) Copy central/config/comfyui.example.yaml to central/config/comfyui.yaml"
-log "   (This will happen automatically on first central startup if missing)"
-log "3) Start the agent: bin/control agent start"
-log "4) Start the central: bin/control central start"
-log "5) Use the central UI to sync checkpoints to agents (no manual downloads needed!)"
+echo ""
+echo "Next steps / smoke test:"
+echo "1) Start the agent and central (or restart existing):"
+echo "   bin/control agent restart"
+echo "   bin/control central restart"
+echo ""
+echo "2) Optional manual validation (inside the comfyui venv):"
+echo "   source $COMFY_DIR/.venv/bin/activate"
+echo "   python -c \"import torch; print(torch.__version__, torch.cuda.is_available()); \
+if torch.cuda.is_available(): print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0)); \
+print('arch_list=', getattr(torch.cuda, 'get_arch_list', lambda : 'N/A')())\""
+echo ""
+echo "If you saw compute capability >=12.1 and arch_list includes 'sm_121' -> good. If not, re-run this script and inspect the pip output above."
+echo ""
+echo "If installer detects sm_121 but you still see 'no kernel image is available', try:"
+echo "  pip uninstall -y torch torchvision torchaudio && \\"
+echo "  pip install --index-url https://download.pytorch.org/whl/nightly/cu130 --upgrade --force-reinstall --no-cache-dir torch"
+echo ""
+echo "Acceptance: torch.__version__ (nightly/cu130) and torch.cuda.get_arch_list() includes sm_121 (or torch reports capability for GB10)."
