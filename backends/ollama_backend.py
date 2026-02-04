@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from typing import Any, Awaitable, Callable, Dict
 
 import httpx
+
+# Logger for this module
+log = logging.getLogger("ollama_backend")
 
 # tune as needed
 OLLAMA_TIMEOUT = 5.0  # seconds for tags check
@@ -37,8 +41,12 @@ async def check_ollama_available(base_url: str) -> bool:
         url = base_url.rstrip("/") + "/api/tags"
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             r = await client.get(url)
-            return r.status_code == 200
-    except Exception:
+            available = r.status_code == 200
+            if not available:
+                log.warning("Ollama health check failed: HTTP %d from %s", r.status_code, url)
+            return available
+    except Exception as e:
+        log.warning("Ollama unreachable at %s: %s", base_url, e)
         return False
 
 
@@ -52,12 +60,16 @@ async def get_ollama_models(base_url: str) -> list[str]:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             r = await client.get(url)
             if r.status_code != 200:
+                log.warning("Failed to fetch Ollama models: HTTP %d from %s", r.status_code, url)
                 return []
             data = r.json()
             # Ollama returns {"models": [{"name": "llama3.1:8b-instruct-q8_0", ...}, ...]}
             models = data.get("models", [])
-            return [m.get("name", "") for m in models if m.get("name")]
-    except Exception:
+            model_names = [m.get("name", "") for m in models if m.get("name")]
+            log.debug("Ollama models available: %s", model_names)
+            return model_names
+    except Exception as e:
+        log.warning("Failed to fetch Ollama models from %s: %s", base_url, e)
         return []
 
 
@@ -117,10 +129,12 @@ async def stream_ollama_generate(
         last_flush_time = now
 
     # Use a long timeout for streaming; httpx will keep connection open
+    log.debug("Starting Ollama stream for job %s, model=%s", job_id, model)
     async with httpx.AsyncClient(timeout=None) as client:
         try:
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
+                log.debug("Ollama stream connected for job %s", job_id)
                 # iterate lines (NDJSON)
                 async for raw_line in resp.aiter_lines():
                     if raw_line is None:
@@ -169,8 +183,20 @@ async def stream_ollama_generate(
 
             # Final flush for any remaining buffered text
             await flush_buffer()
+            log.debug("Ollama stream completed for job %s", job_id)
 
+        except httpx.HTTPStatusError as exc:
+            log.error("Ollama HTTP error for job %s: status=%d, url=%s", job_id, exc.response.status_code, url)
+            # Flush any remaining buffer before raising
+            await flush_buffer()
+            raise
+        except httpx.TimeoutException as exc:
+            log.error("Ollama timeout for job %s: %s", job_id, exc)
+            # Flush any remaining buffer before raising
+            await flush_buffer()
+            raise
         except Exception as exc:
+            log.error("Ollama stream error for job %s: %s", job_id, exc)
             # Flush any remaining buffer before raising
             await flush_buffer()
             raise
@@ -188,4 +214,6 @@ async def stream_ollama_generate(
         "model": model,
         "engine": "ollama",
     }
+    log.info("Ollama job %s completed: tokens=%d, ttft=%.1fms, total=%.1fms",
+             job_id, gen_tokens, ttft_ms or 0, total_ms)
     return result
