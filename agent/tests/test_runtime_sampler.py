@@ -19,5 +19,6 @@ def test_runtime_sampler_schema(monkeypatch):
     assert snapshot["gpu_pct"] == [None]
     assert snapshot["vram_used_mib"] == [None]
     assert snapshot["system_mem_used_mib"] == [3.0]
+    assert snapshot["ram_used_bytes"] == [1024 * 1024 * 3]
     assert len(snapshot["timestamps"]) == 1
     assert snapshot["gpu_metrics_available"] is False

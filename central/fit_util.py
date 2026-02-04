@@ -22,13 +22,14 @@ def compute_model_fit_score(
             "label": "fail",
             "color": "#DC2626",
         }
-    fit_ratio = estimated_peak / usable_vram
-    fit_score = 1.0 / fit_ratio if fit_ratio > 0 else float("inf")
-    if fit_ratio <= 0.6:
+    if estimated_peak <= 0:
+        fit_ratio = float("inf")
+    else:
+        fit_ratio = usable_vram / estimated_peak
+    fit_score = fit_ratio
+    if fit_ratio >= 1.2:
         label, color = "good", "#059669"
-    elif fit_ratio <= 0.8:
-        label, color = "marginal", "#F59E0B"
-    elif fit_ratio <= 1.0:
+    elif fit_ratio >= 1.0:
         label, color = "risk", "#F97316"
     else:
         label, color = "fail", "#DC2626"

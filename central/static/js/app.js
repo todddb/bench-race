@@ -28,6 +28,12 @@ let isRunActive = false;
 const activeRunIds = new Set();
 let statusPollTimer = null;
 let lastUiUpdate = 0;
+let runTrackingActive = false;
+let runStartTs = null;
+let runEndTs = null;
+let runSamples = new Map();
+let runDone = new Set();
+let runMachines = new Set();
 
 let baselineRunId = localStorage.getItem(BASELINE_KEY);
 let baselineRun = null;
@@ -112,6 +118,31 @@ const setRunActive = (active, runId = null) => {
   if (wasActive !== isRunActive) {
     console.log(`Run state changed: ${wasActive} -> ${isRunActive}`);
     restartPolling();
+  }
+};
+
+const beginRunTracking = (machineIds = []) => {
+  runSamples = new Map();
+  runDone = new Set();
+  runMachines = new Set(machineIds);
+  runStartTs = performance.now();
+  runEndTs = null;
+  runTrackingActive = true;
+  renderAllSparklines();
+};
+
+const endRunTracking = () => {
+  if (!runStartTs || runEndTs) return;
+  runEndTs = performance.now();
+  runTrackingActive = false;
+  renderAllSparklines();
+};
+
+const markRunMachineDone = (machineId) => {
+  if (!runTrackingActive || runDone.has(machineId)) return;
+  runDone.add(machineId);
+  if (runMachines.size > 0 && runDone.size >= runMachines.size) {
+    endRunTracking();
   }
 };
 
@@ -450,16 +481,16 @@ function updateModelFit(machine) {
   if (!fitEl) return;
   const fit = machine.model_fit || {};
 
-  // Determine label based on fit_ratio thresholds
+  // Determine label based on fit ratio (available / required) thresholds
   const fitRatio = fit.fit_ratio;
   let label = "unknown";
   if (fitRatio != null) {
-    if (fitRatio < 1.0) {
-      label = "fail";
-    } else if (fitRatio < 1.2) {
+    if (fitRatio >= 1.2) {
+      label = "good";
+    } else if (fitRatio >= 1.0) {
       label = "risk";
     } else {
-      label = "good";
+      label = "fail";
     }
   }
 
@@ -502,9 +533,13 @@ function updateModelFit(machine) {
 const SPARKLINE_WIDTH = 120;
 const SPARKLINE_HEIGHT = 24;
 
-const buildSparklinePath = (values, width, height, maxValue) => {
+const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
   if (!values || values.length === 0) return "";
-  const max = maxValue || Math.max(...values.filter((v) => v != null), 1);
+  const filteredValues = values.filter((v) => v != null && !Number.isNaN(v));
+  if (filteredValues.length === 0) return "";
+  const max = maxValue || Math.max(...filteredValues, 1);
+  const hasTimes = Array.isArray(times) && times.length === values.length && startTime != null && endTime != null;
+  const range = hasTimes ? Math.max(endTime - startTime, 1) : null;
   const step = values.length > 1 ? width / (values.length - 1) : width;
   let d = "";
   let started = false;
@@ -513,7 +548,10 @@ const buildSparklinePath = (values, width, height, maxValue) => {
       started = false;
       return;
     }
-    const x = index * step;
+    let x = index * step;
+    if (hasTimes) {
+      x = ((times[index] - startTime) / range) * width;
+    }
     const y = height - (Math.min(value, max) / max) * height;
     if (!started) {
       d += `M ${x.toFixed(2)} ${y.toFixed(2)} `;
@@ -529,10 +567,12 @@ const renderSparkline = (svg, series, options = {}) => {
   if (!svg) return;
   const width = options.width || SPARKLINE_WIDTH;
   const height = options.height || SPARKLINE_HEIGHT;
+  const startTime = options.startTime ?? null;
+  const endTime = options.endTime ?? null;
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = "";
   series.forEach((item) => {
-    const pathData = buildSparklinePath(item.values, width, height, item.maxValue);
+    const pathData = buildSparklinePath(item.values, width, height, item.maxValue, item.times, startTime, endTime);
     if (!pathData) return;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", pathData);
@@ -542,15 +582,66 @@ const renderSparkline = (svg, series, options = {}) => {
   if (options.title) svg.setAttribute("title", options.title);
 };
 
-const updateRuntimeMetrics = (machineId, metrics) => {
+const getLastNumeric = (values) => {
+  if (!Array.isArray(values)) return null;
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    const value = values[i];
+    if (value != null && !Number.isNaN(value)) {
+      return value;
+    }
+  }
+  return null;
+};
+
+const extractSeries = (samples, key) => {
+  const values = [];
+  const times = [];
+  samples.forEach((sample) => {
+    const value = sample[key];
+    if (value == null || Number.isNaN(value)) return;
+    values.push(value);
+    times.push(sample.t);
+  });
+  return { values, times };
+};
+
+const recordRunSample = (machineId, metrics) => {
+  if (!runTrackingActive || runDone.has(machineId) || !metrics) return;
+  const cpu = getLastNumeric(metrics.cpu_pct || []);
+  const gpu = getLastNumeric(metrics.gpu_pct || []);
+  const vramUsed = getLastNumeric(metrics.vram_used_mib || []);
+  const vramTotal = getLastNumeric(metrics.vram_total_mib || []);
+  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes || []);
+  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib || []);
+  const machine = statusCache.get(machineId);
+  const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
+
+  let memPct = null;
+  if (vramUsed != null && vramTotal != null && vramTotal > 0) {
+    memPct = (vramUsed / vramTotal) * 100;
+  } else if (ramUsedBytes != null && totalRamBytes) {
+    memPct = (ramUsedBytes / totalRamBytes) * 100;
+  } else if (systemMemMib != null && totalRamBytes) {
+    memPct = ((systemMemMib * 1024 * 1024) / totalRamBytes) * 100;
+  }
+
+  if (cpu == null && gpu == null && memPct == null) return;
+
+  const samples = runSamples.get(machineId) || [];
+  samples.push({ t: performance.now(), cpu, gpu, mem: memPct });
+  runSamples.set(machineId, samples);
+};
+
+const renderRunSparklines = (machineId, metrics = null) => {
   const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
   const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
   const utilPlaceholder = document.getElementById(`sparkline-util-placeholder-${machineId}`);
   const memPlaceholder = document.getElementById(`sparkline-mem-placeholder-${machineId}`);
   const utilBlock = utilSvg?.closest(".sparkline-block");
   const memBlock = memSvg?.closest(".sparkline-block");
+  const resolvedMetrics = metrics || runtimeMetrics.get(machineId) || statusCache.get(machineId)?.runtime_metrics;
 
-  if (!metrics) {
+  if (!resolvedMetrics && !runSamples.get(machineId)?.length) {
     utilPlaceholder?.classList.remove("hidden");
     memPlaceholder?.classList.remove("hidden");
     utilBlock?.classList.add("is-empty");
@@ -558,205 +649,246 @@ const updateRuntimeMetrics = (machineId, metrics) => {
     return;
   }
 
-  const cpu = metrics.cpu_pct || [];
-  const gpu = metrics.gpu_pct || [];
-  const vramUsed = metrics.vram_used_mib || [];
-  const vramTotal = metrics.vram_total_mib || [];
-  const systemMem = metrics.system_mem_used_mib || [];
+  const samples = runSamples.get(machineId) || [];
+  const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
+  const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
+  const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+  const startTime = runStartTs ?? samples[0]?.t ?? performance.now();
+  const endTime = runEndTs ?? performance.now();
 
-  const cpuMax = 100;
-  const gpuMax = 100;
-
-  // Determine utilization source: GPU if available, otherwise CPU
-  const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
-  const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
+  const hasGpuUtil = gpuValues.length > 0;
+  const hasCpuUtil = cpuValues.length > 0;
   const hasUtil = hasGpuUtil || hasCpuUtil;
 
+  const utilSeries = [];
   let utilTitle = "";
   let utilMeta = "";
-  const utilSeries = [];
 
   if (hasGpuUtil) {
-    // Show both CPU and GPU when GPU is available
-    utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-    utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
+    utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
+    utilSeries.push({ values: gpuValues, times: gpuTimes, className: "gpu-line", maxValue: 100 });
     utilTitle = "GPU utilization (%)";
-    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
-    const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
+    const lastCpu = cpuValues.slice(-1)[0];
+    const lastGpu = gpuValues.slice(-1)[0];
     utilMeta = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Utilization source: GPU + CPU`);
-    }
   } else if (hasCpuUtil) {
-    // Show only CPU when GPU is not available
-    utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+    utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
     utilTitle = "CPU utilization (%)";
-    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+    const lastCpu = cpuValues.slice(-1)[0];
     utilMeta = `CPU ${lastCpu ?? "n/a"}%`;
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Utilization source: CPU only (GPU unavailable)`);
-    }
   } else {
     utilTitle = "Metrics unavailable";
     utilMeta = "Metrics unavailable";
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Utilization source: none available`);
-    }
   }
 
   utilPlaceholder?.classList.toggle("hidden", hasUtil);
   utilBlock?.classList.toggle("is-empty", !hasUtil);
   if (hasUtil) {
-    renderSparkline(utilSvg, utilSeries, { title: utilTitle });
+    renderSparkline(utilSvg, utilSeries, {
+      title: utilTitle,
+      startTime,
+      endTime,
+    });
   }
   if (utilSvg) utilSvg.dataset.sparklineMeta = utilMeta;
 
-  // Determine memory source: VRAM if available, otherwise system RAM, otherwise unavailable
-  const hasVram = vramUsed.some((v) => v != null && !Number.isNaN(v)) &&
-                  vramTotal.some((v) => v != null && !Number.isNaN(v));
-  const hasSystemMem = systemMem.some((v) => v != null && !Number.isNaN(v));
-  const hasMem = hasVram || hasSystemMem;
+  const vramUsed = resolvedMetrics?.vram_used_mib || [];
+  const vramTotal = resolvedMetrics?.vram_total_mib || [];
+  const ramUsedBytes = resolvedMetrics?.ram_used_bytes || [];
+  const systemMemMib = resolvedMetrics?.system_mem_used_mib || [];
+  const machine = statusCache.get(machineId);
+  const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
 
-  let memValues = [];
+  const hasVramTelemetry =
+    getLastNumeric(vramUsed) != null && getLastNumeric(vramTotal) != null;
+  const hasSystemMemTelemetry = getLastNumeric(ramUsedBytes) != null || getLastNumeric(systemMemMib) != null;
+  const canComputeMem = (hasVramTelemetry && getLastNumeric(vramTotal) > 0) ||
+    (hasSystemMemTelemetry && totalRamBytes);
+
   let memTitle = "";
   let memMeta = "";
-  let memMax = 100;  // Memory is now displayed as percentage
-
-  if (hasVram) {
-    // Convert VRAM to percentage: (used / total) * 100
-    memValues = vramUsed.map((used, i) => {
-      const total = vramTotal[i];
-      if (used == null || total == null || total === 0) return null;
-      return (used / total) * 100;
-    });
-    memTitle = "VRAM used (%)";
-    const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
-    memMeta = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Memory source: VRAM%`);
-    }
-  } else if (hasSystemMem) {
-    // For system RAM, we need total_system_ram_bytes from capabilities
-    // If not available, show as N/A
-    const machine = statusCache.get(machineId);
-    const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
-
-    if (totalRamBytes) {
-      const totalRamMib = totalRamBytes / (1024 * 1024);
-      memValues = systemMem.map((used) => {
-        if (used == null || totalRamMib === 0) return null;
-        return (used / totalRamMib) * 100;
-      });
-      memTitle = "System RAM used (%)";
-      const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
-      memMeta = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
-      if (DEBUG_UI) {
-        console.log(`[${machineId}] Memory source: System RAM%`);
-      }
-    } else {
-      // Total RAM not available, show as N/A
-      memTitle = "Memory telemetry unavailable";
-      memMeta = "Memory telemetry unavailable";
-      if (DEBUG_UI) {
-        console.log(`[${machineId}] Memory source: System RAM total unknown`);
-      }
-    }
+  if (memValues.length > 0) {
+    memTitle = hasVramTelemetry ? "VRAM used (%)" : "System RAM used (%)";
+    const lastPct = memValues.slice(-1)[0];
+    memMeta = lastPct != null ? `MEM ${lastPct.toFixed(1)}%` : "MEM n/a";
+  } else if (!canComputeMem) {
+    memTitle = "Memory telemetry unavailable";
+    memMeta = "Memory telemetry unavailable";
   } else {
     memTitle = "Metrics unavailable";
     memMeta = "Metrics unavailable";
-    if (DEBUG_UI) {
-      console.log(`[${machineId}] Memory source: none available`);
-    }
   }
 
-  const hasMemData = memValues.length > 0 && memValues.some((v) => v != null);
+  const hasMemData = memValues.length > 0;
   memPlaceholder?.classList.toggle("hidden", hasMemData);
   memBlock?.classList.toggle("is-empty", !hasMemData);
+  if (memPlaceholder) {
+    if (!hasMemData && !canComputeMem) {
+      memPlaceholder.textContent = "N/A";
+      memPlaceholder.title =
+        "Memory telemetry unavailable (no VRAM metrics and no system RAM usage metric).";
+    } else {
+      memPlaceholder.textContent = "Metrics unavailable";
+      memPlaceholder.title = "";
+    }
+  }
   if (hasMemData) {
-    renderSparkline(memSvg, [{ values: memValues, className: "mem-line", maxValue: memMax }], { title: memTitle });
+    renderSparkline(memSvg, [{ values: memValues, times: memTimes, className: "mem-line", maxValue: 100 }], {
+      title: memTitle,
+      startTime,
+      endTime,
+    });
   }
   if (memSvg) memSvg.dataset.sparklineMeta = memMeta;
 };
 
+const renderAllSparklines = () => {
+  paneMap.forEach((_, machineId) => {
+    renderRunSparklines(machineId);
+  });
+};
+
+const updateRuntimeMetrics = (machineId, metrics) => {
+  recordRunSample(machineId, metrics);
+  renderRunSparklines(machineId, metrics);
+};
+
 const openSparklineModal = (machineId, type) => {
   const metrics = runtimeMetrics.get(machineId) || statusCache.get(machineId)?.runtime_metrics;
-  if (!metrics) return;
+  const samples = runSamples.get(machineId) || [];
+  if (!metrics && samples.length === 0) return;
   const modalLabel = document.getElementById("sparkline-modal-label");
   const modalMeta = document.getElementById("sparkline-modal-meta");
   const modalChart = document.getElementById("sparkline-modal-chart");
   const machineLabel = statusCache.get(machineId)?.label || machineId;
-  const cpu = metrics.cpu_pct || [];
-  const gpu = metrics.gpu_pct || [];
-  const vramUsed = metrics.vram_used_mib || [];
-  const vramTotal = metrics.vram_total_mib || [];
-  const systemMem = metrics.system_mem_used_mib || [];
+  const cpu = metrics?.cpu_pct || [];
+  const gpu = metrics?.gpu_pct || [];
+  const vramUsed = metrics?.vram_used_mib || [];
+  const vramTotal = metrics?.vram_total_mib || [];
+  const systemMem = metrics?.system_mem_used_mib || [];
+  const ramUsedBytes = metrics?.ram_used_bytes || [];
 
   if (type === "util") {
-    const cpuMax = 100;
-    const gpuMax = 100;
-    const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
-    const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
-    const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
-    const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
-
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Utilization`;
 
-    const utilSeries = [];
-    if (hasGpuUtil) {
-      utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-      utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
-      if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
-    } else if (hasCpuUtil) {
-      utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-      if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% (GPU unavailable)`;
+    if (samples.length > 0) {
+      const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
+      const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
+      const hasGpuUtil = gpuValues.length > 0;
+      const hasCpuUtil = cpuValues.length > 0;
+      const utilSeries = [];
+      if (hasGpuUtil) {
+        utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
+        utilSeries.push({ values: gpuValues, times: gpuTimes, className: "gpu-line", maxValue: 100 });
+        if (modalMeta) {
+          modalMeta.textContent = `CPU ${cpuValues.slice(-1)[0] ?? "n/a"}% | GPU ${gpuValues.slice(-1)[0] ?? "n/a"}%`;
+        }
+      } else if (hasCpuUtil) {
+        utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
+        if (modalMeta) modalMeta.textContent = `CPU ${cpuValues.slice(-1)[0] ?? "n/a"}% (GPU unavailable)`;
+      } else if (modalMeta) {
+        modalMeta.textContent = "Metrics unavailable";
+      }
+      if (utilSeries.length > 0) {
+        const startTime = runStartTs ?? samples[0]?.t ?? performance.now();
+        renderSparkline(modalChart, utilSeries, {
+          width: 480,
+          height: 120,
+          startTime,
+          endTime: runEndTs ?? performance.now(),
+        });
+      }
     } else {
-      if (modalMeta) modalMeta.textContent = "Metrics unavailable";
-    }
+      const cpuMax = 100;
+      const gpuMax = 100;
+      const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
+      const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
+      const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+      const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
 
-    if (utilSeries.length > 0) {
-      renderSparkline(modalChart, utilSeries, { width: 480, height: 120 });
+      const utilSeries = [];
+      if (hasGpuUtil) {
+        utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+        utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
+        if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
+      } else if (hasCpuUtil) {
+        utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
+        if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% (GPU unavailable)`;
+      } else if (modalMeta) {
+        modalMeta.textContent = "Metrics unavailable";
+      }
+
+      if (utilSeries.length > 0) {
+        renderSparkline(modalChart, utilSeries, { width: 480, height: 120 });
+      }
     }
   } else {
-    const hasVram = vramUsed.some((v) => v != null && !Number.isNaN(v)) &&
-                    vramTotal.some((v) => v != null && !Number.isNaN(v));
-    const hasSystemMem = systemMem.some((v) => v != null && !Number.isNaN(v));
-
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Memory`;
 
-    if (hasVram) {
-      // Convert VRAM to percentage
-      const memValues = vramUsed.map((used, i) => {
-        const total = vramTotal[i];
-        if (used == null || total == null || total === 0) return null;
-        return (used / total) * 100;
-      });
-      const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
-      if (modalMeta) modalMeta.textContent = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
-      renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
-        width: 480,
-        height: 120,
-      });
-    } else if (hasSystemMem) {
-      const machine = statusCache.get(machineId);
-      const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
+    if (samples.length > 0) {
+      const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+      if (memValues.length > 0) {
+        const lastPct = memValues.slice(-1)[0];
+        if (modalMeta) modalMeta.textContent = lastPct != null ? `MEM ${lastPct.toFixed(1)}%` : "MEM n/a";
+        const startTime = runStartTs ?? samples[0]?.t ?? performance.now();
+        renderSparkline(modalChart, [{ values: memValues, times: memTimes, className: "mem-line", maxValue: 100 }], {
+          width: 480,
+          height: 120,
+          startTime,
+          endTime: runEndTs ?? performance.now(),
+        });
+      } else if (modalMeta) {
+        modalMeta.textContent = "Metrics unavailable";
+      }
+    } else {
+      const hasVram = vramUsed.some((v) => v != null && !Number.isNaN(v)) &&
+                      vramTotal.some((v) => v != null && !Number.isNaN(v));
+      const hasSystemMem = systemMem.some((v) => v != null && !Number.isNaN(v)) ||
+        ramUsedBytes.some((v) => v != null && !Number.isNaN(v));
 
-      if (totalRamBytes) {
-        const totalRamMib = totalRamBytes / (1024 * 1024);
-        const memValues = systemMem.map((used) => {
-          if (used == null || totalRamMib === 0) return null;
-          return (used / totalRamMib) * 100;
+      if (hasVram) {
+        // Convert VRAM to percentage
+        const memValues = vramUsed.map((used, i) => {
+          const total = vramTotal[i];
+          if (used == null || total == null || total === 0) return null;
+          return (used / total) * 100;
         });
         const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
-        if (modalMeta) modalMeta.textContent = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
+        if (modalMeta) modalMeta.textContent = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
         renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
           width: 480,
           height: 120,
         });
-      } else {
-        if (modalMeta) modalMeta.textContent = "Memory telemetry unavailable";
+      } else if (hasSystemMem) {
+        const machine = statusCache.get(machineId);
+        const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
+
+        if (totalRamBytes) {
+          let memValues = [];
+          if (ramUsedBytes.some((v) => v != null && !Number.isNaN(v))) {
+            memValues = ramUsedBytes.map((used) => {
+              if (used == null || totalRamBytes === 0) return null;
+              return (used / totalRamBytes) * 100;
+            });
+          } else {
+            const totalRamMib = totalRamBytes / (1024 * 1024);
+            memValues = systemMem.map((used) => {
+              if (used == null || totalRamMib === 0) return null;
+              return (used / totalRamMib) * 100;
+            });
+          }
+          const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+          if (modalMeta) modalMeta.textContent = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
+          renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
+            width: 480,
+            height: 120,
+          });
+        } else if (modalMeta) {
+          modalMeta.textContent = "Memory telemetry unavailable";
+        }
+      } else if (modalMeta) {
+        modalMeta.textContent = "Metrics unavailable";
       }
-    } else {
-      if (modalMeta) modalMeta.textContent = "Metrics unavailable";
     }
   }
   openOverlay("sparkline");
@@ -1272,9 +1404,13 @@ socket.on("run_lifecycle", (event) => {
   if (event.type === "run_start") {
     setRunActive(true, event.run_id);
     console.log("Run started:", event.run_id);
+    if (!runTrackingActive) {
+      beginRunTracking(Array.from(statusCache.keys()));
+    }
   } else if (event.type === "run_end") {
     setRunActive(false, event.run_id);
     console.log("Run ended:", event.run_id);
+    endRunTracking();
   }
 });
 
@@ -1349,6 +1485,7 @@ socket.on("agent_event", (evt) => {
       metricsHtml,
       isMock,
     });
+    markRunMachineDone(evt.machine_id);
 
     fetchRecentRuns();
   }
@@ -1412,6 +1549,8 @@ const startRun = async () => {
     showToast("No ready machines available.", "info");
     return;
   }
+
+  beginRunTracking(ready.map((m) => m.machine_id));
 
   const payload = {
     model: document.getElementById("model").value,
