@@ -1182,6 +1182,10 @@ def api_status():
                     "missing_required": missing_required,
                     "last_checked": last_checked,
                     "error": None,
+                    "capabilities": {
+                        "comfyui_gpu_ok": cap.get("comfyui_gpu_ok"),
+                        "comfyui_cpu_ok": cap.get("comfyui_cpu_ok"),
+                    },
                     "model_fit": {
                         **fit,
                         "memory_label": memory_label,
@@ -1200,6 +1204,7 @@ def api_status():
                     "missing_required": required,
                     "last_checked": last_checked,
                     "error": str(e),
+                    "capabilities": {"comfyui_gpu_ok": None, "comfyui_cpu_ok": None},
                     "model_fit": {"status": "unknown", "needed_gb": None, "available_gb": None, "memory_label": "RAM"},
                 }
             )

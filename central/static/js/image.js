@@ -1103,7 +1103,13 @@ socket.on("agent_event", (event) => {
     setPaneStatus(machineId, "ready", "Complete");
   }
   if (event.type === "image_error") {
-    setPaneMetrics(machineId, `<span class="muted">${payload.message || "Error"}</span>`);
+    const remediation = Array.isArray(payload.remediation) && payload.remediation.length
+      ? `<ul class="remediation">${payload.remediation.map((item) => `<li>${item}</li>`).join("")}</ul>`
+      : "";
+    setPaneMetrics(
+      machineId,
+      `<div class="muted">${payload.message || "Error"}</div>${remediation}`,
+    );
     setPaneStatus(machineId, "offline", "Error");
     document.getElementById(`pane-${machineId}`)?.classList.add("error");
   }
