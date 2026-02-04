@@ -97,12 +97,32 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .checkpoint-validation-item .status-dot.error { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.6); }
 .checkpoint-validation-meta { font-size: 12px; color: #9ca3af; }
 .pane-status .status-text { font-size: 12px; color: #374151; font-weight: 600; }
-.model-fit { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 6px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
-.model-fit::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: currentColor; display: inline-block; }
-.model-fit.good { color: #166534; }
-.model-fit.average { color: #92400e; }
-.model-fit.bad { color: #991b1b; }
+.model-fit { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; flex-wrap: wrap; }
+.model-fit .fit-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.2); color: inherit; }
+.model-fit .fit-badge::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: currentColor; display: inline-block; }
+.model-fit .fit-score { font-size: 12px; font-weight: 700; color: #111827; }
+.model-fit.good { color: #059669; }
+.model-fit.marginal { color: #d97706; }
+.model-fit.risk { color: #ea580c; }
+.model-fit.fail { color: #dc2626; }
 .model-fit.unknown { color: #6b7280; }
+
+.runtime-sparklines { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+.sparkline-block { display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
+.sparkline-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
+.sparkline { width: 120px; height: 24px; border-radius: 6px; background: #f8fafc; border: 1px solid #e2e8f0; cursor: pointer; }
+.sparkline path { fill: none; stroke-width: 2; }
+.sparkline .cpu-line { stroke: #2563eb; }
+.sparkline .gpu-line { stroke: #16a34a; stroke-dasharray: 4 3; }
+.sparkline .mem-line { stroke: #7c3aed; }
+.sparkline-placeholder { font-size: 11px; color: #9ca3af; }
+.sparkline-block.is-empty .sparkline { opacity: 0.4; }
+
+.modal { background: #ffffff; border-radius: var(--radius); width: min(640px, 90vw); box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35); padding: 16px; z-index: 20; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; }
+.modal-body { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.modal-chart-label { font-weight: 600; color: #374151; }
+.modal-chart-meta { font-size: 12px; color: #6b7280; }
 .btn-sync { padding: 6px 10px; font-size: 12px; border-radius: 8px; background: #1d4ed8; }
 .btn-sync:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn-sync.hidden { display: none; }

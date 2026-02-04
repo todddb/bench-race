@@ -52,6 +52,8 @@ from agent.comfy_ws import (
 )
 from agent.errors import classify_comfy_error
 from agent.startup_checks import run_comfyui_cuda_probe, force_cpu_enabled
+from agent.hardware_discovery import discover_hardware
+from agent.runtime_sampler import RuntimeSampler, RuntimeSamplerConfig
 
 # ---------------------------
 # Logging
@@ -86,6 +88,9 @@ CFG = load_config()
 machine_id = CFG.get("machine_id", "unknown")
 slog = init_logging(agent_id=machine_id)
 COMFYUI_PREFLIGHT: Dict[str, Optional[bool]] = {"comfyui_gpu_ok": None, "comfyui_cpu_ok": None}
+HARDWARE_INFO: Dict[str, Any] = {}
+RUNTIME_SAMPLER: Optional[RuntimeSampler] = None
+RUNTIME_SAMPLER_TASK: Optional[asyncio.Task] = None
 
 # ---------------------------
 # FastAPI app + websockets
@@ -109,6 +114,13 @@ async def _startup_checks():
         COMFYUI_PREFLIGHT["comfyui_cpu_ok"] = result.comfyui_cpu_ok
         if result.error:
             slog.warning("startup_cuda_incompatible", error=result.error)
+    _initialize_hardware_info()
+    _initialize_runtime_sampler()
+
+
+@app.on_event("shutdown")
+async def _shutdown_cleanup():
+    _stop_runtime_sampler()
 
 # Manage connected websocket clients
 # Each entry: client_id -> WebSocket
@@ -174,6 +186,19 @@ async def _broadcast_event(event: Event):
         WS_CLIENTS.pop(cid, None)
 
 
+async def _broadcast_payload(payload: Dict[str, Any]):
+    to_remove: List[str] = []
+    txt = json.dumps(payload)
+    for cid, ws in list(WS_CLIENTS.items()):
+        try:
+            await ws.send_text(txt)
+        except Exception as exc:
+            log.warning("WebSocket send failed for %s: %s", cid, exc)
+            to_remove.append(cid)
+    for cid in to_remove:
+        WS_CLIENTS.pop(cid, None)
+
+
 def _comfy_config() -> Dict[str, Any]:
     return CFG.get("comfyui", {}) if isinstance(CFG, dict) else {}
 
@@ -184,6 +209,85 @@ def _comfy_install_dir() -> Path:
     if path:
         return Path(path)
     return ROOT_DIR / "agent" / "third_party" / "comfyui"
+
+
+def _load_machine_override() -> Dict[str, Any]:
+    override_path = os.getenv("MACHINES_YAML_PATH", "")
+    if not override_path:
+        override_path = str(ROOT_DIR / "central" / "config" / "machines.yaml")
+    path = Path(override_path)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        machines = config.get("machines", [])
+        return next((m for m in machines if m.get("machine_id") == CFG.get("machine_id")), {}) or {}
+    except Exception as exc:
+        slog.warning("hardware_override_load_failed", error=str(exc))
+        return {}
+
+
+def _merge_hardware_overrides(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key in ("cpu_cores", "cpu_physical_cores", "total_system_ram_bytes"):
+        if override.get(key) is not None:
+            merged[key] = override.get(key)
+    gpu_override = override.get("gpu") or {}
+    if gpu_override:
+        merged["gpu_name"] = gpu_override.get("name", merged.get("gpu_name"))
+        merged["gpu_vram_bytes"] = gpu_override.get("vram_bytes", merged.get("gpu_vram_bytes"))
+        merged["gpu_type"] = gpu_override.get("type", merged.get("gpu_type"))
+        merged["cuda_compute"] = gpu_override.get("cuda_compute", merged.get("cuda_compute"))
+    return merged
+
+
+def _initialize_hardware_info():
+    global HARDWARE_INFO
+    detected = discover_hardware()
+    override = _load_machine_override()
+    HARDWARE_INFO = _merge_hardware_overrides(detected, override)
+
+
+def _initialize_runtime_sampler():
+    global RUNTIME_SAMPLER, RUNTIME_SAMPLER_TASK
+    sampler_cfg = CFG.get("runtime_sampler", {}) if isinstance(CFG, dict) else {}
+    if sampler_cfg is None:
+        return
+    enabled = sampler_cfg.get("enabled", True)
+    if not enabled:
+        return
+    config = RuntimeSamplerConfig(
+        interval_s=float(sampler_cfg.get("interval_s", 1.0)),
+        buffer_len=int(sampler_cfg.get("buffer_len", 120)),
+    )
+    RUNTIME_SAMPLER = RuntimeSampler(config)
+    RUNTIME_SAMPLER.start()
+    RUNTIME_SAMPLER_TASK = asyncio.create_task(_push_runtime_metrics())
+
+
+def _stop_runtime_sampler():
+    global RUNTIME_SAMPLER, RUNTIME_SAMPLER_TASK
+    if RUNTIME_SAMPLER:
+        RUNTIME_SAMPLER.stop()
+        RUNTIME_SAMPLER = None
+    if RUNTIME_SAMPLER_TASK:
+        RUNTIME_SAMPLER_TASK.cancel()
+        RUNTIME_SAMPLER_TASK = None
+
+
+async def _push_runtime_metrics():
+    while True:
+        if not RUNTIME_SAMPLER:
+            await asyncio.sleep(1)
+            continue
+        payload = {
+            "job_id": "runtime_metrics",
+            "type": "runtime_metrics_update",
+            "payload": RUNTIME_SAMPLER.snapshot(),
+        }
+        await _broadcast_payload(payload)
+        await asyncio.sleep(RUNTIME_SAMPLER.interval_s)
 
 
 def _comfy_base_url() -> str:
@@ -780,16 +884,40 @@ async def capabilities():
         llm_models=[],
         whisper_models=[],
         sdxl_profiles=[],
-        accelerator_type=CFG.get("accelerator_type"),
-        accelerator_memory_gb=CFG.get("accelerator_memory_gb"),
-        system_memory_gb=CFG.get("system_memory_gb"),
-        gpu_name=CFG.get("gpu_name"),
+        accelerator_type=CFG.get("accelerator_type")
+        or ("cuda" if HARDWARE_INFO.get("gpu_type") == "discrete" else "metal" if HARDWARE_INFO.get("gpu_type") else None),
+        accelerator_memory_gb=CFG.get("accelerator_memory_gb")
+        or (
+            (HARDWARE_INFO.get("gpu_vram_bytes") or 0) / (1024**3)
+            if HARDWARE_INFO.get("gpu_vram_bytes")
+            else None
+        ),
+        system_memory_gb=CFG.get("system_memory_gb")
+        or (
+            (HARDWARE_INFO.get("total_system_ram_bytes") or 0) / (1024**3)
+            if HARDWARE_INFO.get("total_system_ram_bytes")
+            else None
+        ),
+        gpu_name=CFG.get("gpu_name") or HARDWARE_INFO.get("gpu_name"),
+        gpu_vram_bytes=HARDWARE_INFO.get("gpu_vram_bytes"),
+        gpu_type=HARDWARE_INFO.get("gpu_type"),
+        cuda_compute=HARDWARE_INFO.get("cuda_compute"),
+        cpu_cores=HARDWARE_INFO.get("cpu_cores"),
+        cpu_physical_cores=HARDWARE_INFO.get("cpu_physical_cores"),
+        total_system_ram_bytes=HARDWARE_INFO.get("total_system_ram_bytes"),
         ollama_reachable=ollama_reachable,
         ollama_models=ollama_models,
         comfyui_gpu_ok=COMFYUI_PREFLIGHT.get("comfyui_gpu_ok"),
         comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
     return JSONResponse(cap.model_dump())
+
+
+@app.get("/api/agent/runtime_metrics")
+async def agent_runtime_metrics():
+    if not RUNTIME_SAMPLER:
+        return JSONResponse({"available": False})
+    return JSONResponse(RUNTIME_SAMPLER.snapshot())
 
 
 @app.get("/api/comfy/health")

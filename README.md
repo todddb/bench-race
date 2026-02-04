@@ -4,6 +4,8 @@
 
 Run the same prompt across local or networked machines (agents) and collect streaming output + performance metrics to compare models, hardware, and settings.
 
+For runtime sampling and model-fit scoring details, see `docs/metrics_and_fit.md`.
+
 ---
 
 ## Table of Contents
@@ -151,7 +153,8 @@ Central model policy (`central/config/model_policy.yaml`) is the single source o
 
 ### Central Configuration
 
-Central reads `central/config/machines.yaml` to know which agents to connect to:
+Central reads `central/config/machines.yaml` to know which agents to connect to (see
+`docs/machines_yaml.md` for optional hardware overrides):
 
 ```yaml
 # central/config/machines.yaml

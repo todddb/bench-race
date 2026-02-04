@@ -22,6 +22,12 @@ class Capabilities(BaseModel):
     accelerator_memory_gb: Optional[float] = None
     system_memory_gb: Optional[float] = None
     gpu_name: Optional[str] = None
+    gpu_vram_bytes: Optional[int] = None
+    gpu_type: Optional[Literal["discrete", "unified"]] = None
+    cuda_compute: Optional[List[int]] = None
+    cpu_cores: Optional[int] = None
+    cpu_physical_cores: Optional[int] = None
+    total_system_ram_bytes: Optional[int] = None
     # Extended capability fields for preflight checks
     ollama_reachable: Optional[bool] = None
     ollama_models: List[str] = Field(default_factory=list)  # Actually available on Ollama
