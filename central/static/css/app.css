@@ -140,6 +140,18 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
   font-weight: 600;
 }
 
+.sparkline-label-detail {
+  font-weight: 600;
+}
+
+.sparkline-label .cpu-label {
+  color: #2563eb;
+}
+
+.sparkline-label .gpu-label {
+  color: #16a34a;
+}
+
 .sparkline {
   width: 160px;
   height: 34px;

@@ -151,7 +151,9 @@
                 </div>
                 <div class="mini-sparklines" id="runtime-sparklines-{{ m.machine_id }}">
                   <div class="sparkline-block">
-                    <div class="sparkline-label">UTIL (%)</div>
+                    <div class="sparkline-label">
+                      UTIL (%) <span class="sparkline-label-detail"><span class="cpu-label">CPU</span> / <span class="gpu-label">GPU</span></span>
+                    </div>
                     <svg class="sparkline" id="sparkline-util-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
                     <div class="sparkline-placeholder" id="sparkline-util-placeholder-{{ m.machine_id }}">
                       Metrics unavailable
