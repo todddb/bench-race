@@ -44,23 +44,28 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $*"
+    echo -e "${BLUE}[INFO]${NC} $*" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*"
+    echo -e "${GREEN}[SUCCESS]${NC} $*" >&2
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*"
+    echo -e "${YELLOW}[WARNING]${NC} $*" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
+    echo -e "${RED}[ERROR]${NC} $*" >&2
 }
 
 log_step() {
-    echo -e "${CYAN}[STEP]${NC} $*"
+    echo -e "${CYAN}[STEP]${NC} $*" >&2
+}
+
+# Prompt helper - outputs to stderr
+prompt() {
+    printf "%s" "$*" >&2
 }
 
 # ============================================================================
@@ -89,6 +94,61 @@ CENTRAL_URL=""
 sanitize_id() {
     local input="$1"
     echo "$input" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]-' '-' | sed 's/^-//;s/-$//'
+}
+
+# Sanitize values by removing ASCII control characters and ANSI escape sequences
+sanitize() {
+    # Remove ASCII control chars (0x00-0x1F), DEL (0x7F), and CR
+    printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177'
+}
+
+# Read a value from YAML file
+# Usage: read_yaml_value "key_name" "file_path"
+read_yaml_value() {
+    local key="$1"
+    local file="$2"
+
+    if [[ ! -f "$file" ]]; then
+        return 1
+    fi
+
+    # Parse key: value lines, handling quoted and unquoted values
+    awk -v k="$key" '
+        $0 ~ "^[[:space:]]*"k":[[:space:]]*" {
+            sub("^[[:space:]]*"k":[[:space:]]*", "", $0);
+            gsub(/[[:space:]]+$/, "", $0);
+            # Strip surrounding double quotes
+            if ($0 ~ /^".*"$/) {
+                sub(/^"/, "", $0);
+                sub(/"$/, "", $0);
+            }
+            # Strip surrounding single quotes
+            if ($0 ~ /^\047.*\047$/) {
+                sub(/^\047/, "", $0);
+                sub(/\047$/, "", $0);
+            }
+            print $0;
+            exit
+        }
+    ' "$file"
+}
+
+# Validate agent_id format
+validate_agent_id() {
+    local id="$1"
+
+    if [[ -z "$id" ]]; then
+        log_error "agent_id cannot be empty"
+        return 1
+    fi
+
+    # Check if it contains only allowed characters
+    if [[ ! "$id" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_warning "agent_id contains unusual characters: $id"
+        log_warning "Recommended format: letters, numbers, underscores, hyphens only"
+    fi
+
+    return 0
 }
 
 run_with_timeout() {
@@ -608,48 +668,94 @@ install_or_update_agent_venv() {
 # ============================================================================
 
 prompt_for_values() {
+    # Read existing config values if file exists
+    local existing_agent_id=""
+    local existing_label=""
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        existing_agent_id=$(read_yaml_value "machine_id" "$CONFIG_FILE" || echo "")
+        existing_label=$(read_yaml_value "label" "$CONFIG_FILE" || echo "")
+        if [[ -n "$existing_agent_id" ]]; then
+            log_info "Found existing config with agent_id: ${existing_agent_id}"
+        fi
+    fi
+
+    # Skip prompts in YES_MODE
     if [[ "$YES_MODE" == true ]]; then
+        # Prefer existing values, fall back to command-line args or detected defaults
+        if [[ -z "$AGENT_ID" ]]; then
+            if [[ -n "$existing_agent_id" ]]; then
+                AGENT_ID="$existing_agent_id"
+            else
+                AGENT_ID=$(sanitize_id "$(detect_hostname)")
+            fi
+        fi
+
+        if [[ -z "$LABEL" ]]; then
+            if [[ -n "$existing_label" ]]; then
+                LABEL="$existing_label"
+            else
+                local cpu_name
+                cpu_name=$(detect_cpu_name)
+                local ram_gb
+                ram_gb=$(detect_ram_gb)
+                LABEL="$(detect_hostname) (${cpu_name}, ${ram_gb}GB)"
+            fi
+        fi
+
         return 0
     fi
 
+    # Interactive mode: prompt with defaults
     if [[ -z "$AGENT_ID" ]]; then
-        local default_id
-        default_id=$(sanitize_id "$(detect_hostname)")
-        echo ""
+        # Determine default: existing > detected
+        local detected_id
+        detected_id=$(sanitize_id "$(detect_hostname)")
+        local default_agent_id="${existing_agent_id:-$detected_id}"
+
+        echo "" >&2
         log_info "Enter a unique machine ID for this agent"
         log_info "This ID must match the machine_id in central/config/machines.yaml"
-        read -rp "Machine ID [${default_id}]: " AGENT_ID
-        AGENT_ID="${AGENT_ID:-${default_id}}"
+        prompt "Machine ID [${default_agent_id}]: "
+        read -r AGENT_ID_INPUT
+        AGENT_ID="${AGENT_ID_INPUT:-$default_agent_id}"
         AGENT_ID=$(sanitize_id "$AGENT_ID")
     fi
 
     if [[ -z "$LABEL" ]]; then
-        local cpu_name
-        cpu_name=$(detect_cpu_name)
-        local ram_gb
-        ram_gb=$(detect_ram_gb)
-        local default_label="$(detect_hostname) (${cpu_name}, ${ram_gb}GB)"
+        # Determine default: existing > detected
+        local detected_label=""
+        if [[ -z "$existing_label" ]]; then
+            local cpu_name
+            cpu_name=$(detect_cpu_name)
+            local ram_gb
+            ram_gb=$(detect_ram_gb)
+            detected_label="$(detect_hostname) (${cpu_name}, ${ram_gb}GB)"
+        fi
+        local default_label="${existing_label:-$detected_label}"
 
-        echo ""
+        echo "" >&2
         log_info "Enter a human-friendly label for this machine"
         log_info "This label will be displayed in the UI"
-        read -rp "Label [${default_label}]: " LABEL
-        LABEL="${LABEL:-${default_label}}"
+        prompt "Label [${default_label}]: "
+        read -r LABEL_INPUT
+        LABEL="${LABEL_INPUT:-$default_label}"
     fi
 
     if [[ -z "$CENTRAL_URL" ]]; then
         local default_url="http://127.0.0.1:8080"
-        echo ""
+        echo "" >&2
         log_info "Enter the URL of the central server"
-        read -rp "Central URL [${default_url}]: " CENTRAL_URL
-        CENTRAL_URL="${CENTRAL_URL:-${default_url}}"
+        prompt "Central URL [${default_url}]: "
+        read -r CENTRAL_URL_INPUT
+        CENTRAL_URL="${CENTRAL_URL_INPUT:-${default_url}}"
     fi
 }
 
 write_agent_config() {
     log_step "Generating agent configuration..."
 
-    # Set defaults if in YES_MODE
+    # Set defaults if values not set
     if [[ -z "$AGENT_ID" ]]; then
         AGENT_ID=$(sanitize_id "$(detect_hostname)")
     fi
@@ -662,68 +768,111 @@ write_agent_config() {
         LABEL="$(detect_hostname) (${cpu_name}, ${ram_gb}GB)"
     fi
 
-    if [[ -z "$CENTRAL_URL" ]]; then
-        CENTRAL_URL="http://127.0.0.1:8080"
+    # Sanitize values to remove any ANSI codes or control characters
+    AGENT_ID=$(sanitize "$AGENT_ID")
+    LABEL=$(sanitize "$LABEL")
+
+    # Validate agent_id
+    if ! validate_agent_id "$AGENT_ID"; then
+        log_error "Invalid agent_id: ${AGENT_ID}"
+        exit 1
     fi
 
     run_command mkdir -p "$CONFIG_DIR"
 
-    # If config exists and not in update mode, preserve it
-    if [[ -f "$CONFIG_FILE" ]] && [[ "$UPDATE_MODE" != true ]]; then
-        log_info "Config already exists at $CONFIG_FILE"
-        log_info "Use --update to regenerate"
-        return 0
-    fi
-
     if [[ "$DRY_RUN" == true ]]; then
         log_info "[DRY-RUN] Would write config to $CONFIG_FILE"
+        log_info "[DRY-RUN]   agent_id: ${AGENT_ID}"
+        log_info "[DRY-RUN]   label: ${LABEL}"
         return 0
     fi
 
-    log_info "Writing agent.yaml..."
+    log_info "Writing minimal agent.yaml..."
+    log_info "  agent_id: ${AGENT_ID}"
+    log_info "  label: ${LABEL}"
 
-    cat > "$CONFIG_FILE" <<EOF
-# agent/config/agent.yaml
-#
-# Auto-generated by install_agent.sh
-# Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+    # Write to temp file first (atomic write)
+    local tmp_file
+    tmp_file=$(mktemp)
 
-# ============================================================================
-# REQUIRED FIELDS
-# ============================================================================
+    # Write only the minimal required fields
+    # Note: The key is "machine_id" (not "agent_id") to match what the agent app expects
+    {
+        printf "machine_id: %s\n" "$AGENT_ID"
+        if [[ -n "$LABEL" ]]; then
+            printf "label: %s\n" "$LABEL"
+        fi
+    } > "$tmp_file"
 
-machine_id: "${AGENT_ID}"
-label: "${LABEL}"
-
-# ============================================================================
-# NETWORK CONFIGURATION
-# ============================================================================
-
-bind_host: "0.0.0.0"
-bind_port: 9001
-
-ollama_base_url: "http://127.0.0.1:11434"
-central_base_url: "${CENTRAL_URL}"
-
-# ============================================================================
-# OPTIONAL CONFIGURATION
-# ============================================================================
-
-comfyui:
-  enabled: true
-  host: "127.0.0.1"
-  port: 8188
-  checkpoints_dir: "${COMFY_DIR}/models/checkpoints"
-  install_dir: "${COMFY_DIR}"
-  allow_cpu_fallback: false
-
-runtime_sampler:
-  enabled: true
-  interval_s: 1
-  buffer_len: 120
-EOF
+    # Move temp file to final location
+    mv "$tmp_file" "$CONFIG_FILE"
 
     log_success "Config written to $CONFIG_FILE"
+
+    # Validate the written config
+    if ! validate_yaml_config "$CONFIG_FILE"; then
+        log_error "Generated config failed validation"
+        exit 1
+    fi
+}
+
+# Validate that the YAML config is clean (no control chars)
+validate_yaml_config() {
+    local config_file="$1"
+
+    if [[ ! -f "$config_file" ]]; then
+        log_error "Config file not found: $config_file"
+        return 1
+    fi
+
+    log_info "Validating generated YAML..."
+
+    # Check for control characters in the file
+    if command -v python3 &>/dev/null; then
+        python3 - "$config_file" <<'PYCODE'
+import sys
+import pathlib
+
+config_path = pathlib.Path(sys.argv[1])
+content = config_path.read_bytes()
+
+# Check for control characters (excluding tab, newline, carriage return)
+bad_chars = [c for c in content if c < 0x20 and c not in (0x09, 0x0a, 0x0d)]
+
+if bad_chars:
+    print(f"ERROR: Control characters found in config: {bad_chars[:10]}", file=sys.stderr)
+    sys.exit(1)
+
+# Try to parse as YAML (if PyYAML available)
+try:
+    import yaml
+    config_text = config_path.read_text(encoding="utf-8")
+    data = yaml.safe_load(config_text)
+
+    # Check that machine_id exists and is clean
+    if 'machine_id' not in data:
+        print("ERROR: machine_id not found in config", file=sys.stderr)
+        sys.exit(1)
+
+    machine_id = str(data['machine_id'])
+    if any(ord(c) < 0x20 for c in machine_id):
+        print(f"ERROR: machine_id contains control characters: {repr(machine_id)}", file=sys.stderr)
+        sys.exit(1)
+
+    print("✓ YAML validation passed", file=sys.stderr)
+
+except ImportError:
+    # PyYAML not available, basic checks only
+    print("✓ Basic validation passed (PyYAML not available for full check)", file=sys.stderr)
+except Exception as e:
+    print(f"ERROR: YAML parsing failed: {e}", file=sys.stderr)
+    sys.exit(1)
+PYCODE
+        return $?
+    else
+        log_warning "Python3 not available, skipping YAML validation"
+        return 0
+    fi
 }
 
 # ============================================================================
