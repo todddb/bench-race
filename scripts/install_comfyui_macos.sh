@@ -34,10 +34,33 @@ fi
 
 log "Installing dependencies"
 "$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install -r "$COMFY_DIR/requirements.txt"
-
 log "Installing PyTorch (macOS default build)"
-"$VENV_DIR/bin/pip" install torch torchvision
+if "$VENV_DIR/bin/python" - <<'PYCODE' >/dev/null 2>&1
+import importlib
+importlib.import_module("torch")
+importlib.import_module("torchvision")
+importlib.import_module("torchaudio")
+PYCODE
+then
+  log "Torch stack already installed; skipping reinstall."
+else
+  "$VENV_DIR/bin/pip" install --upgrade --force-reinstall --no-cache-dir torch torchvision torchaudio
+fi
+
+log "Installing remaining dependencies (excluding torch/tv/ta)"
+REQS="$COMFY_DIR/requirements.txt"
+TEMP_REQS="$(mktemp)"
+grep -v -iE '^(torch|torchvision|torchaudio)([ =<>~]|$)' "$REQS" > "$TEMP_REQS"
+"$VENV_DIR/bin/pip" install -r "$TEMP_REQS"
+rm -f "$TEMP_REQS"
+
+log "Verifying torch install"
+"$VENV_DIR/bin/python" - <<'PYCODE'
+import torch
+print("torch.__version__=", torch.__version__)
+print("torch.backends.mps.is_built=", torch.backends.mps.is_built())
+print("torch.backends.mps.is_available=", torch.backends.mps.is_available())
+PYCODE
 
 # Create required directories for checkpoint sync
 CACHE_DIR="$REPO_ROOT/agent/model_cache/comfyui"
