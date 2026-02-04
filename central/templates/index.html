@@ -118,7 +118,26 @@
               <div class="pane-header">
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
-                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">Model Fit: --</div>
+                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">
+                    <span class="fit-badge">Fit: --</span>
+                    <span class="fit-score">--</span>
+                  </div>
+                  <div class="runtime-sparklines" id="runtime-sparklines-{{ m.machine_id }}">
+                    <div class="sparkline-block">
+                      <div class="sparkline-label">Utilization</div>
+                      <svg class="sparkline" id="sparkline-util-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                      <div class="sparkline-placeholder" id="sparkline-util-placeholder-{{ m.machine_id }}">
+                        Metrics unavailable
+                      </div>
+                    </div>
+                    <div class="sparkline-block">
+                      <div class="sparkline-label">Memory</div>
+                      <svg class="sparkline" id="sparkline-mem-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                      <div class="sparkline-placeholder" id="sparkline-mem-placeholder-{{ m.machine_id }}">
+                        Metrics unavailable
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div class="pane-status">
                   <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
@@ -147,6 +166,21 @@
 
     <!-- Toast container for notifications -->
     <div class="toast-container" id="toast-container"></div>
+
+    <div id="sparkline-overlay" class="overlay hidden" aria-hidden="true">
+      <div class="overlay-backdrop" data-overlay-close="sparkline"></div>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sparkline-modal-title">
+        <header class="modal-header">
+          <h3 id="sparkline-modal-title">Runtime Metrics</h3>
+          <button class="icon-button close-drawer" type="button" data-overlay-close="sparkline" aria-label="Close">✕</button>
+        </header>
+        <div class="modal-body">
+          <div class="modal-chart-label" id="sparkline-modal-label"></div>
+          <svg id="sparkline-modal-chart" viewBox="0 0 480 120"></svg>
+          <div class="modal-chart-meta" id="sparkline-modal-meta"></div>
+        </div>
+      </div>
+    </div>
 
     <div id="history-overlay" class="overlay hidden" aria-hidden="true">
       <div class="overlay-backdrop" data-overlay-close="history"></div>

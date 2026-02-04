@@ -37,6 +37,12 @@ comfyui:
   cpu_fallback_on:
     - "cuda_unsupported_arch"
 
+# Runtime sampler configuration (CPU/GPU/VRAM usage)
+runtime_sampler:
+  enabled: true
+  interval_s: 1
+  buffer_len: 120
+
 # Optional: override if Ollama is remote or non-standard
 # ollama_timeout_s: 2.0
 

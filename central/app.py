@@ -47,6 +47,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from central.services import controller as service_controller
+from central.fit_util import compute_model_fit_score, get_model_size_bytes
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -82,6 +83,7 @@ _sample_job_buffers: Dict[str, List[str]] = {}
 MODEL_POLICY_RATE_LIMIT_S = 5
 _model_policy_last_request: Dict[str, float] = {}
 MODEL_POLICY_LOCK = threading.Lock()
+RUNTIME_METRICS: Dict[str, Dict[str, Any]] = {}
 
 
 def _current_git_sha() -> str:
@@ -616,13 +618,13 @@ def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Opt
         r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
         r.raise_for_status()
         cap = r.json()
-        available_memory = cap.get("accelerator_memory_gb") or cap.get("system_memory_gb")
-        fit = classify_model_fit(available_memory, estimate_model_size_gb(model, num_ctx))
         memory_label = "RAM"
-        if cap.get("accelerator_type") == "cuda":
+        accel_type = cap.get("accelerator_type")
+        if accel_type == "cuda":
             memory_label = "VRAM"
-        elif cap.get("accelerator_type") == "metal":
+        elif accel_type == "metal":
             memory_label = "Unified"
+        fit = _compute_fit(machine, cap, model, num_ctx)
         return {**fit, "memory_label": memory_label}
     except Exception:
         return None
@@ -997,6 +999,41 @@ def classify_model_fit(available_gb: Optional[float], needed_gb: Optional[float]
         status = "bad"
     return {"status": status, "needed_gb": needed_gb, "available_gb": available_gb}
 
+
+def _resolve_model_bytes(model_name: str, num_ctx: int) -> Optional[int]:
+    fallback_gb = estimate_model_size_gb(model_name, num_ctx)
+    return get_model_size_bytes(model_name, fallback_gb=fallback_gb)
+
+
+def _resolve_machine_vram_bytes(machine: Dict[str, Any], cap: Dict[str, Any]) -> Optional[int]:
+    gpu = machine.get("gpu") or {}
+    vram_bytes = gpu.get("vram_bytes") or cap.get("gpu_vram_bytes")
+    if vram_bytes:
+        return int(vram_bytes)
+    accel_memory_gb = cap.get("accelerator_memory_gb")
+    if accel_memory_gb:
+        return int(float(accel_memory_gb) * 1024**3)
+    system_ram_bytes = cap.get("total_system_ram_bytes")
+    if system_ram_bytes:
+        return int(system_ram_bytes)
+    system_memory_gb = cap.get("system_memory_gb")
+    if system_memory_gb:
+        return int(float(system_memory_gb) * 1024**3)
+    return None
+
+
+def _compute_fit(machine: Dict[str, Any], cap: Dict[str, Any], model: str, num_ctx: int) -> Dict[str, Any]:
+    model_bytes = _resolve_model_bytes(model, num_ctx)
+    vram_bytes = _resolve_machine_vram_bytes(machine, cap)
+    if not model_bytes or not vram_bytes:
+        return {"label": "unknown", "fit_score": None, "fit_ratio": None}
+    fit = compute_model_fit_score(model_bytes, vram_bytes)
+    return {
+        **fit,
+        "model_bytes": model_bytes,
+        "vram_bytes": vram_bytes,
+    }
+
 # -----------------------------------------------------------------------------
 # Agent WS connectors
 # -----------------------------------------------------------------------------
@@ -1035,6 +1072,9 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
 
                     # attach machine_id and forward to all browsers
                     evt["machine_id"] = machine_id
+                    if evt.get("type") == "runtime_metrics_update":
+                        payload = evt.get("payload") or {}
+                        RUNTIME_METRICS[machine_id] = payload
                     _update_run_from_event(evt)
                     _record_sample_event(evt)
                     socketio.emit("agent_event", evt)
@@ -1164,13 +1204,12 @@ def api_status():
                     profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
                 ],
             }
-            available_memory = cap.get("accelerator_memory_gb") or cap.get("system_memory_gb")
-            fit = classify_model_fit(available_memory, estimate_model_size_gb(selected_model or "", num_ctx))
             memory_label = "RAM"
             if cap.get("accelerator_type") == "cuda":
                 memory_label = "VRAM"
             elif cap.get("accelerator_type") == "metal":
                 memory_label = "Unified"
+            fit = _compute_fit(m, cap, selected_model or "", num_ctx)
             statuses.append(
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
@@ -1190,6 +1229,7 @@ def api_status():
                         **fit,
                         "memory_label": memory_label,
                     },
+                    "runtime_metrics": RUNTIME_METRICS.get(cap.get("machine_id") or m.get("machine_id")),
                 }
             )
         except Exception as e:
@@ -1205,10 +1245,21 @@ def api_status():
                     "last_checked": last_checked,
                     "error": str(e),
                     "capabilities": {"comfyui_gpu_ok": None, "comfyui_cpu_ok": None},
-                    "model_fit": {"status": "unknown", "needed_gb": None, "available_gb": None, "memory_label": "RAM"},
+                    "model_fit": {
+                        "label": "unknown",
+                        "fit_score": None,
+                        "fit_ratio": None,
+                        "memory_label": "RAM",
+                    },
+                    "runtime_metrics": RUNTIME_METRICS.get(m.get("machine_id")),
                 }
             )
     return jsonify({"model": selected_model, "required": required, "machines": statuses})
+
+
+@app.get("/api/runtime_metrics")
+def api_runtime_metrics():
+    return jsonify(RUNTIME_METRICS)
 
 
 @app.get("/api/image/status")
@@ -1355,7 +1406,7 @@ def api_run_export_csv(run_id: str):
             "total_ms",
             "tokens",
             "engine",
-            "model_fit_status",
+            "model_fit_label",
         ]
     )
     for machine in record.get("machines") or []:
@@ -1372,7 +1423,7 @@ def api_run_export_csv(run_id: str):
                 machine.get("total_ms"),
                 machine.get("tokens"),
                 machine.get("engine"),
-                model_fit.get("status"),
+                model_fit.get("label") or model_fit.get("status"),
             ]
         )
     return Response(

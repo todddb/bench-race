@@ -4,6 +4,7 @@ const statusCache = new Map();
 const syncState = new Map();
 const liveOutput = new Map();
 const liveMetrics = new Map();
+const runtimeMetrics = new Map();
 const liveState = new Map();
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
@@ -198,6 +199,11 @@ const handleJobResults = (results) => {
 };
 
 const formatGb = (value) => (value == null ? "n/a" : `${value.toFixed(1)}GB`);
+const formatBytes = (value) => {
+  if (value == null) return "n/a";
+  const gib = value / (1024 ** 3);
+  return `${gib.toFixed(1)}GiB`;
+};
 
 const formatTimestamp = (isoString) => {
   if (!isoString) return "";
@@ -423,18 +429,170 @@ function updateModelFit(machine) {
   const fitEl = document.getElementById(`model-fit-${machine.machine_id}`);
   if (!fitEl) return;
   const fit = machine.model_fit || {};
-  const status = fit.status || "unknown";
-  fitEl.classList.remove("good", "average", "bad", "unknown");
-  fitEl.classList.add(status);
-  if (status === "unknown") {
-    fitEl.textContent = "Model Fit: --";
+  const label = fit.label || "unknown";
+  fitEl.classList.remove("good", "marginal", "risk", "fail", "unknown");
+  fitEl.classList.add(label);
+  const badge = fitEl.querySelector(".fit-badge");
+  const scoreEl = fitEl.querySelector(".fit-score");
+  if (!badge || !scoreEl) return;
+  if (label === "unknown") {
+    badge.textContent = "Fit: --";
+    scoreEl.textContent = "--";
+    fitEl.title = "Model fit unavailable";
     return;
   }
-  const memoryLabel = fit.memory_label ? ` ${fit.memory_label}` : "";
-  fitEl.textContent = `Model Fit: ${status.charAt(0).toUpperCase() + status.slice(1)} (est ${formatGb(
-    fit.needed_gb,
-  )} / ${formatGb(fit.available_gb)}${memoryLabel})`;
+  const score = fit.fit_score != null ? fit.fit_score.toFixed(1) : "--";
+  badge.textContent = `Fit: ${label}`;
+  scoreEl.textContent = score;
+  const tooltip = [
+    `Model size: ${formatBytes(fit.model_bytes)}`,
+    `Usable ${fit.memory_label || "VRAM"}: ${formatBytes(fit.usable_vram_bytes)}`,
+    `Estimated peak: ${formatBytes(fit.estimated_peak_bytes)}`,
+    `Fit ratio: ${fit.fit_ratio ? fit.fit_ratio.toFixed(2) : "n/a"}`,
+    "Suggested actions: reduce batch, use fp16, smaller model, or choose more VRAM.",
+  ];
+  fitEl.title = tooltip.join("\n");
 }
+
+const SPARKLINE_WIDTH = 120;
+const SPARKLINE_HEIGHT = 24;
+
+const buildSparklinePath = (values, width, height, maxValue) => {
+  if (!values || values.length === 0) return "";
+  const max = maxValue || Math.max(...values.filter((v) => v != null), 1);
+  const step = values.length > 1 ? width / (values.length - 1) : width;
+  let d = "";
+  let started = false;
+  values.forEach((value, index) => {
+    if (value == null || Number.isNaN(value)) {
+      started = false;
+      return;
+    }
+    const x = index * step;
+    const y = height - (Math.min(value, max) / max) * height;
+    if (!started) {
+      d += `M ${x.toFixed(2)} ${y.toFixed(2)} `;
+      started = true;
+    } else {
+      d += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+    }
+  });
+  return d.trim();
+};
+
+const renderSparkline = (svg, series, options = {}) => {
+  if (!svg) return;
+  const width = options.width || SPARKLINE_WIDTH;
+  const height = options.height || SPARKLINE_HEIGHT;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = "";
+  series.forEach((item) => {
+    const pathData = buildSparklinePath(item.values, width, height, item.maxValue);
+    if (!pathData) return;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    path.setAttribute("class", item.className);
+    svg.appendChild(path);
+  });
+  if (options.title) svg.setAttribute("title", options.title);
+};
+
+const updateRuntimeMetrics = (machineId, metrics) => {
+  const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
+  const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
+  const utilPlaceholder = document.getElementById(`sparkline-util-placeholder-${machineId}`);
+  const memPlaceholder = document.getElementById(`sparkline-mem-placeholder-${machineId}`);
+  const utilBlock = utilSvg?.closest(".sparkline-block");
+  const memBlock = memSvg?.closest(".sparkline-block");
+
+  if (!metrics) {
+    utilPlaceholder?.classList.remove("hidden");
+    memPlaceholder?.classList.remove("hidden");
+    utilBlock?.classList.add("is-empty");
+    memBlock?.classList.add("is-empty");
+    return;
+  }
+
+  const cpu = metrics.cpu_pct || [];
+  const gpu = metrics.gpu_pct || [];
+  const vramUsed = metrics.vram_used_mib || [];
+  const vramTotal = metrics.vram_total_mib || [];
+  const systemMem = metrics.system_mem_used_mib || [];
+
+  const cpuMax = 100;
+  const gpuMax = 100;
+  const memMax = Math.max(...vramTotal.filter((v) => v != null), ...systemMem.filter((v) => v != null), 1);
+
+  utilPlaceholder?.classList.toggle("hidden", cpu.length > 0);
+  utilBlock?.classList.toggle("is-empty", cpu.length === 0);
+  renderSparkline(
+    utilSvg,
+    [
+      { values: cpu, className: "cpu-line", maxValue: cpuMax },
+      { values: gpu, className: "gpu-line", maxValue: gpuMax },
+    ],
+    { title: "CPU (solid) + GPU (dashed) utilization" },
+  );
+
+  const memValues = vramUsed.some((v) => v != null) ? vramUsed : systemMem;
+  const memTitle = metrics.gpu_metrics_available
+    ? "VRAM usage"
+    : "Unified/system memory (GPU metrics unavailable)";
+  memPlaceholder?.classList.toggle("hidden", memValues.length > 0);
+  memBlock?.classList.toggle("is-empty", memValues.length === 0);
+  renderSparkline(
+    memSvg,
+    [{ values: memValues, className: "mem-line", maxValue: memMax }],
+    { title: memTitle },
+  );
+
+  const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+  const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
+  const lastMem = memValues.filter((v) => v != null).slice(-1)[0];
+  if (utilSvg) utilSvg.dataset.sparklineMeta = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
+  if (memSvg) memSvg.dataset.sparklineMeta = `Mem ${lastMem ?? "n/a"} MiB`;
+};
+
+const openSparklineModal = (machineId, type) => {
+  const metrics = runtimeMetrics.get(machineId) || statusCache.get(machineId)?.runtime_metrics;
+  if (!metrics) return;
+  const modalLabel = document.getElementById("sparkline-modal-label");
+  const modalMeta = document.getElementById("sparkline-modal-meta");
+  const modalChart = document.getElementById("sparkline-modal-chart");
+  const machineLabel = statusCache.get(machineId)?.label || machineId;
+  const cpu = metrics.cpu_pct || [];
+  const gpu = metrics.gpu_pct || [];
+  const vramUsed = metrics.vram_used_mib || [];
+  const vramTotal = metrics.vram_total_mib || [];
+  const systemMem = metrics.system_mem_used_mib || [];
+  const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
+  const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
+  const lastMem = (vramUsed.some((v) => v != null) ? vramUsed : systemMem).filter((v) => v != null).slice(-1)[0];
+  if (type === "util") {
+    const cpuMax = 100;
+    const gpuMax = 100;
+    if (modalLabel) modalLabel.textContent = `${machineLabel} • Utilization`;
+    if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
+    renderSparkline(
+      modalChart,
+      [
+        { values: cpu, className: "cpu-line", maxValue: cpuMax },
+        { values: gpu, className: "gpu-line", maxValue: gpuMax },
+      ],
+      { width: 480, height: 120 },
+    );
+  } else {
+    const memValues = vramUsed.some((v) => v != null) ? vramUsed : systemMem;
+    const memMax = Math.max(...vramTotal.filter((v) => v != null), ...systemMem.filter((v) => v != null), 1);
+    if (modalLabel) modalLabel.textContent = `${machineLabel} • Memory`;
+    if (modalMeta) modalMeta.textContent = `Mem ${lastMem ?? "n/a"} MiB`;
+    renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: memMax }], {
+      width: 480,
+      height: 120,
+    });
+  }
+  openOverlay("sparkline");
+};
 
 function updateSyncButton(machine) {
   const btn = document.getElementById(`sync-${machine.machine_id}`);
@@ -459,6 +617,10 @@ function applyStatusResponse(data) {
     statusCache.set(machine.machine_id, machine);
     updateMachineStatus(machine);
     updateModelFit(machine);
+    if (machine.runtime_metrics) {
+      runtimeMetrics.set(machine.machine_id, machine.runtime_metrics);
+    }
+    updateRuntimeMetrics(machine.machine_id, machine.runtime_metrics);
     updateSyncButton(machine);
   });
   updatePreflightBanner();
@@ -959,6 +1121,14 @@ socket.on("connect", async () => {
       if (out && metrics) {
         paneMap.set(machine.machine_id, { out, metrics });
       }
+      const utilSvg = document.getElementById(`sparkline-util-${machine.machine_id}`);
+      const memSvg = document.getElementById(`sparkline-mem-${machine.machine_id}`);
+      if (utilSvg) {
+        utilSvg.addEventListener("click", () => openSparklineModal(machine.machine_id, "util"));
+      }
+      if (memSvg) {
+        memSvg.addEventListener("click", () => openSparklineModal(machine.machine_id, "mem"));
+      }
     });
     initSyncButtons(machines);
     await fetchStatus();
@@ -1027,6 +1197,12 @@ socket.on("agent_event", (evt) => {
   }
   if (evt.type === "sync_error") {
     completeSyncUI(evt.machine_id, evt.payload?.message || "Sync failed", true);
+  }
+
+  if (evt.type === "runtime_metrics_update") {
+    const metrics = evt.payload || {};
+    runtimeMetrics.set(evt.machine_id, metrics);
+    updateRuntimeMetrics(evt.machine_id, metrics);
   }
 });
 
