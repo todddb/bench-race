@@ -409,8 +409,27 @@ function updateMachineStatus(machine) {
   const text = document.getElementById(`status-text-${machine.machine_id}`);
   if (!dot || !text) return;
 
+  // Compute reachability with robust fallback chain
+  // Priority: agent_reachable (top-level) > capabilities.agent_reachable > reachable (legacy)
+  let agentReachable;
+  if (machine.agent_reachable !== undefined && machine.agent_reachable !== null) {
+    agentReachable = machine.agent_reachable;
+  } else if (machine.capabilities?.agent_reachable !== undefined && machine.capabilities?.agent_reachable !== null) {
+    agentReachable = machine.capabilities.agent_reachable;
+  } else if (machine.reachable !== undefined && machine.reachable !== null) {
+    agentReachable = machine.reachable;
+  } else {
+    agentReachable = null; // Unknown state
+  }
+
   dot.classList.remove("ready", "missing", "offline", "checking");
-  if (!machine.reachable) {
+
+  // If reachability is unknown, show "Checking..."
+  if (agentReachable === null) {
+    dot.classList.add("checking");
+    dot.title = "Checking agent status...";
+    text.textContent = "Checking...";
+  } else if (!agentReachable) {
     dot.classList.add("offline");
     dot.title = machine.error || "Agent offline";
     text.textContent = "Offline";
