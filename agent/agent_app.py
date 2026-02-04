@@ -36,11 +36,19 @@ if str(ROOT_DIR) not in sys.path:
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
 from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
 
+# Import agent-specific modules
+from agent.logging_utils import init_logging, get_logger
+from agent.middleware import RequestLoggingMiddleware, ws_logger
+from agent.http_client import comfyui_client, ollama_client
+
 # ---------------------------
 # Logging
 # ---------------------------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bench-agent")
+log = logging.getLogger("bench-agent")  # Keep for backwards compatibility
+
+# Structured logger (will be initialized after config is loaded)
+slog = None
 
 # ---------------------------
 # Load config
@@ -62,10 +70,17 @@ def load_config():
 
 CFG = load_config()
 
+# Initialize structured logging
+machine_id = CFG.get("machine_id", "unknown")
+slog = init_logging(agent_id=machine_id)
+
 # ---------------------------
 # FastAPI app + websockets
 # ---------------------------
 app = FastAPI(title="bench-race agent")
+
+# Add request logging middleware
+app.add_middleware(RequestLoggingMiddleware)
 
 # Manage connected websocket clients
 # Each entry: client_id -> WebSocket
@@ -644,9 +659,58 @@ async def comfy_checkpoints():
     return {"items": _list_checkpoint_items()}
 
 
+@app.get("/debug/logging")
+async def debug_logging():
+    """
+    Debug endpoint to test logging configuration and emit sample logs.
+    """
+    import os
+    from agent.logging_utils import LOG_LEVEL, LOG_JSON, LOG_HTTP_BODY, LOG_HTTP_MAXLEN, HOSTNAME, AGENT_ID
+
+    # Emit sample logs at each level
+    slog.debug("debug_test", test="This is a DEBUG level log", timestamp=time.time())
+    slog.info("info_test", test="This is an INFO level log", timestamp=time.time())
+    slog.warning("warning_test", test="This is a WARNING level log", timestamp=time.time())
+    slog.error("error_test", test="This is an ERROR level log", timestamp=time.time())
+
+    return {
+        "status": "ok",
+        "message": "Sample logs emitted at all levels",
+        "config": {
+            "LOG_LEVEL": LOG_LEVEL,
+            "LOG_JSON": LOG_JSON,
+            "LOG_HTTP_BODY": LOG_HTTP_BODY,
+            "LOG_HTTP_MAXLEN": LOG_HTTP_MAXLEN,
+            "HOSTNAME": HOSTNAME,
+            "AGENT_ID": AGENT_ID,
+        },
+        "environment": {
+            "LOG_LEVEL": os.getenv("LOG_LEVEL", "not set"),
+            "LOG_JSON": os.getenv("LOG_JSON", "not set"),
+            "LOG_HTTP_BODY": os.getenv("LOG_HTTP_BODY", "not set"),
+            "LOG_HTTP_MAXLEN": os.getenv("LOG_HTTP_MAXLEN", "not set"),
+        }
+    }
+
+
 @app.post("/api/comfy/txt2img")
 async def comfy_txt2img(req: ComfyTxt2ImgRequest):
     job_id = str(uuid.uuid4())
+
+    # Log job received
+    slog.info(
+        "job_received",
+        job_id=job_id,
+        job_type="image",
+        run_id=req.run_id,
+        checkpoint=req.checkpoint,
+        seed=req.seed,
+        steps=req.steps,
+        resolution=f"{req.width}x{req.height}",
+        num_images=req.num_images,
+        repeat=req.repeat,
+    )
+
     if job_id in RUNNING_JOBS:
         raise HTTPException(status_code=409, detail="job already running")
     task = asyncio.create_task(_job_runner_comfy(job_id, req))
@@ -655,6 +719,7 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
     def _on_done(t: asyncio.Task):
         RUNNING_JOBS.pop(job_id, None)
         if t.exception():
+            slog.error("job_failed", job_id=job_id, error="Task exception", stack_trace=str(t.exception()))
             log.exception("Comfy job %s terminated with exception", job_id)
 
     task.add_done_callback(_on_done)
@@ -777,21 +842,65 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     temperature = req.temperature
     num_ctx = req.num_ctx
 
+    # Log job received (already logged in POST /jobs)
+    # Log job accepted
+    slog.info(
+        "job_accepted",
+        job_id=job_id,
+        job_type="llm",
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        prompt_length=len(prompt),
+    )
+
     log.info("Starting job %s model=%s", job_id, model)
     base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+
+    backend_selected = None
     try:
         available = await check_ollama_available(base_url)
         if not available:
+            backend_selected = "mock"
+            slog.info(
+                "job_backend_selected",
+                job_id=job_id,
+                backend=backend_selected,
+                reason="ollama_unreachable",
+            )
             log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
+
+            slog.info("job_started", job_id=job_id, backend=backend_selected)
             result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
         else:
             # Check if model is available on Ollama
             ollama_models = await get_ollama_models(base_url)
             if model not in ollama_models:
+                backend_selected = "mock"
+                slog.info(
+                    "job_backend_selected",
+                    job_id=job_id,
+                    backend=backend_selected,
+                    reason="missing_model",
+                    available_models=ollama_models,
+                )
                 log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
+
+                slog.info("job_started", job_id=job_id, backend=backend_selected)
                 result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
             else:
+                backend_selected = "ollama"
+                slog.info(
+                    "job_backend_selected",
+                    job_id=job_id,
+                    backend=backend_selected,
+                    reason="model_available",
+                )
                 log.info("Using Ollama backend for job %s", job_id)
+
+                slog.info("job_started", job_id=job_id, backend=backend_selected)
+
                 async def _on_token(text: str, timestamp_s: float) -> None:
                     ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
                     await _broadcast_event(ev)
@@ -807,8 +916,27 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                     on_token=_on_token,
                 )
     except Exception as e:
+        backend_selected = "mock"
+        slog.info(
+            "job_backend_selected",
+            job_id=job_id,
+            backend=backend_selected,
+            reason="stream_error",
+            error=str(e),
+        )
         log.warning("Ollama stream failed (%s); falling back to mock stream", e)
+
+        slog.info("job_started", job_id=job_id, backend=backend_selected)
         result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")
+
+    # Log job completion
+    slog.info(
+        "job_completed",
+        job_id=job_id,
+        job_type="llm",
+        tokens_generated=result.get("tokens_generated", 0),
+        duration_ms=result.get("total_ms", 0),
+    )
 
     # Emit final metrics event
     ev = Event(job_id=job_id, type="job_done", payload=result)
@@ -819,29 +947,71 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
 async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     base_url = _comfy_base_url()
     checkpoints_dir = _comfy_checkpoints_dir()
+
+    # Log job accepted
+    slog.info(
+        "job_accepted",
+        job_id=job_id,
+        job_type="image",
+        checkpoint=req.checkpoint,
+        seed=req.seed,
+        steps=req.steps,
+        resolution=f"{req.width}x{req.height}",
+        num_images=req.num_images,
+        repeat=req.repeat,
+    )
+
+    # Validate checkpoints directory
     if not checkpoints_dir.exists():
+        error_msg = f"Checkpoints dir missing: {checkpoints_dir}"
+        slog.error("job_failed", job_id=job_id, error=error_msg)
         await _broadcast_event(
             Event(
                 job_id=job_id,
                 type="image_error",
-                payload={"run_id": req.run_id, "message": f"Checkpoints dir missing: {checkpoints_dir}"},
+                payload={"run_id": req.run_id, "message": error_msg},
             )
         )
         return
+
+    # Validate checkpoint availability
     if req.checkpoint not in _list_checkpoints():
+        error_msg = "Checkpoint not synced to agent"
+        slog.error("job_failed", job_id=job_id, error=error_msg, checkpoint=req.checkpoint)
         await _broadcast_event(
             Event(
                 job_id=job_id,
                 type="image_error",
-                payload={"run_id": req.run_id, "message": "Checkpoint not synced to agent"},
+                payload={"run_id": req.run_id, "message": error_msg},
             )
         )
         return
+
+    # Log checkpoint resolved
+    slog.info(
+        "job_checkpoint_resolved",
+        job_id=job_id,
+        checkpoint=req.checkpoint,
+        checkpoints_dir=str(checkpoints_dir),
+    )
+
+    # Log backend selected
+    slog.info(
+        "job_backend_selected",
+        job_id=job_id,
+        backend="comfyui",
+        reason="image_job",
+    )
+
+    # Log job started
+    slog.info("job_started", job_id=job_id, backend="comfyui")
 
     submit_time = time.perf_counter()
     total_images = []
     last_preview_step = -1
     current_step = 0
+    max_step_observed = 0  # Track maximum step for zero-step detection
+    first_step_logged = False  # Track if we've logged job_first_step
     started_at = None
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)) as client:
@@ -872,7 +1042,18 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     json={"prompt": cleaned_workflow, "client_id": client_id},
                 )
                 resp.raise_for_status()
-                prompt_id = resp.json().get("prompt_id")
+                prompt_data = resp.json()
+                prompt_id = prompt_data.get("prompt_id")
+
+                # Log successful prompt submission
+                slog.info(
+                    "job_prompt_sent",
+                    job_id=job_id,
+                    prompt_id=prompt_id,
+                    client_id=client_id,
+                    image_index=repeat_index + 1,
+                    total_images=image_count,
+                )
             except httpx.HTTPStatusError as exc:
                 # Enhanced error logging for HTTP errors
                 status_code = exc.response.status_code
@@ -884,6 +1065,16 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 payload_summary = _summarize_comfy_payload(cleaned_workflow)
 
                 # Log comprehensive diagnostics
+                error_msg = f"ComfyUI rejected prompt (HTTP {status_code})"
+                slog.error(
+                    "job_failed",
+                    job_id=job_id,
+                    error=error_msg,
+                    status_code=status_code,
+                    response_body=response_body[:500],  # Truncate for logging
+                    payload_summary=payload_summary,
+                    debug_file=debug_file or "not saved",
+                )
                 log.error(
                     "ComfyUI POST /prompt failed: status=%d, response_body=%s, payload_summary=%s, debug_file=%s",
                     status_code,
@@ -893,21 +1084,31 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 )
 
                 # Include full error details in the broadcast message
-                error_msg = f"ComfyUI rejected prompt (HTTP {status_code}): {response_body}"
+                full_error_msg = f"ComfyUI rejected prompt (HTTP {status_code}): {response_body}"
                 if debug_file:
-                    error_msg += f"\nDebug payload saved to: {debug_file}"
+                    full_error_msg += f"\nDebug payload saved to: {debug_file}"
 
                 await _broadcast_event(
                     Event(
                         job_id=job_id,
                         type="image_error",
-                        payload={"run_id": req.run_id, "message": error_msg},
+                        payload={"run_id": req.run_id, "message": full_error_msg},
                     )
                 )
                 return
             except Exception as exc:
                 # Handle other errors (connection errors, timeouts, etc.)
                 payload_summary = _summarize_comfy_payload(cleaned_workflow)
+
+                error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
+                slog.error(
+                    "job_failed",
+                    job_id=job_id,
+                    error=error_msg,
+                    payload_summary=payload_summary,
+                    debug_file=debug_file or "not saved",
+                    stack_trace=str(exc),
+                )
                 log.error(
                     "ComfyUI POST /prompt failed: exception=%s, payload_summary=%s, debug_file=%s",
                     exc,
@@ -915,15 +1116,15 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     debug_file or "not saved",
                 )
 
-                error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
+                full_error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
                 if debug_file:
-                    error_msg += f"\nDebug payload saved to: {debug_file}"
+                    full_error_msg += f"\nDebug payload saved to: {debug_file}"
 
                 await _broadcast_event(
                     Event(
                         job_id=job_id,
                         type="image_error",
-                        payload={"run_id": req.run_id, "message": error_msg},
+                        payload={"run_id": req.run_id, "message": full_error_msg},
                     )
                 )
                 return
@@ -982,6 +1183,32 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         elif msg_type == "progress":
                             progress_data = data.get("data") or {}
                             current_step = int(progress_data.get("value", current_step))
+                            total_steps = int(progress_data.get("max", req.steps))
+
+                            # Track maximum step observed
+                            if current_step > max_step_observed:
+                                max_step_observed = current_step
+
+                            # Log first step (IMPORTANT for detecting "0 steps" issue)
+                            if current_step >= 1 and not first_step_logged:
+                                first_step_logged = True
+                                slog.info(
+                                    "job_first_step",
+                                    job_id=job_id,
+                                    step=current_step,
+                                    total_steps=total_steps,
+                                )
+
+                            # Log progress periodically (every 2 steps, or step 1 and final step)
+                            if current_step == 1 or current_step == total_steps or current_step % 2 == 0:
+                                slog.info(
+                                    "job_progress",
+                                    job_id=job_id,
+                                    step=current_step,
+                                    total_steps=total_steps,
+                                    percent=round((current_step / total_steps) * 100, 1) if total_steps > 0 else 0,
+                                )
+
                             await _broadcast_event(
                                 Event(
                                     job_id=job_id,
@@ -989,7 +1216,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                     payload={
                                         "run_id": req.run_id,
                                         "step": current_step,
-                                        "total_steps": int(progress_data.get("max", req.steps)),
+                                        "total_steps": total_steps,
                                     },
                                 )
                             )
@@ -1043,22 +1270,57 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     queue_latency_ms = (started_at - submit_time) * 1000.0
     gen_time_ms = (end_time - started_at) * 1000.0
     total_ms = (end_time - submit_time) * 1000.0
+
+    # CRITICAL: Detect suspicious "zero steps" completion
+    if max_step_observed == 0:
+        slog.warning(
+            "job_suspicious_zero_steps",
+            job_id=job_id,
+            max_step_observed=max_step_observed,
+            expected_steps=req.steps,
+            started_at_is_none=started_at is None,
+            total_images=len(total_images),
+            warning="Image job completed with 0 steps observed - possible progress tracking issue",
+        )
+        # Add warning to the payload
+        payload_warning = "WARNING: Job completed with 0 sampler steps observed. This may indicate a progress tracking issue."
+    else:
+        payload_warning = None
+
+    # Log successful completion
+    slog.info(
+        "job_completed",
+        job_id=job_id,
+        job_type="image",
+        max_step_observed=max_step_observed,
+        expected_steps=req.steps,
+        queue_latency_ms=round(queue_latency_ms, 2),
+        gen_time_ms=round(gen_time_ms, 2),
+        total_ms=round(total_ms, 2),
+        num_images=len(total_images),
+        warning=payload_warning,
+    )
+
+    payload = {
+        "run_id": req.run_id,
+        "queue_latency_ms": queue_latency_ms,
+        "gen_time_ms": gen_time_ms,
+        "total_ms": total_ms,
+        "steps": req.steps,
+        "resolution": f"{req.width}x{req.height}",
+        "seed": req.seed,
+        "checkpoint": req.checkpoint,
+        "num_images": req.num_images,
+        "images": total_images,
+    }
+    if payload_warning:
+        payload["warning"] = payload_warning
+
     await _broadcast_event(
         Event(
             job_id=job_id,
             type="image_complete",
-            payload={
-                "run_id": req.run_id,
-                "queue_latency_ms": queue_latency_ms,
-                "gen_time_ms": gen_time_ms,
-                "total_ms": total_ms,
-                "steps": req.steps,
-                "resolution": f"{req.width}x{req.height}",
-                "seed": req.seed,
-                "checkpoint": req.checkpoint,
-                "num_images": req.num_images,
-                "images": total_images,
-            },
+            payload=payload,
         )
     )
 
@@ -1242,6 +1504,18 @@ async def start_job(req: LLMRequest):
     """
     job_id = str(uuid.uuid4())
 
+    # Log job received
+    slog.info(
+        "job_received",
+        job_id=job_id,
+        job_type="llm",
+        model=req.model,
+        max_tokens=req.max_tokens,
+        temperature=req.temperature,
+        num_ctx=req.num_ctx,
+        prompt_length=len(req.prompt),
+    )
+
     # If a job_id already running, reject
     # (not likely, but defensive)
     if job_id in RUNNING_JOBS:
@@ -1255,6 +1529,7 @@ async def start_job(req: LLMRequest):
     def _on_done(t: asyncio.Task):
         RUNNING_JOBS.pop(job_id, None)
         if t.exception():
+            slog.error("job_failed", job_id=job_id, error="Task exception", stack_trace=str(t.exception()))
             log.exception("Job %s terminated with exception", job_id)
 
     task.add_done_callback(_on_done)
@@ -1306,7 +1581,11 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     client_id = str(uuid.uuid4())
     WS_CLIENTS[client_id] = ws
+
+    # Log WebSocket connection
+    ws_logger.log_connect(ws, client_id)
     log.info("WS client connected: %s (total=%d)", client_id, len(WS_CLIENTS))
+
     try:
         while True:
             # keep the connection alive by reading; the central may send pings/commands later
@@ -1314,9 +1593,11 @@ async def ws_endpoint(ws: WebSocket):
             # we ignore received messages for now; could implement control messages
             log.debug("WS recv from %s: %s", client_id, data)
     except WebSocketDisconnect:
+        ws_logger.log_disconnect(client_id, "normal")
         log.info("WS client disconnected: %s", client_id)
         WS_CLIENTS.pop(client_id, None)
     except Exception as exc:
+        ws_logger.log_error(client_id, str(exc))
         log.exception("WS error for %s: %s", client_id, exc)
         WS_CLIENTS.pop(client_id, None)
 
