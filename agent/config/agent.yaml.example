@@ -32,6 +32,10 @@ comfyui:
   host: "127.0.0.1"
   port: 8188
   checkpoints_dir: "/opt/comfyui/models/checkpoints"
+  install_dir: "/opt/comfyui"
+  allow_cpu_fallback: false
+  cpu_fallback_on:
+    - "cuda_unsupported_arch"
 
 # Optional: override if Ollama is remote or non-standard
 # ollama_timeout_s: 2.0

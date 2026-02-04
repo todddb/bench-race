@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 import httpx
 import websockets
+import subprocess
+import signal
 from PIL import Image
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
@@ -48,6 +50,8 @@ from agent.comfy_ws import (
     ProgressEvent,
     ComfyWSResult,
 )
+from agent.errors import classify_comfy_error
+from agent.startup_checks import run_comfyui_cuda_probe, force_cpu_enabled
 
 # ---------------------------
 # Logging
@@ -81,6 +85,7 @@ CFG = load_config()
 # Initialize structured logging
 machine_id = CFG.get("machine_id", "unknown")
 slog = init_logging(agent_id=machine_id)
+COMFYUI_PREFLIGHT: Dict[str, Optional[bool]] = {"comfyui_gpu_ok": None, "comfyui_cpu_ok": None}
 
 # ---------------------------
 # FastAPI app + websockets
@@ -93,6 +98,17 @@ app.add_middleware(
     agent_id=machine_id,
     hostname=HOSTNAME,
 )
+
+
+@app.on_event("startup")
+async def _startup_checks():
+    install_dir = _comfy_install_dir()
+    result = run_comfyui_cuda_probe(install_dir)
+    if result:
+        COMFYUI_PREFLIGHT["comfyui_gpu_ok"] = result.comfyui_gpu_ok
+        COMFYUI_PREFLIGHT["comfyui_cpu_ok"] = result.comfyui_cpu_ok
+        if result.error:
+            slog.warning("startup_cuda_incompatible", error=result.error)
 
 # Manage connected websocket clients
 # Each entry: client_id -> WebSocket
@@ -162,6 +178,14 @@ def _comfy_config() -> Dict[str, Any]:
     return CFG.get("comfyui", {}) if isinstance(CFG, dict) else {}
 
 
+def _comfy_install_dir() -> Path:
+    comfy = _comfy_config()
+    path = comfy.get("install_dir") or os.getenv("COMFYUI_DIR", "")
+    if path:
+        return Path(path)
+    return ROOT_DIR / "agent" / "third_party" / "comfyui"
+
+
 def _comfy_base_url() -> str:
     comfy = _comfy_config()
     base = comfy.get("base_url")
@@ -190,6 +214,113 @@ def _comfy_cache_dir() -> Path:
         return Path(path)
     # Default to repo-relative cache
     return ROOT_DIR / "agent" / "model_cache" / "comfyui"
+
+
+def _comfy_pidfile() -> Path:
+    return ROOT_DIR / "run" / "comfyui.pid"
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _comfy_cpu_fallback_config() -> Dict[str, Any]:
+    comfy = _comfy_config()
+    cpu_fallback_on = comfy.get("cpu_fallback_on") or ["cuda_unsupported_arch"]
+    allow_cpu_fallback = bool(comfy.get("allow_cpu_fallback", False) or force_cpu_enabled())
+    return {"allow": allow_cpu_fallback, "on": cpu_fallback_on}
+
+
+def _comfy_cpu_fallback_allowed(category: str) -> bool:
+    config = _comfy_cpu_fallback_config()
+    return config["allow"] and category in config["on"]
+
+
+async def _restart_comfyui_cpu() -> bool:
+    """Restart ComfyUI in CPU mode if it was started via the bench-race launcher."""
+    pidfile = _comfy_pidfile()
+    if not pidfile.exists():
+        return False
+    try:
+        pid = int(pidfile.read_text().strip())
+    except Exception:
+        return False
+    if not _pid_is_running(pid):
+        return False
+
+    install_dir = _comfy_install_dir()
+    python_path = install_dir / ".venv" / "bin" / "python"
+    if not python_path.exists():
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        return False
+
+    for _ in range(30):
+        if not _pid_is_running(pid):
+            break
+        await asyncio.sleep(0.2)
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    host = _comfy_config().get("host", "127.0.0.1")
+    port = _comfy_config().get("port", 8188)
+    try:
+        proc = subprocess.Popen(
+            [str(python_path), "main.py", "--listen", host, "--port", str(port)],
+            cwd=str(install_dir),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return False
+
+    try:
+        pidfile.write_text(str(proc.pid))
+    except Exception:
+        pass
+
+    base_url = _comfy_base_url()
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for _ in range(20):
+            try:
+                resp = await client.get(f"{base_url}/system_stats")
+                if resp.status_code == 200:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+    return False
+
+
+def _format_comfy_error(error_msg: str, history_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    classified = classify_comfy_error(error_msg)
+    details = {
+        "category": classified.get("category"),
+        "remediation": classified.get("action"),
+    }
+    if history_status:
+        details.update(
+            {
+                "raw_exception_type": history_status.get("exception_type"),
+                "raw_exception_message": history_status.get("exception_message"),
+                "node_type": history_status.get("node_type"),
+                "node_id": history_status.get("node_id"),
+            }
+        )
+    return {
+        "short": classified.get("short") or "ComfyUI execution error.",
+        "details": details,
+        "category": classified.get("category") or "unknown",
+    }
 
 
 def _list_checkpoints() -> List[str]:
@@ -655,6 +786,8 @@ async def capabilities():
         gpu_name=CFG.get("gpu_name"),
         ollama_reachable=ollama_reachable,
         ollama_models=ollama_models,
+        comfyui_gpu_ok=COMFYUI_PREFLIGHT.get("comfyui_gpu_ok"),
+        comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
     return JSONResponse(cap.model_dump())
 
@@ -999,25 +1132,52 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     # Validate checkpoints directory
     if not checkpoints_dir.exists():
         error_msg = f"Checkpoints dir missing: {checkpoints_dir}"
-        slog.error("job_failed", job_id=job_id, error=error_msg)
+        formatted = _format_comfy_error(error_msg)
+        slog.error(
+            "job_failed",
+            job_id=job_id,
+            error=formatted["short"],
+            remediation=formatted["details"]["remediation"],
+            category=formatted["details"]["category"],
+            raw_error=error_msg,
+        )
         await _broadcast_event(
             Event(
                 job_id=job_id,
                 type="image_error",
-                payload={"run_id": req.run_id, "message": error_msg},
+                payload={
+                    "run_id": req.run_id,
+                    "message": formatted["short"],
+                    "remediation": formatted["details"]["remediation"],
+                    "category": formatted["details"]["category"],
+                },
             )
         )
         return
 
     # Validate checkpoint availability
     if req.checkpoint not in _list_checkpoints():
-        error_msg = "Checkpoint not synced to agent"
-        slog.error("job_failed", job_id=job_id, error=error_msg, checkpoint=req.checkpoint)
+        error_msg = "Checkpoint not found"
+        formatted = _format_comfy_error(error_msg)
+        slog.error(
+            "job_failed",
+            job_id=job_id,
+            error=formatted["short"],
+            checkpoint=req.checkpoint,
+            remediation=formatted["details"]["remediation"],
+            category=formatted["details"]["category"],
+            raw_error=error_msg,
+        )
         await _broadcast_event(
             Event(
                 job_id=job_id,
                 type="image_error",
-                payload={"run_id": req.run_id, "message": error_msg},
+                payload={
+                    "run_id": req.run_id,
+                    "message": formatted["short"],
+                    "remediation": formatted["details"]["remediation"],
+                    "category": formatted["details"]["category"],
+                },
             )
         )
         return
@@ -1048,366 +1208,430 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     max_step_observed = 0  # Track maximum step for zero-step detection
     first_step_logged = False  # Track if we've logged job_first_step
     started_at = None
+    fallback_attempted = False
+    fallback_used = False
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)) as client:
         image_count = req.repeat * req.num_images
         for repeat_index in range(image_count):
-            client_id = str(uuid.uuid4())
-            seed_offset = req.seed + repeat_index
-            workflow = _build_comfy_workflow(
-                req.prompt,
-                req.checkpoint,
-                seed_offset,
-                req.steps,
-                req.width,
-                req.height,
-            )
-
-            # Validate and clean workflow (strip any non-node keys)
-            cleaned_workflow = _validate_comfy_workflow(workflow)
-
-            # Save debug payload if enabled (save the cleaned version that will be sent)
-            debug_file = _save_comfy_debug_payload(cleaned_workflow, req.run_id)
-            if debug_file:
-                log.info("Saved ComfyUI payload to debug file: %s", debug_file)
-
-            try:
-                resp = await client.post(
-                    f"{base_url}/prompt",
-                    json={"prompt": cleaned_workflow, "client_id": client_id},
+            attempt = 0
+            while True:
+                client_id = str(uuid.uuid4())
+                seed_offset = req.seed + repeat_index
+                workflow = _build_comfy_workflow(
+                    req.prompt,
+                    req.checkpoint,
+                    seed_offset,
+                    req.steps,
+                    req.width,
+                    req.height,
                 )
-                resp.raise_for_status()
-                prompt_data = resp.json()
-                prompt_id = prompt_data.get("prompt_id")
 
-                # Log successful prompt submission
-                slog.info(
-                    "job_prompt_sent",
-                    job_id=job_id,
-                    prompt_id=prompt_id,
-                    client_id=client_id,
-                    image_index=repeat_index + 1,
-                    total_images=image_count,
-                )
-            except httpx.HTTPStatusError as exc:
-                # Enhanced error logging for HTTP errors
-                status_code = exc.response.status_code
+                # Validate and clean workflow (strip any non-node keys)
+                cleaned_workflow = _validate_comfy_workflow(workflow)
+
+                # Save debug payload if enabled (save the cleaned version that will be sent)
+                debug_file = _save_comfy_debug_payload(cleaned_workflow, req.run_id)
+                if debug_file:
+                    log.info("Saved ComfyUI payload to debug file: %s", debug_file)
                 try:
-                    response_body = exc.response.text[:8192]  # First 8KB
-                except Exception:
-                    response_body = "<unable to read response body>"
-
-                payload_summary = _summarize_comfy_payload(cleaned_workflow)
-
-                # Log comprehensive diagnostics
-                error_msg = f"ComfyUI rejected prompt (HTTP {status_code})"
-                slog.error(
-                    "job_failed",
-                    job_id=job_id,
-                    error=error_msg,
-                    status_code=status_code,
-                    response_body=response_body[:500],  # Truncate for logging
-                    payload_summary=payload_summary,
-                    debug_file=debug_file or "not saved",
-                )
-                log.error(
-                    "ComfyUI POST /prompt failed: status=%d, response_body=%s, payload_summary=%s, debug_file=%s",
-                    status_code,
-                    response_body,
-                    payload_summary,
-                    debug_file or "not saved",
-                )
-
-                # Include full error details in the broadcast message
-                full_error_msg = f"ComfyUI rejected prompt (HTTP {status_code}): {response_body}"
-                if debug_file:
-                    full_error_msg += f"\nDebug payload saved to: {debug_file}"
-
-                await _broadcast_event(
-                    Event(
-                        job_id=job_id,
-                        type="image_error",
-                        payload={"run_id": req.run_id, "message": full_error_msg},
+                    resp = await client.post(
+                        f"{base_url}/prompt",
+                        json={"prompt": cleaned_workflow, "client_id": client_id},
                     )
-                )
-                return
-            except Exception as exc:
-                # Handle other errors (connection errors, timeouts, etc.)
-                payload_summary = _summarize_comfy_payload(cleaned_workflow)
+                    resp.raise_for_status()
+                    prompt_data = resp.json()
+                    prompt_id = prompt_data.get("prompt_id")
 
-                error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
-                slog.error(
-                    "job_failed",
-                    job_id=job_id,
-                    error=error_msg,
-                    payload_summary=payload_summary,
-                    debug_file=debug_file or "not saved",
-                    stack_trace=str(exc),
-                )
-                log.error(
-                    "ComfyUI POST /prompt failed: exception=%s, payload_summary=%s, debug_file=%s",
-                    exc,
-                    payload_summary,
-                    debug_file or "not saved",
-                )
-
-                full_error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
-                if debug_file:
-                    full_error_msg += f"\nDebug payload saved to: {debug_file}"
-
-                await _broadcast_event(
-                    Event(
+                    # Log successful prompt submission
+                    slog.info(
+                        "job_prompt_sent",
                         job_id=job_id,
-                        type="image_error",
-                        payload={"run_id": req.run_id, "message": full_error_msg},
+                        prompt_id=prompt_id,
+                        client_id=client_id,
+                        image_index=repeat_index + 1,
+                        total_images=image_count,
                     )
-                )
-                return
+                except httpx.HTTPStatusError as exc:
+                    # Enhanced error logging for HTTP errors
+                    status_code = exc.response.status_code
+                    try:
+                        response_body = exc.response.text[:8192]  # First 8KB
+                    except Exception:
+                        response_body = "<unable to read response body>"
 
-            # Define progress callback to track steps and broadcast events
-            async def on_progress_async(progress: ProgressEvent):
-                nonlocal current_step, max_step_observed, first_step_logged, started_at
-                current_step = progress.current_step
-                total_steps_ws = progress.total_steps
+                    payload_summary = _summarize_comfy_payload(cleaned_workflow)
 
-                # Mark started_at on first progress
-                if started_at is None:
-                    started_at = time.perf_counter()
-                    queue_latency_ms = (started_at - submit_time) * 1000.0
+                    # Log comprehensive diagnostics
+                    error_msg = f"ComfyUI rejected prompt (HTTP {status_code})"
+                    formatted = _format_comfy_error(error_msg)
+                    slog.error(
+                        "job_failed",
+                        job_id=job_id,
+                        error=formatted["short"],
+                        status_code=status_code,
+                        response_body=response_body[:500],  # Truncate for logging
+                        payload_summary=payload_summary,
+                        debug_file=debug_file or "not saved",
+                        remediation=formatted["details"]["remediation"],
+                        category=formatted["details"]["category"],
+                        raw_error=error_msg,
+                    )
+                    log.error(
+                        "ComfyUI POST /prompt failed: status=%d, response_body=%s, payload_summary=%s, debug_file=%s",
+                        status_code,
+                        response_body,
+                        payload_summary,
+                        debug_file or "not saved",
+                    )
+
+                    # Include full error details in the broadcast message
+                    full_error_msg = formatted["short"]
                     await _broadcast_event(
                         Event(
                             job_id=job_id,
-                            type="image_started",
+                            type="image_error",
                             payload={
                                 "run_id": req.run_id,
-                                "queue_latency_ms": queue_latency_ms,
-                                "started_at": time.time(),
+                                "message": full_error_msg,
+                                "remediation": formatted["details"]["remediation"],
+                                "category": formatted["details"]["category"],
+                            },
+                        )
+                    )
+                    return
+                except Exception as exc:
+                    # Handle other errors (connection errors, timeouts, etc.)
+                    payload_summary = _summarize_comfy_payload(cleaned_workflow)
+
+                    error_msg = f"Failed to submit prompt to ComfyUI: {exc}"
+                    formatted = _format_comfy_error(error_msg)
+                    slog.error(
+                        "job_failed",
+                        job_id=job_id,
+                        error=formatted["short"],
+                        payload_summary=payload_summary,
+                        debug_file=debug_file or "not saved",
+                        stack_trace=str(exc),
+                        remediation=formatted["details"]["remediation"],
+                        category=formatted["details"]["category"],
+                        raw_error=error_msg,
+                    )
+                    log.error(
+                        "ComfyUI POST /prompt failed: exception=%s, payload_summary=%s, debug_file=%s",
+                        exc,
+                        payload_summary,
+                        debug_file or "not saved",
+                    )
+
+                    full_error_msg = formatted["short"]
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_error",
+                            payload={
+                                "run_id": req.run_id,
+                                "message": full_error_msg,
+                                "remediation": formatted["details"]["remediation"],
+                                "category": formatted["details"]["category"],
+                            },
+                        )
+                    )
+                    return
+
+                # Define progress callback to track steps and broadcast events
+                async def on_progress_async(progress: ProgressEvent):
+                    nonlocal current_step, max_step_observed, first_step_logged, started_at
+                    current_step = progress.current_step
+                    total_steps_ws = progress.total_steps
+
+                    # Mark started_at on first progress
+                    if started_at is None:
+                        started_at = time.perf_counter()
+                        queue_latency_ms = (started_at - submit_time) * 1000.0
+                        await _broadcast_event(
+                            Event(
+                                job_id=job_id,
+                                type="image_started",
+                                payload={
+                                    "run_id": req.run_id,
+                                    "queue_latency_ms": queue_latency_ms,
+                                    "started_at": time.time(),
+                                },
+                            )
+                        )
+
+                    # Track maximum step observed
+                    if current_step > max_step_observed:
+                        max_step_observed = current_step
+
+                    # Log first step (IMPORTANT for detecting "0 steps" issue)
+                    if current_step >= 1 and not first_step_logged:
+                        first_step_logged = True
+                        slog.info(
+                            "job_first_step",
+                            job_id=job_id,
+                            step=current_step,
+                            total_steps=total_steps_ws,
+                        )
+
+                    # Log progress periodically (every 2 steps, or step 1 and final step)
+                    if current_step == 1 or current_step == total_steps_ws or current_step % 2 == 0:
+                        slog.info(
+                            "job_progress",
+                            job_id=job_id,
+                            step=current_step,
+                            total_steps=total_steps_ws,
+                            percent=round((current_step / total_steps_ws) * 100, 1) if total_steps_ws > 0 else 0,
+                        )
+
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_progress",
+                            payload={
+                                "run_id": req.run_id,
+                                "step": current_step,
+                                "total_steps": total_steps_ws,
                             },
                         )
                     )
 
-                # Track maximum step observed
-                if current_step > max_step_observed:
-                    max_step_observed = current_step
-
-                # Log first step (IMPORTANT for detecting "0 steps" issue)
-                if current_step >= 1 and not first_step_logged:
-                    first_step_logged = True
-                    slog.info(
-                        "job_first_step",
-                        job_id=job_id,
-                        step=current_step,
-                        total_steps=total_steps_ws,
-                    )
-
-                # Log progress periodically (every 2 steps, or step 1 and final step)
-                if current_step == 1 or current_step == total_steps_ws or current_step % 2 == 0:
-                    slog.info(
-                        "job_progress",
-                        job_id=job_id,
-                        step=current_step,
-                        total_steps=total_steps_ws,
-                        percent=round((current_step / total_steps_ws) * 100, 1) if total_steps_ws > 0 else 0,
-                    )
-
-                await _broadcast_event(
-                    Event(
-                        job_id=job_id,
-                        type="image_progress",
-                        payload={
-                            "run_id": req.run_id,
-                            "step": current_step,
-                            "total_steps": total_steps_ws,
-                        },
-                    )
-                )
-
-            # Define preview callback for step images
-            async def on_preview_async(image_bytes: bytes, step: int, total: int):
-                nonlocal last_preview_step
-                if step % 4 == 0 and step != last_preview_step:
-                    last_preview_step = step
-                    try:
-                        image = Image.open(io.BytesIO(image_bytes))
-                        buf = io.BytesIO()
-                        image.convert("RGB").save(buf, format="JPEG", quality=80)
-                        preview_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                        await _broadcast_event(
-                            Event(
-                                job_id=job_id,
-                                type="image_preview",
-                                payload={
-                                    "run_id": req.run_id,
-                                    "step": step,
-                                    "total_steps": total or req.steps,
-                                    "filename": f"preview_{repeat_index + 1}.jpg",
-                                    "image_b64": preview_b64,
-                                },
+                # Define preview callback for step images
+                async def on_preview_async(image_bytes: bytes, step: int, total: int):
+                    nonlocal last_preview_step
+                    if step % 4 == 0 and step != last_preview_step:
+                        last_preview_step = step
+                        try:
+                            image = Image.open(io.BytesIO(image_bytes))
+                            buf = io.BytesIO()
+                            image.convert("RGB").save(buf, format="JPEG", quality=80)
+                            preview_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                            await _broadcast_event(
+                                Event(
+                                    job_id=job_id,
+                                    type="image_preview",
+                                    payload={
+                                        "run_id": req.run_id,
+                                        "step": step,
+                                        "total_steps": total or req.steps,
+                                        "filename": f"preview_{repeat_index + 1}.jpg",
+                                        "image_b64": preview_b64,
+                                    },
+                                )
                             )
+                        except Exception as e:
+                            log.debug(f"Preview processing error: {e}")
+
+                # Wrap sync callbacks for the async tracker
+                progress_events = []
+                preview_events = []
+
+                def on_progress_sync(progress: ProgressEvent):
+                    progress_events.append(progress)
+
+                def on_preview_sync(image_bytes: bytes, step: int, total: int):
+                    preview_events.append((image_bytes, step, total))
+
+                # Wait for completion using proper websocket tracking with prompt_id filtering
+                slog.info(
+                    "job_waiting_completion",
+                    job_id=job_id,
+                    prompt_id=prompt_id,
+                    timeout_seconds=300.0,
+                )
+
+                ws_result: ComfyWSResult = await comfy_wait_for_prompt(
+                    prompt_id=prompt_id,
+                    client_id=client_id,
+                    base_url=base_url,
+                    http_client=client,
+                    timeout_seconds=300.0,  # 5 minutes timeout
+                    on_progress=on_progress_sync,
+                    on_preview=on_preview_sync,
+                    structured_logger=slog,
+                )
+
+                # Process any queued progress/preview events
+                for progress in progress_events:
+                    await on_progress_async(progress)
+                for preview_data in preview_events:
+                    await on_preview_async(*preview_data)
+
+                # Update max_step from tracker result
+                if ws_result.max_step > max_step_observed:
+                    max_step_observed = ws_result.max_step
+
+                # Check for errors
+                if ws_result.error:
+                    formatted = _format_comfy_error(ws_result.error, ws_result.history_status)
+                    if (
+                        not fallback_attempted
+                        and _comfy_cpu_fallback_allowed(formatted["category"])
+                        and await _restart_comfyui_cpu()
+                    ):
+                        fallback_attempted = True
+                        fallback_used = True
+                        attempt += 1
+                        slog.warning(
+                            "job_cpu_fallback_retry",
+                            job_id=job_id,
+                            prompt_id=prompt_id,
+                            attempt=attempt,
                         )
-                    except Exception as e:
-                        log.debug(f"Preview processing error: {e}")
+                        continue
 
-            # Wrap sync callbacks for the async tracker
-            progress_events = []
-            preview_events = []
-
-            def on_progress_sync(progress: ProgressEvent):
-                progress_events.append(progress)
-
-            def on_preview_sync(image_bytes: bytes, step: int, total: int):
-                preview_events.append((image_bytes, step, total))
-
-            # Wait for completion using proper websocket tracking with prompt_id filtering
-            slog.info(
-                "job_waiting_completion",
-                job_id=job_id,
-                prompt_id=prompt_id,
-                timeout_seconds=300.0,
-            )
-
-            ws_result: ComfyWSResult = await comfy_wait_for_prompt(
-                prompt_id=prompt_id,
-                client_id=client_id,
-                base_url=base_url,
-                http_client=client,
-                timeout_seconds=300.0,  # 5 minutes timeout
-                on_progress=on_progress_sync,
-                on_preview=on_preview_sync,
-                structured_logger=slog,
-            )
-
-            # Process any queued progress/preview events
-            for progress in progress_events:
-                await on_progress_async(progress)
-            for preview_data in preview_events:
-                await on_preview_async(*preview_data)
-
-            # Update max_step from tracker result
-            if ws_result.max_step > max_step_observed:
-                max_step_observed = ws_result.max_step
-
-            # Check for errors
-            if ws_result.error:
-                # Get queue status for better diagnostics
-                queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
-
-                slog.error(
-                    "job_failed",
-                    job_id=job_id,
-                    error=ws_result.error,
-                    prompt_id=prompt_id,
-                    max_step=ws_result.max_step,
-                    events_seen=ws_result.events_seen,
-                    execution_time_ms=ws_result.execution_time_ms,
-                    history_status=ws_result.history_status,
-                    queue_status=queue_status,
-                )
-                await _broadcast_event(
-                    Event(
-                        job_id=job_id,
-                        type="image_error",
-                        payload={"run_id": req.run_id, "message": ws_result.error},
-                    )
-                )
-                return
-
-            if not ws_result.completed:
-                # Not an error but also not completed - check queue and history for debugging
-                queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
-
-                slog.warning(
-                    "job_incomplete",
-                    job_id=job_id,
-                    prompt_id=prompt_id,
-                    events_seen=ws_result.events_seen,
-                    max_step=ws_result.max_step,
-                    history_status=ws_result.history_status,
-                    queue_status=queue_status,
-                )
-                await _broadcast_event(
-                    Event(
-                        job_id=job_id,
-                        type="image_error",
-                        payload={"run_id": req.run_id, "message": "Job did not complete - no outputs found"},
-                    )
-                )
-                return
-
-            # Fetch history and extract images
-            try:
-                history_resp = await client.get(f"{base_url}/history/{prompt_id}")
-                history_resp.raise_for_status()
-                history = history_resp.json() or {}
-
-                # Use helper to extract image info
-                image_infos = extract_images_from_history(history, prompt_id)
-
-                if not image_infos:
-                    # No images found even though completion said success
+                    # Get queue status for better diagnostics
                     queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
-                    slog.warning(
-                        "job_suspicious_zero_images",
+
+                    slog.error(
+                        "job_failed",
                         job_id=job_id,
+                        error=formatted["short"],
                         prompt_id=prompt_id,
-                        history_output_keys=list(history.get(prompt_id, {}).get("outputs", {}).keys()),
+                        max_step=ws_result.max_step,
+                        events_seen=ws_result.events_seen,
+                        execution_time_ms=ws_result.execution_time_ms,
+                        history_status=ws_result.history_status,
                         queue_status=queue_status,
-                        warning="Job completed but no images found in history outputs",
+                        remediation=formatted["details"]["remediation"],
+                        category=formatted["details"]["category"],
+                        raw_error=ws_result.error,
+                        raw_exception_type=formatted["details"].get("raw_exception_type"),
+                        raw_exception_message=formatted["details"].get("raw_exception_message"),
+                        node_type=formatted["details"].get("node_type"),
+                        node_id=formatted["details"].get("node_id"),
                     )
                     await _broadcast_event(
                         Event(
                             job_id=job_id,
                             type="image_error",
-                            payload={"run_id": req.run_id, "message": "Job completed but no images found in outputs"},
+                            payload={
+                                "run_id": req.run_id,
+                                "message": formatted["short"],
+                                "remediation": formatted["details"]["remediation"],
+                                "category": formatted["details"]["category"],
+                            },
                         )
                     )
                     return
 
-                # Download each image
-                images = []
-                for img_info in image_infos:
-                    filename = img_info["filename"]
-                    subfolder = img_info.get("subfolder", "")
-                    img_type = img_info.get("type", "output")
+                if not ws_result.completed:
+                    # Not an error but also not completed - check queue and history for debugging
+                    queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
 
-                    image_bytes = await _fetch_comfy_image(
-                        client, base_url, filename,
-                        subfolder=subfolder, img_type=img_type
-                    )
-                    if not image_bytes:
-                        log.warning(f"Failed to fetch image: {filename}")
-                        continue
-                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                    images.append(
-                        {
-                            "filename": filename,
-                            "image_b64": image_b64,
-                        }
-                    )
-                total_images.extend(images)
-
-                slog.info(
-                    "job_images_fetched",
-                    job_id=job_id,
-                    prompt_id=prompt_id,
-                    num_images=len(images),
-                )
-
-            except Exception as exc:
-                slog.error(
-                    "job_failed",
-                    job_id=job_id,
-                    error=f"Failed to fetch images: {exc}",
-                    prompt_id=prompt_id,
-                )
-                await _broadcast_event(
-                    Event(
+                    slog.warning(
+                        "job_incomplete",
                         job_id=job_id,
-                        type="image_error",
-                        payload={"run_id": req.run_id, "message": f"Failed to fetch images: {exc}"},
+                        prompt_id=prompt_id,
+                        events_seen=ws_result.events_seen,
+                        max_step=ws_result.max_step,
+                        history_status=ws_result.history_status,
+                        queue_status=queue_status,
                     )
-                )
-                return
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_error",
+                            payload={
+                                "run_id": req.run_id,
+                                "message": "Job did not complete - no outputs found",
+                                "remediation": [],
+                                "category": "unknown",
+                            },
+                        )
+                    )
+                    return
+
+                # Fetch history and extract images
+                try:
+                    history_resp = await client.get(f"{base_url}/history/{prompt_id}")
+                    history_resp.raise_for_status()
+                    history = history_resp.json() or {}
+
+                    # Use helper to extract image info
+                    image_infos = extract_images_from_history(history, prompt_id)
+
+                    if not image_infos:
+                        # No images found even though completion said success
+                        queue_status = await comfy_check_queue_status(prompt_id, base_url, client)
+                        slog.warning(
+                            "job_suspicious_zero_images",
+                            job_id=job_id,
+                            prompt_id=prompt_id,
+                            history_output_keys=list(history.get(prompt_id, {}).get("outputs", {}).keys()),
+                            queue_status=queue_status,
+                            warning="Job completed but no images found in history outputs",
+                        )
+                        await _broadcast_event(
+                            Event(
+                                job_id=job_id,
+                                type="image_error",
+                                payload={
+                                    "run_id": req.run_id,
+                                    "message": "Job completed but no images found in outputs",
+                                    "remediation": [],
+                                    "category": "unknown",
+                                },
+                            )
+                        )
+                        return
+
+                    # Download each image
+                    images = []
+                    for img_info in image_infos:
+                        filename = img_info["filename"]
+                        subfolder = img_info.get("subfolder", "")
+                        img_type = img_info.get("type", "output")
+
+                        image_bytes = await _fetch_comfy_image(
+                            client, base_url, filename,
+                            subfolder=subfolder, img_type=img_type
+                        )
+                        if not image_bytes:
+                            log.warning(f"Failed to fetch image: {filename}")
+                            continue
+                        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                        images.append(
+                            {
+                                "filename": filename,
+                                "image_b64": image_b64,
+                            }
+                        )
+                    total_images.extend(images)
+
+                    slog.info(
+                        "job_images_fetched",
+                        job_id=job_id,
+                        prompt_id=prompt_id,
+                        num_images=len(images),
+                    )
+
+                except Exception as exc:
+                    formatted = _format_comfy_error(f"Failed to fetch images: {exc}")
+                    slog.error(
+                        "job_failed",
+                        job_id=job_id,
+                        error=formatted["short"],
+                        prompt_id=prompt_id,
+                        remediation=formatted["details"]["remediation"],
+                        category=formatted["details"]["category"],
+                        raw_error=str(exc),
+                    )
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_error",
+                            payload={
+                                "run_id": req.run_id,
+                                "message": formatted["short"],
+                                "remediation": formatted["details"]["remediation"],
+                                "category": formatted["details"]["category"],
+                            },
+                        )
+                    )
+                    return
+                break
 
     end_time = time.perf_counter()
     if started_at is None:
@@ -1444,6 +1668,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         total_ms=round(total_ms, 2),
         num_images=len(total_images),
         warning=payload_warning,
+        completed_with_fallback=fallback_used,
     )
 
     payload = {
@@ -1458,6 +1683,8 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "num_images": req.num_images,
         "images": total_images,
     }
+    if fallback_used:
+        payload["completed_with_fallback"] = True
     if payload_warning:
         payload["warning"] = payload_warning
 

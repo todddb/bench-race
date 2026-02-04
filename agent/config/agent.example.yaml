@@ -30,6 +30,8 @@ comfyui:
   enabled: true
   host: "127.0.0.1"
   port: 8188
+  # Optional: install dir for ComfyUI (used for CPU fallback restart)
+  install_dir: "agent/third_party/comfyui"
 
   # Path where agent caches downloaded checkpoints (before symlinking to ComfyUI)
   # Default: agent/model_cache/comfyui (repo-relative)
@@ -44,3 +46,8 @@ comfyui:
   # Saves full request payloads to logs/debug/ for reproduction
   # Can also be enabled via COMFY_DEBUG=1 environment variable
   debug: true
+
+  # Optional CPU fallback settings
+  allow_cpu_fallback: false
+  cpu_fallback_on:
+    - "cuda_unsupported_arch"
