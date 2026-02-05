@@ -1257,7 +1257,8 @@ async function toggleMachineExcluded(machineId) {
 
 function updateMachineExcludedUI(machineId, excluded) {
   const pane = document.getElementById(`pane-${machineId}`);
-  const toggleBtn = document.getElementById(`toggle-exclude-${machineId}`);
+  const toggleCheckbox = document.getElementById(`toggle-exclude-${machineId}`);
+  const statusBadge = document.getElementById(`status-badge-${machineId}`);
 
   if (pane) {
     pane.setAttribute("data-excluded", excluded.toString());
@@ -1268,24 +1269,40 @@ function updateMachineExcludedUI(machineId, excluded) {
     }
   }
 
-  if (toggleBtn) {
-    toggleBtn.textContent = excluded ? "Excluded" : "Active";
-    toggleBtn.title = excluded ? "Click to activate" : "Click to exclude";
+  // Update checkbox state (checked = enabled = NOT excluded)
+  if (toggleCheckbox) {
+    toggleCheckbox.checked = !excluded;
+  }
+
+  // Update status badge
+  if (statusBadge) {
+    const statusText = statusBadge.querySelector('.status-text');
     if (excluded) {
-      toggleBtn.classList.add("excluded");
+      statusBadge.className = "status-badge standby";
+      if (statusText) statusText.textContent = "Standby";
     } else {
-      toggleBtn.classList.remove("excluded");
+      // Restore based on actual online status
+      const machine = statusCache.get(machineId);
+      if (machine) {
+        if (machine.reachable) {
+          statusBadge.className = "status-badge ready";
+          if (statusText) statusText.textContent = "Ready";
+        } else {
+          statusBadge.className = "status-badge offline";
+          if (statusText) statusText.textContent = "Offline";
+        }
+      }
     }
   }
 }
 
 // Initialize toggle buttons for all machines
 function initToggleButtons() {
-  const toggleButtons = document.querySelectorAll(".btn-toggle-exclude");
-  toggleButtons.forEach((btn) => {
-    const machineId = btn.getAttribute("data-machine-id");
+  const toggleCheckboxes = document.querySelectorAll(".toggle-exclude-input");
+  toggleCheckboxes.forEach((checkbox) => {
+    const machineId = checkbox.getAttribute("data-machine-id");
     if (machineId) {
-      btn.addEventListener("click", () => toggleMachineExcluded(machineId));
+      checkbox.addEventListener("change", () => toggleMachineExcluded(machineId));
     }
   });
 }
@@ -1293,12 +1310,12 @@ function initToggleButtons() {
 // Reset agent
 async function resetAgent(machineId) {
   const btn = document.getElementById(`reset-${machineId}`);
+  const statusBadge = document.getElementById(`status-badge-${machineId}`);
   if (!btn) return;
 
   // Check if agent is online by looking at pane status
   const pane = document.getElementById(`pane-${machineId}`);
-  const statusDot = document.getElementById(`status-dot-${machineId}`);
-  const isOffline = statusDot?.classList.contains("offline");
+  const isOffline = statusBadge?.classList.contains("offline");
 
   if (isOffline) {
     showToast("Cannot reset: agent is offline", "error");
@@ -1311,6 +1328,13 @@ async function resetAgent(machineId) {
   const originalText = btn.textContent;
   btn.textContent = "Resetting...";
 
+  // Update status to "Standby" during reset
+  if (statusBadge) {
+    const statusText = statusBadge.querySelector('.status-text');
+    statusBadge.className = "status-badge standby";
+    if (statusText) statusText.textContent = "Standby";
+  }
+
   try {
     const response = await fetch(`/api/agents/${encodeURIComponent(machineId)}/reset`, {
       method: "POST",
@@ -1322,16 +1346,20 @@ async function resetAgent(machineId) {
     if (response.ok && result.ok) {
       const label = pane?.querySelector(".pane-title")?.textContent || machineId;
       showToast(`Reset successful for ${label}`, "success");
-      // Refresh status after reset
+      // Refresh status after reset (will update to "Ready")
       await fetchStatus();
     } else {
       const errorMsg = result.error || "Reset failed";
       showToast(`Reset failed: ${errorMsg}`, "error");
       console.error("Reset failed:", result);
+      // Restore status on error
+      await fetchStatus();
     }
   } catch (error) {
     showToast(`Reset error: ${error.message}`, "error");
     console.error(`Failed to reset agent ${machineId}:`, error);
+    // Restore status on error
+    await fetchStatus();
   } finally {
     // Restore button state
     btn.disabled = false;

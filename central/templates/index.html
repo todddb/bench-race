@@ -116,7 +116,7 @@
             {% for m in machines %}
             <div class="pane card {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}" data-vendor="{{ m.vendor|default('other') }}">
               <div class="pane-header">
-                <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.svg" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
+                <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.png" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
                   <div class="model-fit" id="model-fit-{{ m.machine_id }}">
@@ -125,43 +125,43 @@
                   </div>
                 </div>
                 <div class="pane-status">
-                  <div class="status-row-top">
-                    <button
-                      class="btn btn-reset"
-                      id="reset-{{ m.machine_id }}"
-                      data-machine-id="{{ m.machine_id }}"
-                      title="Reset Agent (restart Ollama + ComfyUI)"
-                    >
-                      Reset
-                    </button>
-                    <span class="status-badge {% if m.agent_reachable is defined and m.agent_reachable == true %}ready{% elif m.agent_reachable is defined and m.agent_reachable == false %}offline{% else %}checking{% endif %} {% if m.excluded %}disabled{% endif %}" id="status-badge-{{ m.machine_id }}">
+                  <span class="status-badge {% if m.agent_reachable is defined and m.agent_reachable == true %}ready{% elif m.agent_reachable is defined and m.agent_reachable == false %}offline{% else %}checking{% endif %} {% if m.excluded %}standby{% endif %}" id="status-badge-{{ m.machine_id }}">
+                    <span class="status-dot"></span>
+                    <span class="status-text">
                       {% if m.excluded %}
-                      Disabled
+                      Standby
                       {% elif m.agent_reachable is defined and m.agent_reachable == true %}
-                      Active
+                      Ready
                       {% elif m.agent_reachable is defined and m.agent_reachable == false %}
                       Offline
                       {% else %}
                       Checking
                       {% endif %}
                     </span>
-                  </div>
-                  <div class="status-row-bottom">
-                    <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
-                      <input
-                        type="checkbox"
-                        class="toggle-exclude-input"
-                        id="toggle-exclude-{{ m.machine_id }}"
-                        data-machine-id="{{ m.machine_id }}"
-                        {% if not m.excluded %}checked{% endif %}
-                      />
-                      <span class="toggle-slider"></span>
-                      <span class="toggle-label-left">Disabled</span>
-                      <span class="toggle-label-right">Enabled</span>
-                    </label>
-                  </div>
-                  <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
+                  </span>
                 </div>
+              </div>
+              <div class="pane-controls">
+                <button
+                  class="btn btn-reset"
+                  id="reset-{{ m.machine_id }}"
+                  data-machine-id="{{ m.machine_id }}"
+                  title="Reset Agent (restart Ollama + ComfyUI)"
+                >
+                  Reset
+                </button>
+                <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
+                  <input
+                    type="checkbox"
+                    class="toggle-exclude-input"
+                    id="toggle-exclude-{{ m.machine_id }}"
+                    data-machine-id="{{ m.machine_id }}"
+                    {% if not m.excluded %}checked{% endif %}
+                  />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Enabled</span>
+                </label>
+                <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
               </div>
               <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
                 <div class="progress-bar">

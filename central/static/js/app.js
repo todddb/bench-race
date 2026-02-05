@@ -489,8 +489,11 @@ function updateVendorLogo(machineId, vendor) {
 }
 
 function updateMachineStatus(machine) {
-  const dot = document.getElementById(`status-dot-${machine.machine_id}`);
-  const text = document.getElementById(`status-text-${machine.machine_id}`);
+  const statusBadge = document.getElementById(`status-badge-${machine.machine_id}`);
+  if (!statusBadge) return;
+
+  const dot = statusBadge.querySelector('.status-dot');
+  const text = statusBadge.querySelector('.status-text');
   if (!dot || !text) return;
 
   // Update vendor logo
@@ -511,25 +514,21 @@ function updateMachineStatus(machine) {
   }
 
   const previousStatus = text.textContent;
-  dot.classList.remove("ready", "missing", "offline", "checking");
 
-  // If reachability is unknown, show "Checking..."
-  if (agentReachable === null) {
-    dot.classList.add("checking");
-    dot.title = "Checking agent status...";
-    text.textContent = "Checking...";
+  // If machine is excluded, show "Standby" regardless of connection
+  if (machine.excluded) {
+    statusBadge.className = 'status-badge standby';
+    text.textContent = "Standby";
+  } else if (agentReachable === null) {
+    // If reachability is unknown, show "Checking..."
+    statusBadge.className = 'status-badge checking';
+    text.textContent = "Checking";
   } else if (!agentReachable) {
-    dot.classList.add("offline");
-    dot.title = machine.error || "Agent offline";
+    statusBadge.className = 'status-badge offline';
     text.textContent = "Offline";
-  } else if (!machine.has_selected_model) {
-    dot.classList.add("missing");
-    dot.title = `Missing model: ${machine.selected_model || "unknown"}`;
-    text.textContent = "Missing model";
   } else {
-    dot.classList.add("ready");
-    dot.title = "Online";
-    text.textContent = "Online";
+    statusBadge.className = 'status-badge ready';
+    text.textContent = "Ready";
   }
 
   if (DEBUG_UI && previousStatus !== text.textContent) {
@@ -1919,22 +1918,20 @@ function updateMachineExcludedUI(machineId, excluded) {
 
   // Update status badge
   if (statusBadge) {
+    const statusText = statusBadge.querySelector('.status-text');
     if (excluded) {
-      statusBadge.textContent = "Disabled";
-      statusBadge.classList.add("disabled");
-      statusBadge.classList.remove("ready", "offline", "checking");
+      statusBadge.className = "status-badge standby";
+      if (statusText) statusText.textContent = "Standby";
     } else {
       // Restore based on actual online status
       const machine = statusCache.get(machineId);
       if (machine) {
         if (machine.reachable) {
-          statusBadge.textContent = "Active";
-          statusBadge.classList.add("ready");
-          statusBadge.classList.remove("disabled", "offline", "checking");
+          statusBadge.className = "status-badge ready";
+          if (statusText) statusText.textContent = "Ready";
         } else {
-          statusBadge.textContent = "Offline";
-          statusBadge.classList.add("offline");
-          statusBadge.classList.remove("disabled", "ready", "checking");
+          statusBadge.className = "status-badge offline";
+          if (statusText) statusText.textContent = "Offline";
         }
       }
     }
@@ -1955,6 +1952,7 @@ function initToggleButtons() {
 // Reset agent with detailed diagnostics
 async function resetAgent(machineId) {
   const btn = document.getElementById(`reset-${machineId}`);
+  const statusBadge = document.getElementById(`status-badge-${machineId}`);
   if (!btn) return;
 
   // Check if agent is online
@@ -1970,6 +1968,13 @@ async function resetAgent(machineId) {
   const originalText = btn.textContent;
   btn.textContent = "Resetting...";
 
+  // Update status to "Standby" during reset
+  if (statusBadge) {
+    const statusText = statusBadge.querySelector('.status-text');
+    statusBadge.className = "status-badge standby";
+    if (statusText) statusText.textContent = "Standby";
+  }
+
   try {
     const response = await fetch(`/api/agents/${encodeURIComponent(machineId)}/reset`, {
       method: "POST",
@@ -1983,7 +1988,7 @@ async function resetAgent(machineId) {
         ? ` in ${(result.duration_ms / 1000).toFixed(1)}s`
         : "";
       showToast(`Reset successful for ${machine.label || machineId}${durationText}`, "success");
-      // Refresh status after reset
+      // Refresh status after reset (will update to "Ready")
       await fetchStatus();
     } else {
       // Show diagnostics modal for failed resets
@@ -1996,10 +2001,14 @@ async function resetAgent(machineId) {
       console.error("Reset failed:", result);
       // Also show modal immediately
       showResetDiagnosticsModal(machineId, result);
+      // Restore status on error
+      await fetchStatus();
     }
   } catch (error) {
     showToast(`Reset error: ${error.message}`, "error");
     console.error(`Failed to reset agent ${machineId}:`, error);
+    // Restore status on error
+    await fetchStatus();
   } finally {
     // Restore button state
     btn.disabled = false;
