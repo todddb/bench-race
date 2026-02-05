@@ -96,6 +96,8 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 }
 .pane-status .status-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
 .pane-status .status-dot.ready { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+.pane-status .status-dot.running { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+.pane-status .status-dot.standby { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
 .pane-status .status-dot.missing { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
 .pane-status .status-dot.offline { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
 .pane-status .status-dot.checking { background: #9ca3af; }
@@ -391,6 +393,8 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .toast.success { background: #22c55e; color: white; }
 .toast.error { background: #ef4444; color: white; }
 .toast.info { background: #3b82f6; color: white; }
+.toast.warning { background: #f59e0b; color: white; }
+.toast.clickable { cursor: pointer; }
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
 body.options-collapsed #options-panel { display: none; }
@@ -525,6 +529,16 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 }
 
 .status-badge.ready .status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+
+.status-badge.running {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-badge.running .status-dot {
   background: #22c55e;
   box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
 }

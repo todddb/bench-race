@@ -1229,15 +1229,14 @@ async def reset_agent():
     duration_ms = int((time.time() - t_reset_start) * 1000)
 
     # Build detailed response
-    ok = (
-        ollama_start.get("started", False) and
-        ollama_health.get("healthy", False) and
-        comfyui_start.get("started", False) and
-        comfyui_health.get("healthy", False)
-    )
+    final_ollama_healthy = ollama_health.get("healthy", False)
+    final_comfyui_healthy = comfyui_health.get("healthy", False)
+    ok = final_ollama_healthy and final_comfyui_healthy
+    warnings = bool(notes)
 
     result = {
         "ok": ok,
+        "warnings": warnings,
         "duration_ms": duration_ms,
         "ollama": {
             "stopped": ollama_stop.get("stopped", False),
@@ -1249,7 +1248,7 @@ async def reset_agent():
             "start_stdout_tail": ollama_start.get("start_stdout_tail", ""),
             "start_stderr_tail": ollama_start.get("start_stderr_tail", ""),
             "start_log_file": ollama_start.get("start_log_file"),
-            "healthy": ollama_health.get("healthy", False),
+            "healthy": final_ollama_healthy,
             "time_to_ready_ms": ollama_health.get("time_to_ready_ms"),
         },
         "comfyui": {
@@ -1259,7 +1258,7 @@ async def reset_agent():
             "start_stdout_tail": comfyui_start.get("start_stdout_tail", ""),
             "start_stderr_tail": comfyui_start.get("start_stderr_tail", ""),
             "start_log_file": comfyui_start.get("start_log_file"),
-            "healthy": comfyui_health.get("healthy", False),
+            "healthy": final_comfyui_healthy,
             "time_to_ready_ms": comfyui_health.get("time_to_ready_ms"),
         },
         "notes": notes if notes else [],

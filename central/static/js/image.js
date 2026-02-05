@@ -1,5 +1,6 @@
 const socket = io();
 const paneMap = new Map();
+const statusCache = new Map();
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
@@ -28,6 +29,8 @@ let previewConfig = { ...DEFAULT_PREVIEW_CONFIG };
 // Global run state tracking
 let isRunActive = false;
 const activeRunIds = new Set();
+const activeRunMachinesById = new Map();
+const activeRunMachineIds = new Set();
 let statusPollTimer = null;
 let lastPreviewUpdate = new Map(); // machineId -> timestamp
 
@@ -126,6 +129,36 @@ const setRunActive = (active, runId = null) => {
   }
 };
 
+const rebuildActiveRunMachineIds = () => {
+  activeRunMachineIds.clear();
+  activeRunMachinesById.forEach((machineIds) => {
+    machineIds.forEach((machineId) => activeRunMachineIds.add(machineId));
+  });
+};
+
+const updateAllPaneStatuses = () => {
+  paneMap.forEach((_pane, machineId) => {
+    const machine = statusCache.get(machineId);
+    if (machine) {
+      updateMachinePaneStatus(machine);
+    }
+  });
+};
+
+const setActiveRunMachines = (runId, machineIds = []) => {
+  if (!runId) return;
+  activeRunMachinesById.set(runId, new Set(machineIds));
+  rebuildActiveRunMachineIds();
+  updateAllPaneStatuses();
+};
+
+const clearActiveRunMachines = (runId) => {
+  if (!runId) return;
+  activeRunMachinesById.delete(runId);
+  rebuildActiveRunMachineIds();
+  updateAllPaneStatuses();
+};
+
 // Fetch active runs from server to initialize state
 const fetchActiveRuns = async () => {
   try {
@@ -135,6 +168,15 @@ const fetchActiveRuns = async () => {
     activeRunIds.clear();
     (data.run_ids || []).forEach((id) => activeRunIds.add(id));
     isRunActive = data.is_active || false;
+    activeRunMachinesById.clear();
+    if (data.runs) {
+      Object.entries(data.runs).forEach(([runId, info]) => {
+        const machineIds = info?.machine_ids || [];
+        activeRunMachinesById.set(runId, new Set(machineIds));
+      });
+    }
+    rebuildActiveRunMachineIds();
+    updateAllPaneStatuses();
     updatePreviewVisibility();
     restartPolling();
   } catch (error) {
@@ -197,12 +239,20 @@ const throttle = (fn, delay) => {
   };
 };
 
-const showToast = (message, type = "info") => {
+const showToast = (message, type = "info", onClick = null) => {
   const container = document.getElementById("toast-container");
   if (!container) return;
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
   toast.textContent = message;
+  if (onClick) {
+    toast.classList.add("clickable");
+    toast.title = "Click for details";
+    toast.addEventListener("click", () => {
+      onClick();
+      toast.remove();
+    });
+  }
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 3500);
 };
@@ -435,28 +485,58 @@ function detectVendor(machine) {
   return null;
 }
 
-function updateVendorLogo(machineId, vendor) {
-  const logo = document.getElementById(`vendor-logo-${machineId}`);
+function resolveLogoKey(machine) {
+  const explicit = typeof machine.logo === "string" ? machine.logo : machine.vendor;
+  const normalized = typeof explicit === "string" ? explicit.trim().toLowerCase() : "";
+  return normalized || detectVendor(machine);
+}
+
+function updateVendorLogo(machine) {
+  const logo = document.getElementById(`vendor-logo-${machine.machine_id}`);
   if (!logo) return;
 
-  if (vendor === "apple") {
-    logo.src = "/static/assets/vendor/apple.png";
+  const logoKey = resolveLogoKey(machine);
+  if (!logoKey) {
+    logo.classList.add("hidden");
+    return;
+  }
+
+  const supportedLogos = new Set(["apple", "nvidia"]);
+  if (!supportedLogos.has(logoKey)) {
+    logo.classList.add("hidden");
+    return;
+  }
+
+  const logoUrl = `/static/assets/vendor/${logoKey}.png`;
+  if (typeof process !== "undefined" && process.env?.NODE_ENV === "development") {
+    console.log(`[logo] ${machine.machine_id}: ${logoUrl}`);
+  }
+
+  if (logoKey === "apple") {
     logo.alt = "Apple";
     logo.title = "Apple Silicon";
-    logo.classList.remove("hidden");
-  } else if (vendor === "nvidia") {
-    logo.src = "/static/assets/vendor/nvidia.png";
+  } else if (logoKey === "nvidia") {
     logo.alt = "NVIDIA";
     logo.title = "NVIDIA GPU";
-    logo.classList.remove("hidden");
   } else {
-    logo.classList.add("hidden");
+    logo.alt = logoKey;
+    logo.title = logoKey;
   }
+
+  logo.src = logoUrl;
+  logo.classList.remove("hidden");
 }
 
 const setPaneStatus = (machineId, statusClass, statusText) => {
-  const dot = document.getElementById(`status-dot-${machineId}`);
-  const text = document.getElementById(`status-text-${machineId}`);
+  const badge = document.getElementById(`status-badge-${machineId}`);
+  const dot = badge?.querySelector(".status-dot");
+  const text = badge?.querySelector(".status-text");
+  if (badge) {
+    badge.classList.remove("ready", "offline", "standby", "checking", "running");
+    if (["ready", "offline", "standby", "checking", "running"].includes(statusClass)) {
+      badge.classList.add(statusClass);
+    }
+  }
   if (dot) {
     dot.className = `status-dot ${statusClass}`;
   }
@@ -464,7 +544,7 @@ const setPaneStatus = (machineId, statusClass, statusText) => {
     text.textContent = statusText;
   }
   // Update reset button state based on status
-  const isOnline = statusClass === "ready" || statusClass === "syncing";
+  const isOnline = statusClass === "ready" || statusClass === "running" || statusClass === "syncing";
   updateResetButtonState(machineId, isOnline);
 };
 
@@ -477,6 +557,36 @@ const setPaneSyncStatus = (machineId, message, percent = null) => {
 const setPaneMetrics = (machineId, html) => {
   const metrics = document.getElementById(`metrics-${machineId}`);
   if (metrics) metrics.innerHTML = html;
+};
+
+const updateMachinePaneStatus = (machine) => {
+  updateVendorLogo(machine);
+
+  const isRunning = activeRunMachineIds.has(machine.machine_id);
+
+  if (machine.excluded) {
+    setPaneStatus(machine.machine_id, "standby", "Standby");
+    return { blocked: true, excluded: true };
+  }
+  if (!machine.reachable) {
+    setPaneStatus(machine.machine_id, "offline", "Agent offline");
+    return { blocked: true, excluded: false };
+  }
+  if (!machine.comfy_running) {
+    setPaneStatus(machine.machine_id, "offline", "ComfyUI down");
+    return { blocked: true, excluded: false };
+  }
+  if (isRunning) {
+    setPaneStatus(machine.machine_id, "running", "Running");
+    return { blocked: false, excluded: false };
+  }
+  if (machine.missing_checkpoint) {
+    setPaneStatus(machine.machine_id, "missing", "Missing checkpoint");
+    return { blocked: true, excluded: false };
+  }
+
+  setPaneStatus(machine.machine_id, "ready", "Ready");
+  return { blocked: false, excluded: false };
 };
 
 const setPreviewImage = (machineId, src, force = false) => {
@@ -519,32 +629,15 @@ const fetchStatus = async () => {
     const machines = data.machines || [];
     let blockedCount = 0;
     let excludedCount = 0;
+    statusCache.clear();
     machines.forEach((m) => {
-      // Update vendor logo
-      const vendor = detectVendor(m);
-      updateVendorLogo(m.machine_id, vendor);
-
-      if (m.excluded) {
-        setPaneStatus(m.machine_id, "offline", "Excluded");
+      statusCache.set(m.machine_id, m);
+      const result = updateMachinePaneStatus(m);
+      if (result.blocked) {
         blockedCount += 1;
+      }
+      if (result.excluded) {
         excludedCount += 1;
-        return;
-      }
-      if (!m.reachable) {
-        setPaneStatus(m.machine_id, "offline", "Agent offline");
-        blockedCount += 1;
-        return;
-      }
-      if (!m.comfy_running) {
-        setPaneStatus(m.machine_id, "offline", "ComfyUI down");
-        blockedCount += 1;
-        return;
-      }
-      if (m.missing_checkpoint) {
-        setPaneStatus(m.machine_id, "missing", "Missing checkpoint");
-        blockedCount += 1;
-      } else {
-        setPaneStatus(m.machine_id, "ready", "Ready");
       }
       const syncButton = document.getElementById(`sync-${m.machine_id}`);
       if (syncButton) {
@@ -1102,9 +1195,13 @@ socket.on("run_lifecycle", (event) => {
   if (!event || !event.type) return;
   if (event.type === "run_start") {
     setRunActive(true, event.run_id);
+    if (Array.isArray(event.machine_ids)) {
+      setActiveRunMachines(event.run_id, event.machine_ids);
+    }
     console.log("Run started:", event.run_id);
   } else if (event.type === "run_end") {
     setRunActive(false, event.run_id);
+    clearActiveRunMachines(event.run_id);
     console.log("Run ended:", event.run_id);
   }
 });
@@ -1244,6 +1341,11 @@ async function toggleMachineExcluded(machineId) {
 
     // Update UI
     updateMachineExcludedUI(machineId, data.excluded);
+    const machine = statusCache.get(machineId);
+    if (machine) {
+      machine.excluded = data.excluded;
+      updateMachinePaneStatus(machine);
+    }
 
     // Refresh status to update banner
     await fetchStatus();
@@ -1258,7 +1360,6 @@ async function toggleMachineExcluded(machineId) {
 function updateMachineExcludedUI(machineId, excluded) {
   const pane = document.getElementById(`pane-${machineId}`);
   const toggleCheckbox = document.getElementById(`toggle-exclude-${machineId}`);
-  const statusBadge = document.getElementById(`status-badge-${machineId}`);
 
   if (pane) {
     pane.setAttribute("data-excluded", excluded.toString());
@@ -1272,27 +1373,6 @@ function updateMachineExcludedUI(machineId, excluded) {
   // Update checkbox state (checked = enabled = NOT excluded)
   if (toggleCheckbox) {
     toggleCheckbox.checked = !excluded;
-  }
-
-  // Update status badge
-  if (statusBadge) {
-    const statusText = statusBadge.querySelector('.status-text');
-    if (excluded) {
-      statusBadge.className = "status-badge standby";
-      if (statusText) statusText.textContent = "Standby";
-    } else {
-      // Restore based on actual online status
-      const machine = statusCache.get(machineId);
-      if (machine) {
-        if (machine.reachable) {
-          statusBadge.className = "status-badge ready";
-          if (statusText) statusText.textContent = "Ready";
-        } else {
-          statusBadge.className = "status-badge offline";
-          if (statusText) statusText.textContent = "Offline";
-        }
-      }
-    }
   }
 }
 
@@ -1345,7 +1425,11 @@ async function resetAgent(machineId) {
 
     if (response.ok && result.ok) {
       const label = pane?.querySelector(".pane-title")?.textContent || machineId;
-      showToast(`Reset successful for ${label}`, "success");
+      if (result.warnings) {
+        showToast(`Reset complete (warnings) for ${label}`, "warning");
+      } else {
+        showToast(`Reset successful for ${label}`, "success");
+      }
       // Refresh status after reset (will update to "Ready")
       await fetchStatus();
     } else {
