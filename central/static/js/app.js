@@ -26,6 +26,8 @@ let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
 // Global run state tracking
 let isRunActive = false;
 const activeRunIds = new Set();
+const activeRunMachinesById = new Map();
+const activeRunMachineIds = new Set();
 let statusPollTimer = null;
 let lastUiUpdate = 0;
 let runTrackingActive = false;
@@ -121,6 +123,31 @@ const setRunActive = (active, runId = null) => {
   }
 };
 
+const rebuildActiveRunMachineIds = () => {
+  activeRunMachineIds.clear();
+  activeRunMachinesById.forEach((machineIds) => {
+    machineIds.forEach((machineId) => activeRunMachineIds.add(machineId));
+  });
+};
+
+const updateAllMachineStatuses = () => {
+  statusCache.forEach((machine) => updateMachineStatus(machine));
+};
+
+const setActiveRunMachines = (runId, machineIds = []) => {
+  if (!runId) return;
+  activeRunMachinesById.set(runId, new Set(machineIds));
+  rebuildActiveRunMachineIds();
+  updateAllMachineStatuses();
+};
+
+const clearActiveRunMachines = (runId) => {
+  if (!runId) return;
+  activeRunMachinesById.delete(runId);
+  rebuildActiveRunMachineIds();
+  updateAllMachineStatuses();
+};
+
 const beginRunTracking = (machineIds = []) => {
   runSamples = new Map();
   runDone = new Set();
@@ -155,6 +182,15 @@ const fetchActiveRuns = async () => {
     activeRunIds.clear();
     (data.run_ids || []).forEach((id) => activeRunIds.add(id));
     isRunActive = data.is_active || false;
+    activeRunMachinesById.clear();
+    if (data.runs) {
+      Object.entries(data.runs).forEach(([runId, info]) => {
+        const machineIds = info?.machine_ids || [];
+        activeRunMachinesById.set(runId, new Set(machineIds));
+      });
+    }
+    rebuildActiveRunMachineIds();
+    updateAllMachineStatuses();
     restartPolling();
   } catch (error) {
     console.warn("Failed to fetch active runs:", error);
@@ -185,12 +221,20 @@ const throttle = (fn, delay) => {
   };
 };
 
-const showToast = (message, type = "info") => {
+const showToast = (message, type = "info", onClick = null) => {
   const container = document.getElementById("toast-container");
   if (!container) return;
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
   toast.textContent = message;
+  if (onClick) {
+    toast.classList.add("clickable");
+    toast.title = "Click for details";
+    toast.addEventListener("click", () => {
+      onClick();
+      toast.remove();
+    });
+  }
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 3500);
 };
@@ -469,23 +513,46 @@ function detectVendor(machine) {
   return null;
 }
 
-function updateVendorLogo(machineId, vendor) {
-  const logo = document.getElementById(`vendor-logo-${machineId}`);
+function resolveLogoKey(machine) {
+  const explicit = typeof machine.logo === "string" ? machine.logo : machine.vendor;
+  const normalized = typeof explicit === "string" ? explicit.trim().toLowerCase() : "";
+  return normalized || detectVendor(machine);
+}
+
+function updateVendorLogo(machine) {
+  const logo = document.getElementById(`vendor-logo-${machine.machine_id}`);
   if (!logo) return;
 
-  if (vendor === "apple") {
-    logo.src = "/static/assets/vendor/apple.png";
+  const logoKey = resolveLogoKey(machine);
+  if (!logoKey) {
+    logo.classList.add("hidden");
+    return;
+  }
+
+  const supportedLogos = new Set(["apple", "nvidia"]);
+  if (!supportedLogos.has(logoKey)) {
+    logo.classList.add("hidden");
+    return;
+  }
+
+  const logoUrl = `/static/assets/vendor/${logoKey}.png`;
+  if (typeof process !== "undefined" && process.env?.NODE_ENV === "development") {
+    console.log(`[logo] ${machine.machine_id}: ${logoUrl}`);
+  }
+
+  if (logoKey === "apple") {
     logo.alt = "Apple";
     logo.title = "Apple Silicon";
-    logo.classList.remove("hidden");
-  } else if (vendor === "nvidia") {
-    logo.src = "/static/assets/vendor/nvidia.png";
+  } else if (logoKey === "nvidia") {
     logo.alt = "NVIDIA";
     logo.title = "NVIDIA GPU";
-    logo.classList.remove("hidden");
   } else {
-    logo.classList.add("hidden");
+    logo.alt = logoKey;
+    logo.title = logoKey;
   }
+
+  logo.src = logoUrl;
+  logo.classList.remove("hidden");
 }
 
 function updateMachineStatus(machine) {
@@ -497,8 +564,7 @@ function updateMachineStatus(machine) {
   if (!dot || !text) return;
 
   // Update vendor logo
-  const vendor = detectVendor(machine);
-  updateVendorLogo(machine.machine_id, vendor);
+  updateVendorLogo(machine);
 
   // Compute reachability with robust fallback chain
   // Priority: agent_reachable (top-level) > capabilities.agent_reachable > reachable (legacy)
@@ -515,6 +581,8 @@ function updateMachineStatus(machine) {
 
   const previousStatus = text.textContent;
 
+  const isRunning = activeRunMachineIds.has(machine.machine_id);
+
   // If machine is excluded, show "Standby" regardless of connection
   if (machine.excluded) {
     statusBadge.className = 'status-badge standby';
@@ -526,6 +594,9 @@ function updateMachineStatus(machine) {
   } else if (!agentReachable) {
     statusBadge.className = 'status-badge offline';
     text.textContent = "Offline";
+  } else if (isRunning) {
+    statusBadge.className = 'status-badge running';
+    text.textContent = "Running";
   } else {
     statusBadge.className = 'status-badge ready';
     text.textContent = "Ready";
@@ -975,16 +1046,26 @@ function updateSyncButton(machine) {
 }
 
 function applyStatusResponse(data) {
+  const previousCache = new Map(statusCache);
   statusCache.clear();
   (data.machines || []).forEach((machine) => {
-    statusCache.set(machine.machine_id, machine);
-    updateMachineStatus(machine);
-    updateModelFit(machine);
-    if (machine.runtime_metrics) {
-      runtimeMetrics.set(machine.machine_id, machine.runtime_metrics);
+    const previous = previousCache.get(machine.machine_id) || {};
+    const merged = { ...previous, ...machine };
+    if (machine.excluded === undefined && previous.excluded !== undefined) {
+      merged.excluded = previous.excluded;
     }
-    updateRuntimeMetrics(machine.machine_id, machine.runtime_metrics);
-    updateSyncButton(machine);
+    if (machine.logo === undefined && previous.logo !== undefined) {
+      merged.logo = previous.logo;
+    }
+    statusCache.set(merged.machine_id, merged);
+    applyMachineExcludedState(merged.machine_id, merged.excluded);
+    updateMachineStatus(merged);
+    updateModelFit(merged);
+    if (merged.runtime_metrics) {
+      runtimeMetrics.set(merged.machine_id, merged.runtime_metrics);
+    }
+    updateRuntimeMetrics(merged.machine_id, merged.runtime_metrics);
+    updateSyncButton(merged);
   });
   updatePreflightBanner();
 }
@@ -1468,12 +1549,16 @@ socket.on("run_lifecycle", (event) => {
   if (!event || !event.type) return;
   if (event.type === "run_start") {
     setRunActive(true, event.run_id);
+    if (Array.isArray(event.machine_ids)) {
+      setActiveRunMachines(event.run_id, event.machine_ids);
+    }
     console.log("Run started:", event.run_id);
     if (!runTrackingActive) {
       beginRunTracking(Array.from(statusCache.keys()));
     }
   } else if (event.type === "run_end") {
     setRunActive(false, event.run_id);
+    clearActiveRunMachines(event.run_id);
     console.log("Run ended:", event.run_id);
     endRunTracking();
   }
@@ -1887,7 +1972,8 @@ async function toggleMachineExcluded(machineId) {
     statusCache.set(machineId, machine);
 
     // Update UI
-    updateMachineExcludedUI(machineId, data.excluded);
+    applyMachineExcludedState(machineId, data.excluded);
+    updateMachineStatus(machine);
     updatePreflightBanner();
 
     console.log(`Machine ${machineId} excluded status updated to: ${data.excluded}`);
@@ -1897,10 +1983,9 @@ async function toggleMachineExcluded(machineId) {
   }
 }
 
-function updateMachineExcludedUI(machineId, excluded) {
+function applyMachineExcludedState(machineId, excluded) {
   const pane = document.getElementById(`pane-${machineId}`);
   const toggleCheckbox = document.getElementById(`toggle-exclude-${machineId}`);
-  const statusBadge = document.getElementById(`status-badge-${machineId}`);
 
   if (pane) {
     pane.setAttribute("data-excluded", excluded.toString());
@@ -1914,27 +1999,6 @@ function updateMachineExcludedUI(machineId, excluded) {
   // Update checkbox state (checked = enabled = NOT excluded)
   if (toggleCheckbox) {
     toggleCheckbox.checked = !excluded;
-  }
-
-  // Update status badge
-  if (statusBadge) {
-    const statusText = statusBadge.querySelector('.status-text');
-    if (excluded) {
-      statusBadge.className = "status-badge standby";
-      if (statusText) statusText.textContent = "Standby";
-    } else {
-      // Restore based on actual online status
-      const machine = statusCache.get(machineId);
-      if (machine) {
-        if (machine.reachable) {
-          statusBadge.className = "status-badge ready";
-          if (statusText) statusText.textContent = "Ready";
-        } else {
-          statusBadge.className = "status-badge offline";
-          if (statusText) statusText.textContent = "Offline";
-        }
-      }
-    }
   }
 }
 
@@ -1987,7 +2051,15 @@ async function resetAgent(machineId) {
       const durationText = result.duration_ms
         ? ` in ${(result.duration_ms / 1000).toFixed(1)}s`
         : "";
-      showToast(`Reset successful for ${machine.label || machineId}${durationText}`, "success");
+      if (result.warnings) {
+        showToast(
+          `Reset complete (warnings) for ${machine.label || machineId}${durationText}`,
+          "warning",
+          () => showResetDiagnosticsModal(machineId, result)
+        );
+      } else {
+        showToast(`Reset successful for ${machine.label || machineId}${durationText}`, "success");
+      }
       // Refresh status after reset (will update to "Ready")
       await fetchStatus();
     } else {

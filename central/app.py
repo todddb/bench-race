@@ -172,6 +172,7 @@ def _mark_run_active(run_id: str, run_type: str, machine_ids: List[str]) -> None
         "type": "run_start",
         "run_id": run_id,
         "run_type": run_type,
+        "machine_ids": machine_ids,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     log.info("Run started: %s (type=%s, machines=%d)", run_id, run_type, len(machine_ids))
@@ -179,13 +180,16 @@ def _mark_run_active(run_id: str, run_type: str, machine_ids: List[str]) -> None
 
 def _mark_run_complete(run_id: str) -> None:
     """Mark a run as complete and emit run_end event if it was active."""
+    machine_ids: List[str] = []
     with RUN_LOCK:
         if run_id not in ACTIVE_RUNS:
             return
+        machine_ids = list(ACTIVE_RUNS[run_id].get("machine_ids") or [])
         del ACTIVE_RUNS[run_id]
     socketio.emit("run_lifecycle", {
         "type": "run_end",
         "run_id": run_id,
+        "machine_ids": machine_ids,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     log.info("Run completed: %s", run_id)
@@ -193,9 +197,11 @@ def _mark_run_complete(run_id: str) -> None:
 
 def _check_run_complete(run_id: str) -> None:
     """Check if all jobs for a run are complete and mark it accordingly."""
+    machine_ids: List[str] = []
     with RUN_LOCK:
         if run_id not in ACTIVE_RUNS:
             return
+        machine_ids = list(ACTIVE_RUNS[run_id].get("machine_ids") or [])
         # Check if there are any remaining jobs for this run
         has_pending_jobs = any(
             info["run_id"] == run_id for info in JOB_RUN_MAP.values()
@@ -206,6 +212,7 @@ def _check_run_complete(run_id: str) -> None:
         socketio.emit("run_lifecycle", {
             "type": "run_end",
             "run_id": run_id,
+            "machine_ids": machine_ids,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         log.info("Run completed: %s", run_id)
@@ -215,10 +222,24 @@ def _get_active_runs() -> Dict[str, Any]:
     """Get info about currently active runs."""
     with RUN_LOCK:
         run_ids = list(ACTIVE_RUNS.keys())
+        active_runs = {
+            run_id: {
+                "machine_ids": list(info.get("machine_ids") or []),
+                "type": info.get("type"),
+            }
+            for run_id, info in ACTIVE_RUNS.items()
+        }
+        active_machine_ids = sorted({
+            machine_id
+            for info in ACTIVE_RUNS.values()
+            for machine_id in (info.get("machine_ids") or [])
+        })
         return {
             "is_active": len(run_ids) > 0,
             "run_ids": run_ids,
             "count": len(run_ids),
+            "active_machine_ids": active_machine_ids,
+            "runs": active_runs,
         }
 
 
@@ -1432,6 +1453,8 @@ def api_status():
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
                     "label": cap.get("label") or m.get("label"),
+                    "logo": m.get("logo") or m.get("vendor"),
+                    "excluded": m.get("excluded", False),
                     "reachable": True,
                     "agent_reachable": True,
                     "selected_model": selected_model,
@@ -1459,6 +1482,8 @@ def api_status():
                 {
                     "machine_id": m.get("machine_id"),
                     "label": m.get("label"),
+                    "logo": m.get("logo") or m.get("vendor"),
+                    "excluded": m.get("excluded", False),
                     "reachable": False,
                     "agent_reachable": False,
                     "selected_model": selected_model,
@@ -1511,6 +1536,8 @@ def api_image_status():
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
                     "label": cap.get("label") or m.get("label"),
+                    "logo": m.get("logo") or m.get("vendor"),
+                    "excluded": m.get("excluded", False),
                     "reachable": True,
                     "comfy_running": cap.get("running", False),
                     "checkpoints": checkpoints,
@@ -1525,6 +1552,8 @@ def api_image_status():
                 {
                     "machine_id": m.get("machine_id"),
                     "label": m.get("label"),
+                    "logo": m.get("logo") or m.get("vendor"),
+                    "excluded": m.get("excluded", False),
                     "reachable": False,
                     "comfy_running": False,
                     "checkpoints": [],
