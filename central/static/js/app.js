@@ -6,6 +6,7 @@ const liveOutput = new Map();
 const liveMetrics = new Map();
 const runtimeMetrics = new Map();
 const liveState = new Map();
+const outputScrollState = new Map();
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const MODEL_POLICY_ENDPOINT = "/api/settings/model_policy";
@@ -13,7 +14,9 @@ const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
 const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
+const COMPUTE_SETTINGS_KEY = "bench-race-compute-settings";
 const DEBUG_UI = false;
+const MODE = document.body?.dataset?.mode || "inference";
 
 // Adaptive polling configuration
 const DEFAULT_POLLING_CONFIG = {
@@ -22,6 +25,12 @@ const DEFAULT_POLLING_CONFIG = {
   uiUpdateThrottleMs: 500,     // Throttle UI updates to max 2/sec
 };
 let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
+
+const DEFAULT_COMPUTE_SETTINGS = {
+  streamFirstK: 100,
+  progressIntervalS: 1.0,
+};
+let computeSettings = { ...DEFAULT_COMPUTE_SETTINGS };
 
 // Global run state tracking
 let isRunActive = false;
@@ -47,6 +56,14 @@ let recentRuns = [];
 let activeOverlay = null;
 let lastOverlayFocus = null;
 let checkpointCatalog = [];
+let computeNManuallyEdited = false;
+let currentComputeRepeats = 1;
+
+const COMPUTE_RECOMMENDED_N = {
+  segmented_sieve: 50000000,
+  simple_sieve: 20000000,
+  trial_division: 2000000,
+};
 
 // Fallback reason display strings
 const FALLBACK_REASONS = {
@@ -74,6 +91,34 @@ const savePollingSettings = () => {
     localStorage.setItem(POLLING_SETTINGS_KEY, JSON.stringify(pollingConfig));
   } catch (e) {
     console.warn("Failed to save polling settings:", e);
+  }
+};
+
+const clampNumber = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const loadComputeSettings = () => {
+  try {
+    const saved = localStorage.getItem(COMPUTE_SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      computeSettings = { ...DEFAULT_COMPUTE_SETTINGS, ...parsed };
+    }
+  } catch (e) {
+    console.warn("Failed to load compute settings:", e);
+  }
+  computeSettings.streamFirstK = clampNumber(Number(computeSettings.streamFirstK) || 0, 0, 5000);
+  computeSettings.progressIntervalS = clampNumber(
+    Number(computeSettings.progressIntervalS) || DEFAULT_COMPUTE_SETTINGS.progressIntervalS,
+    0.1,
+    60,
+  );
+};
+
+const saveComputeSettings = () => {
+  try {
+    localStorage.setItem(COMPUTE_SETTINGS_KEY, JSON.stringify(computeSettings));
+  } catch (e) {
+    console.warn("Failed to save compute settings:", e);
   }
 };
 
@@ -472,6 +517,33 @@ const buildMetricsHtml = (metrics, baselineMetrics) => {
     <div><strong>Gen tokens:</strong> ${tokens}</div>
     <div><strong>Tokens/s:</strong> ${tokS} ${tokSDelta}</div>
     <div><strong>Total:</strong> ${total} ${totalDelta}</div>
+  `;
+};
+
+const formatCount = (value) => {
+  if (value == null || Number.isNaN(value)) return "n/a";
+  return Number(value).toLocaleString();
+};
+
+const formatSeconds = (ms) => {
+  if (ms == null || Number.isNaN(ms)) return "n/a";
+  return `${(Number(ms) / 1000).toFixed(2)} s`;
+};
+
+const buildComputeMetricsHtml = (metrics) => {
+  if (!metrics) return `<span class="muted">No data</span>`;
+  const repeatTotal = metrics.repeat_total ?? metrics.repeats;
+  const repeatLine = repeatTotal && metrics.repeat_index
+    ? `<div><strong>Repeat:</strong> ${metrics.repeat_index}/${repeatTotal}</div>`
+    : "";
+  return `
+    <div><strong>Algorithm:</strong> ${metrics.algorithm ?? "n/a"}</div>
+    <div><strong>N:</strong> ${formatCount(metrics.n)}</div>
+    <div><strong>Primes:</strong> ${formatCount(metrics.primes_found)}</div>
+    <div><strong>Rate:</strong> ${formatMetric(metrics.primes_per_sec, " primes/s")}</div>
+    <div><strong>Elapsed:</strong> ${formatSeconds(metrics.elapsed_ms)}</div>
+    <div><strong>Threads:</strong> ${metrics.threads_requested ?? "n/a"} req / ${metrics.threads_used ?? "n/a"} used</div>
+    ${repeatLine}
   `;
 };
 
@@ -1096,7 +1168,7 @@ function getPreflightStatus() {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "excluded" });
     } else if (!machine.reachable) {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
-    } else if (!machine.has_selected_model) {
+    } else if (MODE !== "compute" && !machine.has_selected_model) {
       blocked.push({
         machine_id: machineId,
         label: machine.label,
@@ -1202,6 +1274,16 @@ function initSyncButtons(machines) {
   });
 }
 
+const isScrolledToBottom = (el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+
+const maybeAutoScrollOutput = (machineId) => {
+  if (viewingMode !== "live") return;
+  const pane = paneMap.get(machineId);
+  if (!pane) return;
+  if (outputScrollState.get(machineId) === false) return;
+  pane.out.scrollTop = pane.out.scrollHeight;
+};
+
 const setPaneContent = (machineId, { outText, metricsHtml, isMock }) => {
   const pane = paneMap.get(machineId);
   if (!pane) return;
@@ -1217,6 +1299,7 @@ const updateLivePane = (machineId, { outText, metricsHtml, isMock }) => {
   liveState.set(machineId, { outText, metricsHtml, isMock });
   if (viewingMode !== "live") return;
   setPaneContent(machineId, { outText, metricsHtml, isMock });
+  maybeAutoScrollOutput(machineId);
 };
 
 const refreshLiveDisplay = () => {
@@ -1327,22 +1410,40 @@ const renderRunToPanes = (run) => {
       return;
     }
 
-    const metricsData = {
-      model: entry.model ?? run.model,
-      engine: entry.engine,
-      fallback_reason: entry.fallback_reason,
-      ttft_ms: entry.ttft_ms,
-      tok_s: entry.tok_s,
-      total_ms: entry.total_ms,
-      tokens: entry.tokens,
-    };
-    const baselineMetrics = getBaselineMachine(machineId);
-    const metricsHtml = buildMetricsHtml(metricsData, baselineMetrics);
-    out.textContent = "Output not stored for past runs.";
+    let metricsHtml = `<span class="muted">No data</span>`;
+    let isMock = false;
+    if (run.type === "compute") {
+      metricsHtml = buildComputeMetricsHtml({
+        algorithm: entry.algorithm ?? run.settings?.algorithm,
+        n: entry.n ?? run.settings?.n,
+        threads_requested: entry.threads_requested ?? run.settings?.threads,
+        threads_used: entry.threads_used,
+        primes_found: entry.primes_found,
+        elapsed_ms: entry.elapsed_ms,
+        primes_per_sec: entry.primes_per_sec,
+        repeat_index: entry.repeat_index,
+        repeat_total: run.settings?.repeats,
+      });
+      out.textContent = "Output not stored for past runs.";
+    } else {
+      const metricsData = {
+        model: entry.model ?? run.model,
+        engine: entry.engine,
+        fallback_reason: entry.fallback_reason,
+        ttft_ms: entry.ttft_ms,
+        tok_s: entry.tok_s,
+        total_ms: entry.total_ms,
+        tokens: entry.tokens,
+      };
+      const baselineMetrics = getBaselineMachine(machineId);
+      metricsHtml = buildMetricsHtml(metricsData, baselineMetrics);
+      out.textContent = "Output not stored for past runs.";
+      isMock = entry.engine === "mock";
+    }
     setPaneContent(machineId, {
       outText: out.textContent,
       metricsHtml,
-      isMock: entry.engine === "mock",
+      isMock,
     });
   });
 };
@@ -1426,6 +1527,8 @@ const renderRecentRuns = () => {
     }
     if (run.type === "image") {
       badges.push('<span class="run-badge image">Image</span>');
+    } else if (run.type === "compute") {
+      badges.push('<span class="run-badge compute">Compute</span>');
     } else {
       badges.push('<span class="run-badge inference">Inference</span>');
     }
@@ -1493,6 +1596,14 @@ const loadRun = async (runId) => {
     const run = await response.json();
     if (run.type === "image") {
       window.location.href = `/image?run_id=${encodeURIComponent(runId)}`;
+      return;
+    }
+    if (run.type === "compute" && MODE !== "compute") {
+      window.location.href = `/compute?run_id=${encodeURIComponent(runId)}`;
+      return;
+    }
+    if (run.type !== "compute" && MODE === "compute") {
+      window.location.href = `/inference?run_id=${encodeURIComponent(runId)}`;
       return;
     }
     renderRunToPanes(run);
@@ -1574,6 +1685,10 @@ socket.on("connect", async () => {
       const metrics = document.getElementById(`metrics-${machine.machine_id}`);
       if (out && metrics) {
         paneMap.set(machine.machine_id, { out, metrics });
+        outputScrollState.set(machine.machine_id, true);
+        out.addEventListener("scroll", () => {
+          outputScrollState.set(machine.machine_id, isScrolledToBottom(out));
+        });
       }
       const utilSvg = document.getElementById(`sparkline-util-${machine.machine_id}`);
       const memSvg = document.getElementById(`sparkline-mem-${machine.machine_id}`);
@@ -1612,6 +1727,18 @@ socket.on("agent_event", (evt) => {
     });
   }
 
+  if (evt.type === "compute_line") {
+    const line = evt.payload?.line ?? "";
+    const current = liveOutput.get(evt.machine_id) || "";
+    const updated = current ? `${current}\n${line}` : line;
+    liveOutput.set(evt.machine_id, updated);
+    updateLivePane(evt.machine_id, {
+      outText: updated,
+      metricsHtml: pane.metrics.innerHTML,
+      isMock: false,
+    });
+  }
+
   if (evt.type === "job_done") {
     const payload = evt.payload || {};
     const engine = payload.engine ?? "n/a";
@@ -1637,6 +1764,33 @@ socket.on("agent_event", (evt) => {
     });
     markRunMachineDone(evt.machine_id);
 
+    fetchRecentRuns();
+  }
+
+  if (evt.type === "compute_done") {
+    const payload = evt.payload || {};
+    const metricsData = {
+      algorithm: payload.algorithm,
+      n: payload.n,
+      threads_requested: payload.threads_requested,
+      threads_used: payload.threads_used,
+      primes_found: payload.primes_found,
+      elapsed_ms: payload.elapsed_ms,
+      primes_per_sec: payload.primes_per_sec,
+      repeat_index: payload.repeat_index,
+      repeat_total: currentComputeRepeats,
+    };
+    liveMetrics.set(evt.machine_id, metricsData);
+    const metricsHtml = buildComputeMetricsHtml(metricsData);
+    const outText = payload.ok === false
+      ? `Compute failed: ${payload.error || "Unknown error"}`
+      : (liveOutput.get(evt.machine_id) || pane.out.textContent);
+    updateLivePane(evt.machine_id, {
+      outText,
+      metricsHtml,
+      isMock: false,
+    });
+    markRunMachineDone(evt.machine_id);
     fetchRecentRuns();
   }
 
@@ -1691,6 +1845,7 @@ optionsToggle?.addEventListener("click", () => {
   const isExpanded = document.body.classList.contains("options-expanded");
   setOptionsExpanded(!isExpanded);
 });
+
 
 const startRun = async () => {
   const { blocked, ready } = getPreflightStatus();
@@ -1747,9 +1902,114 @@ const startRun = async () => {
   }
 };
 
+const resolveRecommendedN = (algorithm) => COMPUTE_RECOMMENDED_N[algorithm] || COMPUTE_RECOMMENDED_N.segmented_sieve;
+
+const applyRecommendedN = (force = false) => {
+  const nInput = document.getElementById("compute-n");
+  const algorithmInput = document.getElementById("compute-algorithm");
+  if (!(nInput instanceof HTMLInputElement) || !(algorithmInput instanceof HTMLSelectElement)) return;
+  if (!force && computeNManuallyEdited) return;
+  const recommended = resolveRecommendedN(algorithmInput.value);
+  nInput.value = String(recommended);
+  computeNManuallyEdited = false;
+};
+
+const computeAlgorithmInput = document.getElementById("compute-algorithm");
+const computeNInput = document.getElementById("compute-n");
+const computeRecommendedButton = document.getElementById("compute-n-recommended");
+
+computeAlgorithmInput?.addEventListener("change", () => applyRecommendedN(false));
+computeNInput?.addEventListener("input", () => {
+  computeNManuallyEdited = true;
+});
+computeRecommendedButton?.addEventListener("click", () => applyRecommendedN(true));
+applyRecommendedN(false);
+
+const startCompute = async () => {
+  const { blocked, ready } = getPreflightStatus();
+
+  if (ready.length === 0) {
+    showToast("No ready machines available.", "info");
+    return;
+  }
+
+  const algorithmEl = document.getElementById("compute-algorithm");
+  const nEl = document.getElementById("compute-n");
+  const threadsEl = document.getElementById("compute-threads");
+  const repeatEl = document.getElementById("compute-repeat");
+  if (
+    !(algorithmEl instanceof HTMLSelectElement) ||
+    !(nEl instanceof HTMLInputElement) ||
+    !(threadsEl instanceof HTMLInputElement) ||
+    !(repeatEl instanceof HTMLInputElement)
+  ) {
+    showToast("Compute inputs not ready.", "error");
+    return;
+  }
+
+  const nValue = parseInt(nEl.value, 10);
+  if (Number.isNaN(nValue) || nValue < 10) {
+    showToast("N must be an integer ≥ 10.", "error");
+    return;
+  }
+
+  const threadsValue = Math.max(1, parseInt(threadsEl.value, 10) || 1);
+  const repeatsValue = Math.max(1, parseInt(repeatEl.value, 10) || 1);
+  currentComputeRepeats = repeatsValue;
+
+  beginRunTracking(ready.map((m) => m.machine_id));
+
+  const payload = {
+    algorithm: algorithmEl.value,
+    n: nValue,
+    threads: threadsValue,
+    repeats: repeatsValue,
+    stream_first_k: computeSettings.streamFirstK,
+    progress_interval_s: computeSettings.progressIntervalS,
+    machine_ids: ready.map((m) => m.machine_id),
+  };
+
+  paneMap.forEach(({ out, metrics }, machineId) => {
+    const isBlocked = blocked.some((b) => b.machine_id === machineId);
+    if (isBlocked) {
+      out.textContent = "Skipped (not ready)";
+      metrics.innerHTML = `<span class="muted">Machine not ready</span>`;
+      liveOutput.set(machineId, out.textContent);
+    } else {
+      out.textContent = "Starting compute…";
+      metrics.innerHTML = `<span class="muted">Queued…</span>`;
+      liveOutput.set(machineId, "");
+    }
+    updateLivePane(machineId, {
+      outText: out.textContent,
+      metricsHtml: metrics.innerHTML,
+      isMock: false,
+    });
+  });
+
+  try {
+    const response = await fetch("/api/compute/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    liveRunId = data.run_id;
+    handleJobResults(data.results || data);
+    fetchRecentRuns();
+    returnToLive();
+  } catch (error) {
+    console.error("Failed to start compute jobs", error);
+  }
+};
+
 // Run button with preflight validation
 runButton?.addEventListener("click", async () => {
-  await startRun();
+  if (MODE === "compute") {
+    await startCompute();
+  } else {
+    await startRun();
+  }
 });
 
 historyButton?.addEventListener("click", async () => {
@@ -1784,6 +2044,10 @@ settingsButton?.addEventListener("click", async () => {
     const activePollInput = document.getElementById("active-poll-interval");
     if (idlePollInput) idlePollInput.value = Math.round(pollingConfig.idlePollIntervalMs / 1000);
     if (activePollInput) activePollInput.value = pollingConfig.activePollIntervalMs;
+    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeIntervalInput = document.getElementById("compute-progress-interval");
+    if (computeStreamInput) computeStreamInput.value = computeSettings.streamFirstK;
+    if (computeIntervalInput) computeIntervalInput.value = computeSettings.progressIntervalS;
     setPolicyFeedback("", "");
     toggleOverlay("settings");
   } catch (error) {
@@ -1863,6 +2127,17 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
     }
     savePollingSettings();
     restartPolling();
+    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeIntervalInput = document.getElementById("compute-progress-interval");
+    if (computeStreamInput) {
+      computeSettings.streamFirstK = clampNumber(parseInt(computeStreamInput.value, 10) || 0, 0, 5000);
+      computeStreamInput.value = computeSettings.streamFirstK;
+    }
+    if (computeIntervalInput) {
+      computeSettings.progressIntervalS = clampNumber(parseFloat(computeIntervalInput.value) || 1, 0.1, 60);
+      computeIntervalInput.value = computeSettings.progressIntervalS;
+    }
+    saveComputeSettings();
     if (data.missing && Object.keys(data.missing).length > 0) {
       const lines = Object.entries(data.missing).map(
         ([model, machines]) => `${model}: missing on ${machines.join(", ")}`,
@@ -1940,6 +2215,7 @@ document.addEventListener("keydown", (event) => {
 const promptEl = document.getElementById("prompt");
 promptEl?.addEventListener("keydown", async (event) => {
   if (event.isComposing) return;
+  if (MODE === "compute") return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     if (runButton?.disabled) return;
@@ -2151,6 +2427,7 @@ document.getElementById("run-view-export-json")?.addEventListener("click", () =>
 // Initialize adaptive polling (replaces fixed setInterval)
 // Load polling settings and start adaptive polling
 loadPollingSettings();
+loadComputeSettings();
 scheduleStatusPoll();
 
 const params = new URLSearchParams(window.location.search);

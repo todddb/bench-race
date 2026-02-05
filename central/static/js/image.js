@@ -9,6 +9,7 @@ const COMFY_SETTINGS_ENDPOINT = "/api/settings/comfy";
 const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
 const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
+const COMPUTE_SETTINGS_KEY = "bench-race-compute-settings";
 
 // Adaptive polling configuration
 const DEFAULT_POLLING_CONFIG = {
@@ -17,6 +18,12 @@ const DEFAULT_POLLING_CONFIG = {
   uiUpdateThrottleMs: 500,     // Throttle UI updates to max 2/sec
 };
 let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
+
+const DEFAULT_COMPUTE_SETTINGS = {
+  streamFirstK: 100,
+  progressIntervalS: 1.0,
+};
+let computeSettings = { ...DEFAULT_COMPUTE_SETTINGS };
 
 // Preview settings
 const DEFAULT_PREVIEW_CONFIG = {
@@ -77,6 +84,34 @@ const savePreviewSettings = () => {
     localStorage.setItem(PREVIEW_SETTINGS_KEY, JSON.stringify(previewConfig));
   } catch (e) {
     console.warn("Failed to save preview settings:", e);
+  }
+};
+
+const clampNumber = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const loadComputeSettings = () => {
+  try {
+    const saved = localStorage.getItem(COMPUTE_SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      computeSettings = { ...DEFAULT_COMPUTE_SETTINGS, ...parsed };
+    }
+  } catch (e) {
+    console.warn("Failed to load compute settings:", e);
+  }
+  computeSettings.streamFirstK = clampNumber(Number(computeSettings.streamFirstK) || 0, 0, 5000);
+  computeSettings.progressIntervalS = clampNumber(
+    Number(computeSettings.progressIntervalS) || DEFAULT_COMPUTE_SETTINGS.progressIntervalS,
+    0.1,
+    60,
+  );
+};
+
+const saveComputeSettings = () => {
+  try {
+    localStorage.setItem(COMPUTE_SETTINGS_KEY, JSON.stringify(computeSettings));
+  } catch (e) {
+    console.warn("Failed to save compute settings:", e);
   }
 };
 
@@ -816,6 +851,8 @@ const renderRecentRuns = () => {
     const badges = [];
     if (run.type === "image") {
       badges.push('<span class="run-badge image">Image</span>');
+    } else if (run.type === "compute") {
+      badges.push('<span class="run-badge compute">Compute</span>');
     } else {
       badges.push('<span class="run-badge inference">Inference</span>');
     }
@@ -914,7 +951,8 @@ const loadRun = async (runId) => {
     if (!response.ok) return;
     const run = await response.json();
     if (run.type && run.type !== "image") {
-      window.location.href = `/inference?run_id=${encodeURIComponent(runId)}`;
+      const target = run.type === "compute" ? "compute" : "inference";
+      window.location.href = `/${target}?run_id=${encodeURIComponent(runId)}`;
       return;
     }
     renderRunToPanes(run);
@@ -1036,10 +1074,14 @@ settingsButton?.addEventListener("click", async () => {
     const idlePollInput = document.getElementById("idle-poll-interval");
     const activePollInput = document.getElementById("active-poll-interval");
     const previewThrottleInput = document.getElementById("preview-throttle");
+    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeIntervalInput = document.getElementById("compute-progress-interval");
     if (enableLivePreviewInput) enableLivePreviewInput.checked = previewConfig.enableLivePreview;
     if (idlePollInput) idlePollInput.value = Math.round(pollingConfig.idlePollIntervalMs / 1000);
     if (activePollInput) activePollInput.value = pollingConfig.activePollIntervalMs;
     if (previewThrottleInput) previewThrottleInput.value = previewConfig.previewThrottleMs;
+    if (computeStreamInput) computeStreamInput.value = computeSettings.streamFirstK;
+    if (computeIntervalInput) computeIntervalInput.value = computeSettings.progressIntervalS;
     setPolicyFeedback("", "");
     toggleOverlay("settings");
   } catch (error) {
@@ -1124,7 +1166,18 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
     if (previewThrottleInput) {
       previewConfig.previewThrottleMs = parseInt(previewThrottleInput.value, 10);
     }
+    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeIntervalInput = document.getElementById("compute-progress-interval");
+    if (computeStreamInput) {
+      computeSettings.streamFirstK = clampNumber(parseInt(computeStreamInput.value, 10) || 0, 0, 5000);
+      computeStreamInput.value = computeSettings.streamFirstK;
+    }
+    if (computeIntervalInput) {
+      computeSettings.progressIntervalS = clampNumber(parseFloat(computeIntervalInput.value) || 1, 0.1, 60);
+      computeIntervalInput.value = computeSettings.progressIntervalS;
+    }
     savePreviewSettings();
+    saveComputeSettings();
     try {
       localStorage.setItem(POLLING_SETTINGS_KEY, JSON.stringify(pollingConfig));
     } catch (e) {
@@ -1481,6 +1534,7 @@ initResetButtons();
 // Initialize settings and adaptive polling
 loadPollingSettings();
 loadPreviewSettings();
+loadComputeSettings();
 loadCheckpointCatalog();
 fetchStatus();
 scheduleStatusPoll();

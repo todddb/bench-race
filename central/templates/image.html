@@ -12,6 +12,7 @@
         <h1 class="app-title">Generative AI Benchmark Race</h1>
         <div class="app-actions">
           <nav class="app-nav" aria-label="Benchmark modes">
+            <a class="nav-link" href="/compute">Compute</a>
             <a class="nav-link" href="/inference">Inference</a>
             <a class="nav-link active" href="/image">Image</a>
           </nav>
@@ -266,6 +267,20 @@
                 <input type="number" class="setting-input" id="preview-throttle" value="1000" min="100" max="5000" />
               </div>
               <div class="setting-helper">Lower values show more preview frames but use more resources.</div>
+            </div>
+          </div>
+          <div class="drawer-section">
+            <h4 class="drawer-section-title">Compute</h4>
+            <div class="polling-settings">
+              <div class="setting-row">
+                <label class="setting-label" for="compute-stream-first-k">Compute: primes to stream</label>
+                <input type="number" class="setting-input" id="compute-stream-first-k" value="100" min="0" max="5000" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="compute-progress-interval">Compute: progress update interval (s)</label>
+                <input type="number" class="setting-input" id="compute-progress-interval" value="1" min="0.1" step="0.1" />
+              </div>
+              <div class="setting-helper">Controls output volume for compute benchmarks.</div>
             </div>
           </div>
         </div>

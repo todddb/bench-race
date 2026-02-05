@@ -2,18 +2,18 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>bench-race</title>
+    <title>bench-race · compute</title>
     <link rel="stylesheet" href="/static/css/app.css" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   </head>
-  <body data-mode="inference">
+  <body data-mode="compute">
     <div class="container">
       <header class="app-header">
         <h1 class="app-title">Generative AI Benchmark Race</h1>
         <div class="app-actions">
           <nav class="app-nav" aria-label="Benchmark modes">
-            <a class="nav-link" href="/compute">Compute</a>
-            <a class="nav-link active" href="/inference">Inference</a>
+            <a class="nav-link active" href="/compute">Compute</a>
+            <a class="nav-link" href="/inference">Inference</a>
             <a class="nav-link" href="/image">Image</a>
           </nav>
           <div id="run-active-indicator" title="No active runs"></div>
@@ -35,12 +35,35 @@
                 <div class="controls-left">
                   <div class="prompt-section">
                     <div class="prompt-header">
-                      <label for="prompt" class="control-label">Prompt</label>
-                      <button id="generate-sample" class="btn btn-secondary btn-generate" type="button">Generate Sample</button>
+                      <label for="compute-algorithm" class="control-label">Compute parameters</label>
                     </div>
-                    <textarea id="prompt" class="prompt" rows="6">Summarize the key tradeoffs between unified memory and discrete VRAM for local LLM inference.</textarea>
+                    <div class="compute-params">
+                      <div class="control-field">
+                        <label for="compute-algorithm" class="control-label">Algorithm</label>
+                        <select id="compute-algorithm">
+                          <option value="segmented_sieve" selected>Segmented Sieve (default)</option>
+                          <option value="simple_sieve">Simple Sieve</option>
+                          <option value="trial_division">Trial Division (slow)</option>
+                        </select>
+                      </div>
+                      <div class="control-field">
+                        <label for="compute-n" class="control-label">Count primes ≤ N</label>
+                        <div class="input-with-button">
+                          <input id="compute-n" type="number" min="10" value="50000000" />
+                          <button id="compute-n-recommended" class="btn btn-secondary btn-small" type="button">Use recommended N</button>
+                        </div>
+                      </div>
+                      <div class="control-field">
+                        <label for="compute-threads" class="control-label">Threads</label>
+                        <input id="compute-threads" type="number" min="1" value="1" />
+                      </div>
+                      <div class="control-field">
+                        <label for="compute-repeat" class="control-label">Repeats</label>
+                        <input id="compute-repeat" type="number" min="1" value="1" />
+                      </div>
+                    </div>
                     <div class="prompt-helper helper">
-                      Enter a real-world prompt. Prefer multi-part tasks that require reasoning or code generation — these take longer and stress performance.
+                      Counts primes up to N. Higher N increases runtime.
                     </div>
                   </div>
 
@@ -53,43 +76,14 @@
                 </div>
 
                 <div class="controls-right">
-                  <div class="model-row control-field">
-                    <label for="model" class="control-label">Model</label>
-                    <select id="model">
-                      {% for model in model_options %}
-                      <option value="{{ model }}">{{ model }}</option>
-                      {% endfor %}
-                    </select>
-                    <div class="helper">Which model to run on each machine.</div>
-                  </div>
-
                   <button class="options-header options-toggle" id="options-toggle" type="button">
-                    <span class="control-label">Options</span>
+                    <span class="control-label">Notes</span>
                     <span class="options-caret">▶</span>
                   </button>
                   <div id="options-panel" class="options-grid">
                     <div class="control-field">
-                      <label for="max_tokens" class="control-label">Max tokens</label>
-                      <input id="max_tokens" type="number" value="256" />
-                      <div class="helper">Limits how long the response can be.</div>
-                    </div>
-
-                    <div class="control-field">
-                      <label for="num_ctx" class="control-label">Context</label>
-                      <input id="num_ctx" type="number" value="4096" />
-                      <div class="helper">How much conversation/prompt can fit. Larger uses more memory.</div>
-                    </div>
-
-                    <div class="control-field">
-                      <label for="temperature" class="control-label">Temperature</label>
-                      <input id="temperature" type="number" step="0.1" value="0.2" />
-                      <div class="helper">Higher = more creative, lower = more deterministic.</div>
-                    </div>
-
-                    <div class="control-field">
-                      <label for="repeat" class="control-label">Repeats</label>
-                      <input id="repeat" type="number" value="1" />
-                      <div class="helper">Run multiple times; first run may be slower due to cold cache.</div>
+                      <label class="control-label">About compute</label>
+                      <div class="helper">Compute mode benchmarks CPU prime counting. GPU metrics remain visible for parity.</div>
                     </div>
                   </div>
                 </div>
