@@ -17,6 +17,7 @@ For runtime sampling and model-fit scoring details, see `docs/metrics_and_fit.md
 - [Scripts & Process Management](#scripts--process-management)
 - [Running & Testing](#running--testing)
 - [Multi-Machine Runs](#multi-machine-runs)
+- [Compute Benchmarks](#compute-benchmarks)
 - [Results & Persistence](#results--persistence)
 - [Troubleshooting](#troubleshooting)
 - [Development Workflow](#development-workflow)
@@ -39,6 +40,7 @@ Use cases:
 - Test different quantization levels (Q4 vs Q8)
 - Benchmark different model sizes on the same hardware
 - Validate inference performance across a fleet of machines
+- Compare raw CPU throughput with prime counting benchmarks
 
 ---
 
@@ -551,6 +553,22 @@ The UI provides:
 4. Click "Run (LLM)"
 5. Watch results stream in real-time for all machines
 6. Compare metrics in the summary
+
+---
+
+## Compute Benchmarks
+
+Compute mode counts primes ≤ N to measure raw CPU throughput per agent. The UI streams the first *K* primes for visual feedback, then switches to periodic progress updates to avoid flooding the output panel.
+
+**Recommended demo presets (2–30s runtimes on typical hardware):**
+- Segmented Sieve: `N = 50_000_000`
+- Simple Sieve: `N = 20_000_000`
+- Trial Division: `N = 2_000_000`
+
+**Streaming behavior:**
+- The first K primes (default 100) are emitted as `prime[1]=2`, `prime[2]=3`, ...
+- After K, the agent emits progress lines at the configured interval (default 1s).
+- A final summary reports the total primes, elapsed time, and primes/sec.
 
 ---
 

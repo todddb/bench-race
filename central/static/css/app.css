@@ -47,6 +47,9 @@ button { font-family: inherit; }
 .prompt-section { display: flex; flex-direction: column; gap: 8px; }
 .prompt-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .prompt-helper { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.compute-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.input-with-button { display: flex; gap: 8px; align-items: center; }
+.input-with-button input { flex: 1; }
 .btn-generate { padding: 6px 10px; font-size: 13px; border-radius: 10px; }
 .options-header { background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
 .options-toggle { display: inline-flex; align-items: center; gap: 8px; line-height: 1; }
@@ -326,6 +329,7 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .recent-run-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .run-badge.image { background: #e0f2fe; color: #075985; }
 .run-badge.inference { background: #ede9fe; color: #4338ca; }
+.run-badge.compute { background: #fef9c3; color: #854d0e; }
 .run-badge { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 999px; }
 .run-badge.warning { background: #fee2e2; color: #991b1b; }
 .run-badge.baseline { background: #dcfce7; color: #166534; }

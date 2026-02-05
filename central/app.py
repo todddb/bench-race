@@ -697,6 +697,70 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
         _check_run_complete(run_id)
         return
 
+    if event_type == "compute_done":
+        with RUN_LOCK:
+            job_info = JOB_RUN_MAP.get(job_id)
+            if not job_info:
+                return
+            run_id = job_info["run_id"]
+            record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+            if not record:
+                return
+            machine_id = job_info["machine_id"]
+            payload = event.get("payload") or {}
+            machine_entry = next(
+                (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                None,
+            )
+            if not machine_entry:
+                machine_entry = {"machine_id": machine_id, "label": job_info.get("label"), "results": []}
+                record.setdefault("machines", []).append(machine_entry)
+            results = machine_entry.setdefault("results", [])
+            repeat_index = payload.get("repeat_index") or job_info.get("repeat_index")
+            result_entry = {
+                "repeat_index": repeat_index,
+                "algorithm": payload.get("algorithm"),
+                "n": payload.get("n"),
+                "threads_requested": payload.get("threads_requested"),
+                "threads_used": payload.get("threads_used"),
+                "primes_found": payload.get("primes_found"),
+                "elapsed_ms": payload.get("elapsed_ms"),
+                "primes_per_sec": payload.get("primes_per_sec"),
+                "ok": payload.get("ok", True),
+                "error": payload.get("error"),
+            }
+            existing = next((r for r in results if r.get("repeat_index") == repeat_index), None)
+            if existing:
+                existing.update(result_entry)
+            else:
+                results.append(result_entry)
+            repeat_total = int(record.get("settings", {}).get("repeats", 1))
+            status = "running"
+            if payload.get("ok", True) is False:
+                status = "error"
+            elif len(results) >= repeat_total:
+                status = "complete"
+            machine_entry.update(
+                {
+                    "status": status,
+                    "algorithm": payload.get("algorithm"),
+                    "n": payload.get("n"),
+                    "threads_requested": payload.get("threads_requested"),
+                    "threads_used": payload.get("threads_used"),
+                    "primes_found": payload.get("primes_found"),
+                    "elapsed_ms": payload.get("elapsed_ms"),
+                    "primes_per_sec": payload.get("primes_per_sec"),
+                    "repeat_index": repeat_index,
+                    "error": payload.get("error"),
+                }
+            )
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            RUN_CACHE[run_id] = record
+            _write_run_record(record)
+            JOB_RUN_MAP.pop(job_id, None)
+        _check_run_complete(run_id)
+        return
+
     if event_type.startswith("image_"):
         with RUN_LOCK:
             job_info = JOB_RUN_MAP.get(job_id)
@@ -784,6 +848,40 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
         if event_type in ("image_complete", "image_error"):
             _check_run_complete(run_id)
         return
+
+
+def _record_compute_error(run_id: str, machine_id: str, job_id: str, error: str, repeat_index: Optional[int]) -> None:
+    with RUN_LOCK:
+        record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+        if not record:
+            return
+        machine_entry = next(
+            (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+            None,
+        )
+        if not machine_entry:
+            machine_entry = {"machine_id": machine_id, "results": []}
+            record.setdefault("machines", []).append(machine_entry)
+        results = machine_entry.setdefault("results", [])
+        results.append(
+            {
+                "repeat_index": repeat_index,
+                "ok": False,
+                "error": error,
+            }
+        )
+        machine_entry.update(
+            {
+                "status": "error",
+                "error": error,
+                "repeat_index": repeat_index,
+            }
+        )
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        RUN_CACHE[run_id] = record
+        _write_run_record(record)
+        JOB_RUN_MAP.pop(job_id, None)
+    _check_run_complete(run_id)
 
 
 def _sample_prompt_rate_limited(remote_addr: str) -> bool:
@@ -1244,6 +1342,11 @@ def inference():
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
+@app.get("/compute")
+def compute():
+    return render_template("compute.html", machines=MACHINES)
+
+
 @app.get("/image")
 def image():
     settings = _load_comfy_settings()
@@ -1646,38 +1749,79 @@ def api_run_export_csv(run_id: str):
         return jsonify({"error": "Run not found"}), 404
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(
-        [
-            "run_id",
-            "timestamp",
-            "model",
-            "machine_id",
-            "label",
-            "ttft_ms",
-            "tok_s",
-            "total_ms",
-            "tokens",
-            "engine",
-            "model_fit_label",
-        ]
-    )
-    for machine in record.get("machines") or []:
-        model_fit = machine.get("model_fit") or {}
+    if record.get("type") == "compute":
         writer.writerow(
             [
-                record.get("run_id"),
-                record.get("timestamp"),
-                record.get("model"),
-                machine.get("machine_id"),
-                machine.get("label"),
-                machine.get("ttft_ms"),
-                machine.get("tok_s"),
-                machine.get("total_ms"),
-                machine.get("tokens"),
-                machine.get("engine"),
-                model_fit.get("label") or model_fit.get("status"),
+                "run_id",
+                "timestamp",
+                "algorithm",
+                "n",
+                "machine_id",
+                "label",
+                "repeat_index",
+                "primes_found",
+                "elapsed_ms",
+                "primes_per_sec",
+                "threads_requested",
+                "threads_used",
+                "ok",
+                "error",
             ]
         )
+        for machine in record.get("machines") or []:
+            results = machine.get("results") or [machine]
+            for result in results:
+                writer.writerow(
+                    [
+                        record.get("run_id"),
+                        record.get("timestamp"),
+                        result.get("algorithm") or record.get("settings", {}).get("algorithm"),
+                        result.get("n") or record.get("settings", {}).get("n"),
+                        machine.get("machine_id"),
+                        machine.get("label"),
+                        result.get("repeat_index"),
+                        result.get("primes_found"),
+                        result.get("elapsed_ms"),
+                        result.get("primes_per_sec"),
+                        result.get("threads_requested"),
+                        result.get("threads_used"),
+                        result.get("ok"),
+                        result.get("error"),
+                    ]
+                )
+    else:
+        writer.writerow(
+            [
+                "run_id",
+                "timestamp",
+                "model",
+                "machine_id",
+                "label",
+                "ttft_ms",
+                "tok_s",
+                "total_ms",
+                "tokens",
+                "engine",
+                "model_fit_label",
+            ]
+        )
+        for machine in record.get("machines") or []:
+            model_fit = machine.get("model_fit") or {}
+            writer.writerow(
+                [
+                    record.get("run_id"),
+                    record.get("timestamp"),
+                    record.get("model"),
+                    machine.get("machine_id"),
+                    machine.get("label"),
+                    machine.get("ttft_ms"),
+                    machine.get("tok_s"),
+                    machine.get("total_ms"),
+                    machine.get("tokens"),
+                    machine.get("engine"),
+                    model_fit.get("label") or model_fit.get("status"),
+                ]
+            )
     return Response(
         output.getvalue(),
         mimetype="text/csv",
@@ -1999,6 +2143,158 @@ def api_start_llm():
     active_machine_ids = [r["machine_id"] for r in results if "job" in r]
     if active_machine_ids:
         _mark_run_active(run_id, "inference", active_machine_ids)
+
+    return jsonify({"run_id": run_id, "results": results})
+
+
+def _dispatch_compute_job(
+    machine: Dict[str, Any],
+    run_id: str,
+    job_id: str,
+    payload: Dict[str, Any],
+    repeat_index: int,
+) -> None:
+    try:
+        r = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/api/compute",
+            json=payload,
+            timeout=600,
+        )
+        r.raise_for_status()
+    except Exception as exc:
+        log.warning("Compute job failed to start for %s: %s", machine.get("machine_id"), exc)
+        _record_compute_error(run_id, machine.get("machine_id"), job_id, str(exc), repeat_index)
+
+
+@app.post("/api/compute/run")
+def api_compute_run():
+    payload = request.get_json(force=True) or {}
+
+    algorithm = payload.get("algorithm", "segmented_sieve")
+    n = int(payload.get("n", 50_000_000))
+    threads = int(payload.get("threads", 1))
+    repeats = int(payload.get("repeats", 1))
+    stream_first_k = int(payload.get("stream_first_k", 100))
+    progress_interval_s = float(payload.get("progress_interval_s", 1.0))
+    machine_ids = payload.get("machine_ids")
+
+    algorithm_labels = {
+        "segmented_sieve": "Segmented Sieve",
+        "simple_sieve": "Simple Sieve",
+        "trial_division": "Trial Division",
+    }
+    if algorithm not in algorithm_labels:
+        return jsonify({"error": "Invalid algorithm"}), 400
+    if n < 10:
+        return jsonify({"error": "n must be >= 10"}), 400
+    if repeats < 1:
+        return jsonify({"error": "repeats must be >= 1"}), 400
+
+    threads = max(1, threads)
+    stream_first_k = max(0, min(stream_first_k, 5000))
+    progress_interval_s = max(0.1, progress_interval_s)
+
+    run_timestamp = datetime.now(timezone.utc)
+    run_id = _new_run_id(run_timestamp)
+    algorithm_label = algorithm_labels[algorithm]
+
+    run_record: Dict[str, Any] = {
+        "run_id": run_id,
+        "timestamp": run_timestamp.isoformat(),
+        "type": "compute",
+        "model": algorithm_label,
+        "prompt_text": f"Count primes ≤ {n:,} ({algorithm_label})",
+        "settings": {
+            "algorithm": algorithm,
+            "n": n,
+            "threads": threads,
+            "repeats": repeats,
+            "stream_first_k": stream_first_k,
+            "progress_interval_s": progress_interval_s,
+            "machine_ids": machine_ids,
+        },
+        "central_git_sha": _current_git_sha(),
+        "machines": [],
+    }
+
+    results = []
+    active_machine_ids = []
+    for m in MACHINES:
+        if m.get("excluded", False):
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "skipped",
+                    "reason": "excluded",
+                }
+            )
+            results.append({
+                "machine_id": m.get("machine_id"),
+                "skipped": True,
+                "reason": "excluded",
+            })
+            continue
+
+        if machine_ids is not None and m.get("machine_id") not in machine_ids:
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "skipped",
+                    "reason": "not in ready list",
+                }
+            )
+            results.append({
+                "machine_id": m.get("machine_id"),
+                "skipped": True,
+                "reason": "not in ready list",
+            })
+            continue
+
+        active_machine_ids.append(m.get("machine_id"))
+        run_record["machines"].append(
+            {
+                "machine_id": m.get("machine_id"),
+                "label": m.get("label"),
+                "status": "pending",
+                "results": [],
+            }
+        )
+        results.append({"machine_id": m.get("machine_id"), "ok": True})
+
+        for repeat_index in range(1, repeats + 1):
+            job_id = str(uuid.uuid4())
+            job_payload = {
+                "job_id": job_id,
+                "algorithm": algorithm,
+                "n": n,
+                "threads": threads,
+                "repeat_index": repeat_index,
+                "stream_first_k": stream_first_k,
+                "progress_interval_s": progress_interval_s,
+            }
+            with RUN_LOCK:
+                JOB_RUN_MAP[job_id] = {
+                    "run_id": run_id,
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label", ""),
+                    "repeat_index": repeat_index,
+                }
+            thread = threading.Thread(
+                target=_dispatch_compute_job,
+                args=(m, run_id, job_id, job_payload, repeat_index),
+                daemon=True,
+            )
+            thread.start()
+
+    with RUN_LOCK:
+        RUN_CACHE[run_id] = run_record
+        _write_run_record(run_record)
+        _prune_old_runs()
+
+    if active_machine_ids:
+        _mark_run_active(run_id, "compute", active_machine_ids)
 
     return jsonify({"run_id": run_id, "results": results})
 
