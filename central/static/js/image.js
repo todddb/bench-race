@@ -662,9 +662,130 @@ const updateCheckpointLabel = (checkpointId) => {
       label = found.label || found.name || checkpointId;
     }
   }
-  document.querySelectorAll(".model-fit").forEach((el) => {
+  document.querySelectorAll(".model-fit-checkpoint").forEach((el) => {
     el.textContent = `Checkpoint: ${label}`;
   });
+};
+
+// ======================================
+// Progress bar management
+// ======================================
+const showProgress = (machineId, stage, percent, lastUpdated) => {
+  const container = document.getElementById(`progress-${machineId}`);
+  if (!container) return;
+  container.classList.remove("hidden");
+  const fill = document.getElementById(`progress-fill-${machineId}`);
+  const stageEl = document.getElementById(`progress-stage-${machineId}`);
+  const percentEl = document.getElementById(`progress-percent-${machineId}`);
+  const updatedEl = document.getElementById(`last-updated-${machineId}`);
+  if (fill) fill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+  if (stageEl) stageEl.textContent = stage;
+  if (percentEl) percentEl.textContent = `${Math.round(percent)}%`;
+  if (updatedEl && lastUpdated) {
+    const ago = Math.round((Date.now() - lastUpdated) / 1000);
+    updatedEl.textContent = ago <= 1 ? "Just now" : `${ago}s ago`;
+  }
+};
+
+const hideProgress = (machineId) => {
+  const container = document.getElementById(`progress-${machineId}`);
+  if (container) container.classList.add("hidden");
+};
+
+const resetProgress = (machineId) => {
+  showProgress(machineId, "Pending", 0, null);
+};
+
+// ======================================
+// Checkpoint fit badge
+// ======================================
+const CHECKPOINT_PEAK_VRAM_BYTES = {
+  // Rough estimates of peak VRAM for common checkpoints
+  "sd_xl_base_1.0.safetensors": 8 * 1024 ** 3,  // ~8 GB
+  "sd_xl_refiner_1.0.safetensors": 8 * 1024 ** 3,
+};
+const DEFAULT_CHECKPOINT_PEAK_VRAM = 6 * 1024 ** 3;  // 6 GB fallback
+
+const updateFitBadge = (machineId, machine) => {
+  const badge = document.getElementById(`fit-badge-${machineId}`);
+  if (!badge) return;
+
+  // Get machine memory from capabilities
+  const caps = machine.capabilities || {};
+  const vramBytes = caps.gpu_vram_bytes || caps.total_system_ram_bytes || machine.total_system_ram_bytes || 0;
+  if (!vramBytes) {
+    badge.className = "checkpoint-fit-badge fit-unknown";
+    badge.textContent = "?";
+    badge.title = "Memory info unavailable";
+    return;
+  }
+
+  // Get checkpoint filename from current selection
+  const checkpointId = document.getElementById("checkpoint")?.value || "";
+  const checkpointItem = checkpointCatalog.find((item) => (item.id || item.name) === checkpointId);
+  const filename = checkpointItem?.filename || "";
+  const peakVram = CHECKPOINT_PEAK_VRAM_BYTES[filename] || DEFAULT_CHECKPOINT_PEAK_VRAM;
+
+  const usableVram = vramBytes * 0.9;
+  const ratio = usableVram / peakVram;
+
+  let fitClass, fitLabel, fitTooltip;
+  if (ratio >= 1.2) {
+    fitClass = "fit-good";
+    fitLabel = "Good";
+    fitTooltip = `Fits comfortably (${(ratio).toFixed(1)}x headroom)`;
+  } else if (ratio >= 1.0) {
+    fitClass = "fit-risk";
+    fitLabel = "Tight";
+    fitTooltip = `May be tight (${(ratio).toFixed(1)}x ratio)`;
+  } else {
+    fitClass = "fit-fail";
+    fitLabel = "OOM Risk";
+    fitTooltip = `May run out of memory (${(ratio).toFixed(1)}x ratio)`;
+  }
+
+  badge.className = `checkpoint-fit-badge ${fitClass}`;
+  badge.textContent = fitLabel;
+  badge.title = fitTooltip;
+};
+
+// ======================================
+// ETA estimation
+// ======================================
+const BASE_PIXELS = 512 * 512;
+const BASE_STEPS = 10;
+const BASE_TIME_S = 5; // baseline ~5s for 512x512 @ 10 steps on a fast GPU
+
+const computeETA = () => {
+  const steps = parseInt(document.getElementById("steps")?.value || "10", 10);
+  const resolution = document.getElementById("resolution")?.value || "512x512";
+  const numImages = parseInt(document.getElementById("num-images")?.value || "1", 10);
+  const repeat = parseInt(document.getElementById("repeat")?.value || "1", 10);
+  const [w, h] = resolution.split("x").map(Number);
+  const pixels = w * h;
+
+  // Scaling model: ETA ≈ baseline * (pixels/base_pixels) * (steps/base_steps) * numImages * repeat
+  const etaPerImage = BASE_TIME_S * (pixels / BASE_PIXELS) * (steps / BASE_STEPS);
+  const totalEta = etaPerImage * numImages * repeat;
+
+  const etaDisplay = document.getElementById("eta-display");
+  const etaValue = document.getElementById("eta-value");
+  const etaBreakdown = document.getElementById("eta-breakdown");
+
+  if (etaDisplay && etaValue) {
+    etaDisplay.style.display = "block";
+    if (totalEta < 60) {
+      etaValue.textContent = `~${Math.round(totalEta)}s`;
+    } else {
+      const mins = Math.floor(totalEta / 60);
+      const secs = Math.round(totalEta % 60);
+      etaValue.textContent = `~${mins}m ${secs}s`;
+    }
+  }
+  if (etaBreakdown) {
+    etaBreakdown.textContent = `${w}x${h} @ ${steps} steps × ${numImages} images × ${repeat} repeats`;
+  }
+  return totalEta;
 };
 
 const fetchStatus = async () => {
@@ -695,6 +816,8 @@ const fetchStatus = async () => {
           syncButton.classList.add("hidden");
         }
       }
+      // Update checkpoint fit badge
+      updateFitBadge(m.machine_id, m);
     });
     const banner = document.getElementById("preflight-banner");
     if (banner) {
@@ -738,13 +861,16 @@ const handleJobResults = (results) => {
   if (!Array.isArray(results)) return;
   results.forEach((r) => {
     if (r.error) {
+      hideProgress(r.machine_id);
       setPaneMetrics(r.machine_id, `<span class="muted">Error: ${r.error}</span>`);
       return;
     }
     if (r.skipped) {
+      hideProgress(r.machine_id);
       setPaneMetrics(r.machine_id, `<span class="muted">Skipped</span>`);
       return;
     }
+    showProgress(r.machine_id, "Queued", 0, Date.now());
     setPaneMetrics(r.machine_id, `<span class="muted">Job started…</span>`);
   });
 };
@@ -775,6 +901,8 @@ const startRun = async () => {
 
   paneMap.forEach((_, machineId) => {
     setPaneMetrics(machineId, `<span class="muted">Queued…</span>`);
+    showProgress(machineId, "Queued", 0, Date.now());
+    document.getElementById(`pane-${machineId}`)?.classList.remove("error");
   });
 
   try {
@@ -944,9 +1072,13 @@ const renderRunToPanes = (run) => {
     `;
     setPaneMetrics(machineId, metricsHtml);
     if (entry.status === "error") {
+      hideProgress(machineId);
       setPaneStatus(machineId, "offline", "Error");
     } else if (entry.status === "complete") {
+      showProgress(machineId, "Complete", 100, null);
       setPaneStatus(machineId, "ready", "Complete");
+    } else {
+      hideProgress(machineId);
     }
   });
 };
@@ -1330,10 +1462,22 @@ socket.on("agent_event", (event) => {
     return;
   }
 
-  if (event.type === "image_progress") {
+  if (event.type === "image_started") {
+    showProgress(machineId, "Generating", 0, Date.now());
     setPaneMetrics(
       machineId,
-      `<div><strong>Progress:</strong> ${payload.step ?? 0}/${payload.total_steps ?? 0}</div>`,
+      `<div><strong>Queue latency:</strong> ${formatMetric(payload.queue_latency_ms, " ms")}</div>`,
+    );
+    setPaneStatus(machineId, "running", "Running");
+  }
+  if (event.type === "image_progress") {
+    const step = payload.step ?? 0;
+    const totalSteps = payload.total_steps ?? 0;
+    const pct = totalSteps > 0 ? (step / totalSteps) * 100 : 0;
+    showProgress(machineId, `Step ${step}/${totalSteps}`, pct, Date.now());
+    setPaneMetrics(
+      machineId,
+      `<div><strong>Progress:</strong> ${step}/${totalSteps}</div>`,
     );
   }
   if (event.type === "image_preview") {
@@ -1348,6 +1492,7 @@ socket.on("agent_event", (event) => {
       // Force show final image even if live preview is disabled
       setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`, true);
     }
+    showProgress(machineId, "Complete", 100, Date.now());
     const metricsHtml = `
       <div><strong>Queue:</strong> ${formatMetric(payload.queue_latency_ms, " ms")}</div>
       <div><strong>Gen:</strong> ${formatMetric(payload.gen_time_ms, " ms")}</div>
@@ -1361,6 +1506,7 @@ socket.on("agent_event", (event) => {
     setPaneStatus(machineId, "ready", "Complete");
   }
   if (event.type === "image_error") {
+    hideProgress(machineId);
     const remediation = Array.isArray(payload.remediation) && payload.remediation.length
       ? `<ul class="remediation">${payload.remediation.map((item) => `<li>${item}</li>`).join("")}</ul>`
       : "";
@@ -1552,6 +1698,29 @@ function updateResetButtonState(machineId, isOnline) {
       ? "Reset Agent (restart Ollama + ComfyUI)"
       : "Agent offline";
   }
+}
+
+// ETA update on settings change
+const etaInputIds = ["steps", "resolution", "num-images", "repeat"];
+etaInputIds.forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener("input", computeETA);
+    el.addEventListener("change", computeETA);
+  }
+});
+// Initial ETA computation
+computeETA();
+
+// Update fit badges when checkpoint changes
+const checkpointSelect = document.getElementById("checkpoint");
+if (checkpointSelect) {
+  checkpointSelect.addEventListener("change", () => {
+    statusCache.forEach((machine, machineId) => {
+      updateFitBadge(machineId, machine);
+    });
+    computeETA();
+  });
 }
 
 // Call initialization

@@ -908,3 +908,185 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 .btn-copy:active {
   background: #9ca3af;
 }
+
+/* ======================================
+   Image Job Progress Bar
+   ====================================== */
+.image-progress {
+  margin: 8px 0;
+}
+.image-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.image-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #6366f1);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.image-progress-text {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6b7280;
+}
+.image-progress-stage {
+  font-weight: 600;
+  color: #374151;
+}
+.image-progress-percent {
+  font-weight: 600;
+  color: #3b82f6;
+}
+.image-last-updated {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+/* ======================================
+   ETA Display
+   ====================================== */
+.eta-display {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #0369a1;
+}
+.eta-display .eta-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  color: #0c4a6e;
+}
+.eta-display .eta-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0369a1;
+  margin-top: 2px;
+}
+.eta-display .eta-breakdown {
+  font-size: 11px;
+  color: #0284c7;
+  margin-top: 2px;
+}
+
+/* ======================================
+   Checkpoint Fit Badge (Image)
+   ====================================== */
+.checkpoint-fit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+.checkpoint-fit-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.checkpoint-fit-badge.fit-good {
+  background: #dcfce7;
+  color: #166534;
+}
+.checkpoint-fit-badge.fit-good::before {
+  background: #22c55e;
+}
+.checkpoint-fit-badge.fit-risk {
+  background: #fef3c7;
+  color: #92400e;
+}
+.checkpoint-fit-badge.fit-risk::before {
+  background: #f59e0b;
+}
+.checkpoint-fit-badge.fit-fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.checkpoint-fit-badge.fit-fail::before {
+  background: #ef4444;
+}
+.checkpoint-fit-badge.fit-unknown {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.checkpoint-fit-badge.fit-unknown::before {
+  background: #9ca3af;
+}
+
+/* ======================================
+   Pane Header Alignment (Image Cards)
+   ====================================== */
+
+/* Ensure pane-header-main contains title + checkpoint in 2 rows */
+.pane-header-main {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Override pane-title to not use grid directly since it's inside pane-header-main */
+.image-pane .pane-title {
+  grid-row: unset;
+  grid-column: unset;
+}
+
+/* Override model-fit to not use grid positioning when inside pane-header-main */
+.image-pane .model-fit {
+  grid-row: unset;
+  grid-column: unset;
+}
+
+/* Move controls and status to right column aligned */
+.image-pane .pane-status {
+  grid-row: 1;
+  grid-column: 3;
+}
+
+.image-pane .pane-controls {
+  grid-row: 2;
+  grid-column: 2 / 4;
+  justify-content: flex-start;
+}
+
+/* Syncing badge animation */
+.status-badge.syncing {
+  background: #e0f2fe;
+  color: #075985;
+}
+.status-badge.syncing .status-dot {
+  background: #38bdf8;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.6);
+  animation: pulse 1s ease infinite;
+}
+
+/* Missing checkpoint badge */
+.status-badge.missing {
+  background: #fef3c7;
+  color: #92400e;
+}
+.status-badge.missing .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
