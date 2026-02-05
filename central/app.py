@@ -972,8 +972,11 @@ def load_machines() -> List[Dict[str, Any]]:
         if "excluded" not in machine:
             machine["excluded"] = False
 
-        # Add vendor detection
-        machine["vendor"] = detect_vendor(machine)
+        # Use logo field if present, otherwise detect vendor
+        if "logo" in machine:
+            machine["vendor"] = machine["logo"]
+        else:
+            machine["vendor"] = detect_vendor(machine)
 
     return machines
 
