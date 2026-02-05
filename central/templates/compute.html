@@ -38,28 +38,33 @@
                       <label for="compute-algorithm" class="control-label">Compute parameters</label>
                     </div>
                     <div class="compute-params">
-                      <div class="control-field">
-                        <label for="compute-algorithm" class="control-label">Algorithm</label>
-                        <select id="compute-algorithm">
-                          <option value="segmented_sieve" selected>Segmented Sieve (default)</option>
-                          <option value="simple_sieve">Simple Sieve</option>
-                          <option value="trial_division">Trial Division (slow)</option>
-                        </select>
-                      </div>
-                      <div class="control-field">
-                        <label for="compute-n" class="control-label">Count primes ≤ N</label>
-                        <div class="input-with-button">
-                          <input id="compute-n" type="number" min="10" value="50000000" />
-                          <button id="compute-n-recommended" class="btn btn-secondary btn-small" type="button">Use recommended N</button>
+                      <div class="compute-params-row compute-params-row-top">
+                        <div class="control-field">
+                          <label for="compute-algorithm" class="control-label">Algorithm</label>
+                          <select id="compute-algorithm">
+                            <option value="segmented_sieve" selected>Segmented Sieve (default)</option>
+                            <option value="simple_sieve">Simple Sieve</option>
+                            <option value="trial_division">Trial Division (slow)</option>
+                          </select>
+                        </div>
+                        <div class="control-field">
+                          <label for="compute-n" class="control-label">Count primes ≤ N</label>
+                          <input id="compute-n" type="number" min="10" value="100000000" />
+                        </div>
+                        <div class="control-field control-field-auto">
+                          <label for="compute-n-recommended" class="control-label">Auto</label>
+                          <button id="compute-n-recommended" class="btn btn-secondary btn-small" type="button">Auto</button>
                         </div>
                       </div>
-                      <div class="control-field">
-                        <label for="compute-threads" class="control-label">Threads</label>
-                        <input id="compute-threads" type="number" min="1" value="1" />
-                      </div>
-                      <div class="control-field">
-                        <label for="compute-repeat" class="control-label">Repeats</label>
-                        <input id="compute-repeat" type="number" min="1" value="1" />
+                      <div class="compute-params-row compute-params-row-bottom">
+                        <div class="control-field">
+                          <label for="compute-threads" class="control-label">Threads</label>
+                          <input id="compute-threads" type="number" min="1" value="1" />
+                        </div>
+                        <div class="control-field">
+                          <label for="compute-repeat" class="control-label">Repeats</label>
+                          <input id="compute-repeat" type="number" min="1" value="1" />
+                        </div>
                       </div>
                     </div>
                     <div class="prompt-helper helper">
@@ -287,14 +292,22 @@
             <h4 class="drawer-section-title">Compute</h4>
             <div class="polling-settings">
               <div class="setting-row">
-                <label class="setting-label" for="compute-stream-first-k">Compute: primes to stream</label>
-                <input type="number" class="setting-input" id="compute-stream-first-k" value="100" min="0" max="5000" />
+                <label class="setting-label" for="compute-auto-n-segmented">Auto N (Segmented Sieve)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-segmented" value="100000000" min="10" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="compute-auto-n-simple">Auto N (Simple Sieve)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-simple" value="40000000" min="10" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="compute-auto-n-trial">Auto N (Trial Division)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-trial" value="4000000" min="10" />
               </div>
               <div class="setting-row">
                 <label class="setting-label" for="compute-progress-interval">Compute: progress update interval (s)</label>
                 <input type="number" class="setting-input" id="compute-progress-interval" value="1" min="0.1" step="0.1" />
               </div>
-              <div class="setting-helper">Controls output volume for compute benchmarks.</div>
+              <div class="setting-helper">Auto N presets and progress cadence are saved per browser.</div>
             </div>
           </div>
         </div>

@@ -19,8 +19,13 @@ const DEFAULT_POLLING_CONFIG = {
 };
 let pollingConfig = { ...DEFAULT_POLLING_CONFIG };
 
+// Auto N presets are persisted per browser to tune compute pacing.
 const DEFAULT_COMPUTE_SETTINGS = {
-  streamFirstK: 100,
+  autoN: {
+    segmented_sieve: 100000000,
+    simple_sieve: 40000000,
+    trial_division: 4000000,
+  },
   progressIntervalS: 1.0,
 };
 let computeSettings = { ...DEFAULT_COMPUTE_SETTINGS };
@@ -94,17 +99,25 @@ const loadComputeSettings = () => {
     const saved = localStorage.getItem(COMPUTE_SETTINGS_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      computeSettings = { ...DEFAULT_COMPUTE_SETTINGS, ...parsed };
+      computeSettings = {
+        ...DEFAULT_COMPUTE_SETTINGS,
+        ...parsed,
+        autoN: { ...DEFAULT_COMPUTE_SETTINGS.autoN, ...(parsed.autoN || {}) },
+      };
     }
   } catch (e) {
     console.warn("Failed to load compute settings:", e);
   }
-  computeSettings.streamFirstK = clampNumber(Number(computeSettings.streamFirstK) || 0, 0, 5000);
   computeSettings.progressIntervalS = clampNumber(
     Number(computeSettings.progressIntervalS) || DEFAULT_COMPUTE_SETTINGS.progressIntervalS,
     0.1,
     60,
   );
+  computeSettings.autoN = {
+    segmented_sieve: Math.max(10, Number(computeSettings.autoN?.segmented_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.segmented_sieve),
+    simple_sieve: Math.max(10, Number(computeSettings.autoN?.simple_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.simple_sieve),
+    trial_division: Math.max(10, Number(computeSettings.autoN?.trial_division) || DEFAULT_COMPUTE_SETTINGS.autoN.trial_division),
+  };
 };
 
 const saveComputeSettings = () => {
@@ -1074,13 +1087,17 @@ settingsButton?.addEventListener("click", async () => {
     const idlePollInput = document.getElementById("idle-poll-interval");
     const activePollInput = document.getElementById("active-poll-interval");
     const previewThrottleInput = document.getElementById("preview-throttle");
-    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeAutoSegmentedInput = document.getElementById("compute-auto-n-segmented");
+    const computeAutoSimpleInput = document.getElementById("compute-auto-n-simple");
+    const computeAutoTrialInput = document.getElementById("compute-auto-n-trial");
     const computeIntervalInput = document.getElementById("compute-progress-interval");
     if (enableLivePreviewInput) enableLivePreviewInput.checked = previewConfig.enableLivePreview;
     if (idlePollInput) idlePollInput.value = Math.round(pollingConfig.idlePollIntervalMs / 1000);
     if (activePollInput) activePollInput.value = pollingConfig.activePollIntervalMs;
     if (previewThrottleInput) previewThrottleInput.value = previewConfig.previewThrottleMs;
-    if (computeStreamInput) computeStreamInput.value = computeSettings.streamFirstK;
+    if (computeAutoSegmentedInput) computeAutoSegmentedInput.value = computeSettings.autoN.segmented_sieve;
+    if (computeAutoSimpleInput) computeAutoSimpleInput.value = computeSettings.autoN.simple_sieve;
+    if (computeAutoTrialInput) computeAutoTrialInput.value = computeSettings.autoN.trial_division;
     if (computeIntervalInput) computeIntervalInput.value = computeSettings.progressIntervalS;
     setPolicyFeedback("", "");
     toggleOverlay("settings");
@@ -1166,11 +1183,21 @@ document.getElementById("settings-save")?.addEventListener("click", async () => 
     if (previewThrottleInput) {
       previewConfig.previewThrottleMs = parseInt(previewThrottleInput.value, 10);
     }
-    const computeStreamInput = document.getElementById("compute-stream-first-k");
+    const computeAutoSegmentedInput = document.getElementById("compute-auto-n-segmented");
+    const computeAutoSimpleInput = document.getElementById("compute-auto-n-simple");
+    const computeAutoTrialInput = document.getElementById("compute-auto-n-trial");
     const computeIntervalInput = document.getElementById("compute-progress-interval");
-    if (computeStreamInput) {
-      computeSettings.streamFirstK = clampNumber(parseInt(computeStreamInput.value, 10) || 0, 0, 5000);
-      computeStreamInput.value = computeSettings.streamFirstK;
+    if (computeAutoSegmentedInput) {
+      computeSettings.autoN.segmented_sieve = Math.max(10, parseInt(computeAutoSegmentedInput.value, 10) || 10);
+      computeAutoSegmentedInput.value = computeSettings.autoN.segmented_sieve;
+    }
+    if (computeAutoSimpleInput) {
+      computeSettings.autoN.simple_sieve = Math.max(10, parseInt(computeAutoSimpleInput.value, 10) || 10);
+      computeAutoSimpleInput.value = computeSettings.autoN.simple_sieve;
+    }
+    if (computeAutoTrialInput) {
+      computeSettings.autoN.trial_division = Math.max(10, parseInt(computeAutoTrialInput.value, 10) || 10);
+      computeAutoTrialInput.value = computeSettings.autoN.trial_division;
     }
     if (computeIntervalInput) {
       computeSettings.progressIntervalS = clampNumber(parseFloat(computeIntervalInput.value) || 1, 0.1, 60);
