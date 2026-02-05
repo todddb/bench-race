@@ -867,6 +867,294 @@ async def health():
     return {"ok": True, "machine_id": CFG.get("machine_id"), "label": CFG.get("label")}
 
 
+async def _stop_ollama() -> dict:
+    """Stop Ollama service. Platform-specific implementation."""
+    import platform
+    system = platform.system()
+    t_start = time.time()
+
+    try:
+        if system == "Darwin":
+            # macOS: Use brew services
+            result = subprocess.run(
+                ["brew", "services", "stop", "ollama"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            success = result.returncode == 0
+            slog.info("reset_stop_ollama", platform="macos", success=success, stderr=result.stderr)
+        elif system == "Linux":
+            # Linux: Try systemctl first, fallback to pkill
+            result = subprocess.run(
+                ["systemctl", "stop", "ollama"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                # Fallback: try user systemctl
+                result = subprocess.run(
+                    ["systemctl", "--user", "stop", "ollama"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+            success = result.returncode == 0
+            slog.info("reset_stop_ollama", platform="linux", success=success, stderr=result.stderr)
+        else:
+            slog.warning("reset_stop_ollama_unsupported", platform=system)
+            success = False
+
+        ms = (time.time() - t_start) * 1000
+        return {"stopped": success, "ms": int(ms)}
+    except Exception as e:
+        ms = (time.time() - t_start) * 1000
+        slog.error("reset_stop_ollama_error", error=str(e))
+        return {"stopped": False, "ms": int(ms), "error": str(e)}
+
+
+async def _start_ollama() -> dict:
+    """Start Ollama service. Platform-specific implementation."""
+    import platform
+    system = platform.system()
+    t_start = time.time()
+
+    try:
+        if system == "Darwin":
+            # macOS: Use brew services
+            result = subprocess.run(
+                ["brew", "services", "start", "ollama"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            success = result.returncode == 0
+            slog.info("reset_start_ollama", platform="macos", success=success, stderr=result.stderr)
+        elif system == "Linux":
+            # Linux: Try systemctl first, fallback to direct launch
+            result = subprocess.run(
+                ["systemctl", "start", "ollama"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                # Fallback: try user systemctl
+                result = subprocess.run(
+                    ["systemctl", "--user", "start", "ollama"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+            success = result.returncode == 0
+            slog.info("reset_start_ollama", platform="linux", success=success, stderr=result.stderr)
+        else:
+            slog.warning("reset_start_ollama_unsupported", platform=system)
+            success = False
+
+        ms = (time.time() - t_start) * 1000
+        return {"started": success, "ms": int(ms)}
+    except Exception as e:
+        ms = (time.time() - t_start) * 1000
+        slog.error("reset_start_ollama_error", error=str(e))
+        return {"started": False, "ms": int(ms), "error": str(e)}
+
+
+async def _check_ollama_health(timeout_s: float = 60.0) -> dict:
+    """Wait for Ollama to become healthy."""
+    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    t_start = time.time()
+
+    while (time.time() - t_start) < timeout_s:
+        try:
+            if await check_ollama_available(base_url, timeout_s=2.0):
+                ms = (time.time() - t_start) * 1000
+                slog.info("reset_ollama_healthy", ms=int(ms))
+                return {"healthy": True, "ms": int(ms)}
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+
+    ms = (time.time() - t_start) * 1000
+    slog.warning("reset_ollama_unhealthy", timeout_s=timeout_s)
+    return {"healthy": False, "ms": int(ms), "error": "Timeout waiting for Ollama health check"}
+
+
+async def _stop_comfyui() -> dict:
+    """Stop ComfyUI process."""
+    t_start = time.time()
+
+    try:
+        pidfile = ROOT_DIR / "comfy.pid"
+        if not pidfile.exists():
+            slog.info("reset_stop_comfyui", status="no_pidfile")
+            return {"stopped": True, "ms": 0, "note": "No PID file found"}
+
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+
+            # Wait for process to exit
+            for _ in range(50):
+                if not _pid_is_running(pid):
+                    break
+                await asyncio.sleep(0.1)
+
+            pidfile.unlink(missing_ok=True)
+            ms = (time.time() - t_start) * 1000
+            slog.info("reset_stop_comfyui", success=True, ms=int(ms))
+            return {"stopped": True, "ms": int(ms)}
+        except ProcessLookupError:
+            pidfile.unlink(missing_ok=True)
+            return {"stopped": True, "ms": 0, "note": "Process not found"}
+        except Exception as e:
+            ms = (time.time() - t_start) * 1000
+            slog.error("reset_stop_comfyui_error", error=str(e))
+            return {"stopped": False, "ms": int(ms), "error": str(e)}
+    except Exception as e:
+        ms = (time.time() - t_start) * 1000
+        slog.error("reset_stop_comfyui_error", error=str(e))
+        return {"stopped": False, "ms": int(ms), "error": str(e)}
+
+
+async def _start_comfyui() -> dict:
+    """Start ComfyUI process."""
+    t_start = time.time()
+
+    try:
+        comfy = _comfy_config()
+        if not comfy.get("enabled", True):
+            return {"started": False, "ms": 0, "note": "ComfyUI disabled in config"}
+
+        # Check if already running
+        pidfile = ROOT_DIR / "comfy.pid"
+        if pidfile.exists():
+            try:
+                pid = int(pidfile.read_text().strip())
+                if _pid_is_running(pid):
+                    slog.info("reset_start_comfyui", status="already_running")
+                    return {"started": True, "ms": 0, "note": "Already running"}
+            except Exception:
+                pass
+
+        # Start ComfyUI using existing logic
+        install_dir = _comfy_install_dir()
+        python_path = install_dir / ".venv" / "bin" / "python"
+        if not python_path.exists():
+            slog.warning("reset_start_comfyui", status="no_venv")
+            return {"started": False, "ms": 0, "error": "ComfyUI venv not found"}
+
+        env = os.environ.copy()
+        host = comfy.get("host", "127.0.0.1")
+        port = comfy.get("port", 8188)
+
+        proc = subprocess.Popen(
+            [str(python_path), "main.py", "--listen", host, "--port", str(port)],
+            cwd=str(install_dir),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        pidfile.write_text(str(proc.pid))
+        ms = (time.time() - t_start) * 1000
+        slog.info("reset_start_comfyui", success=True, pid=proc.pid, ms=int(ms))
+        return {"started": True, "ms": int(ms), "pid": proc.pid}
+    except Exception as e:
+        ms = (time.time() - t_start) * 1000
+        slog.error("reset_start_comfyui_error", error=str(e))
+        return {"started": False, "ms": int(ms), "error": str(e)}
+
+
+async def _check_comfyui_health(timeout_s: float = 60.0) -> dict:
+    """Wait for ComfyUI to become healthy."""
+    base_url = _comfy_base_url()
+    t_start = time.time()
+
+    while (time.time() - t_start) < timeout_s:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{base_url}/system_stats")
+                if resp.status_code == 200:
+                    ms = (time.time() - t_start) * 1000
+                    slog.info("reset_comfyui_healthy", ms=int(ms))
+                    return {"healthy": True, "ms": int(ms)}
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+
+    ms = (time.time() - t_start) * 1000
+    slog.warning("reset_comfyui_unhealthy", timeout_s=timeout_s)
+    return {"healthy": False, "ms": int(ms), "error": "Timeout waiting for ComfyUI health check"}
+
+
+@app.post("/api/reset")
+async def reset_agent():
+    """
+    Reset agent by restarting Ollama and ComfyUI services.
+    Returns status for each step with timings.
+    """
+    slog.info("reset_agent_start")
+    notes = []
+
+    # Step 1: Stop Ollama
+    slog.info("reset: stopping ollama")
+    ollama_stop = await _stop_ollama()
+
+    # Step 2: Start Ollama
+    slog.info("reset: starting ollama")
+    ollama_start = await _start_ollama()
+
+    # Step 3: Wait for Ollama health
+    slog.info("reset: checking ollama health")
+    ollama_health = await _check_ollama_health(timeout_s=60.0)
+
+    # Step 4: Stop ComfyUI
+    slog.info("reset: stopping comfyui")
+    comfyui_stop = await _stop_comfyui()
+    if comfyui_stop.get("note"):
+        notes.append(comfyui_stop["note"])
+
+    # Step 5: Start ComfyUI
+    slog.info("reset: starting comfyui")
+    comfyui_start = await _start_comfyui()
+    if comfyui_start.get("note"):
+        notes.append(comfyui_start["note"])
+
+    # Step 6: Wait for ComfyUI health
+    slog.info("reset: checking comfyui health")
+    comfyui_health = await _check_comfyui_health(timeout_s=60.0)
+
+    # Build response
+    ok = (
+        ollama_start.get("started", False) and
+        ollama_health.get("healthy", False) and
+        comfyui_start.get("started", False) and
+        comfyui_health.get("healthy", False)
+    )
+
+    result = {
+        "ok": ok,
+        "ollama": {
+            "stopped": ollama_stop.get("stopped", False),
+            "started": ollama_start.get("started", False),
+            "healthy": ollama_health.get("healthy", False),
+            "ms": ollama_health.get("ms", 0),
+        },
+        "comfyui": {
+            "stopped": comfyui_stop.get("stopped", False),
+            "started": comfyui_start.get("started", False),
+            "healthy": comfyui_health.get("healthy", False),
+            "ms": comfyui_health.get("ms", 0),
+        },
+        "notes": notes if notes else None,
+    }
+
+    slog.info("reset_agent_complete", ok=ok)
+    return result
+
+
 @app.get("/capabilities")
 async def capabilities():
     base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")

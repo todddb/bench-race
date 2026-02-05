@@ -1248,6 +1248,45 @@ def api_update_machine(machine_id: str):
     })
 
 
+@app.post("/api/agents/<machine_id>/reset")
+def api_reset_agent(machine_id: str):
+    """
+    Proxy endpoint to reset an agent by restarting its Ollama and ComfyUI services.
+    Forwards the request to the agent's /api/reset endpoint.
+    """
+    # Find the machine
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url configured for {machine_id}"}), 500
+
+    log.info(f"Resetting agent {machine_id} at {agent_base_url}")
+
+    try:
+        # Forward to agent's reset endpoint with longer timeout (reset can take 1-2 minutes)
+        response = requests.post(
+            f"{agent_base_url}/api/reset",
+            timeout=180  # 3 minutes timeout
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        log.info(f"Reset agent {machine_id} completed: ok={result.get('ok')}")
+        return jsonify(result)
+    except requests.exceptions.Timeout:
+        log.error(f"Reset agent {machine_id} timed out")
+        return jsonify({"error": "Reset operation timed out", "ok": False}), 504
+    except requests.exceptions.RequestException as e:
+        log.error(f"Reset agent {machine_id} failed: {e}")
+        return jsonify({"error": f"Failed to reset agent: {str(e)}", "ok": False}), 500
+    except Exception as e:
+        log.error(f"Reset agent {machine_id} unexpected error: {e}")
+        return jsonify({"error": f"Unexpected error: {str(e)}", "ok": False}), 500
+
+
 @app.get("/api/capabilities")
 def api_capabilities():
     caps = []
