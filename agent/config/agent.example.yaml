@@ -1,59 +1,127 @@
 # agent/config/agent.example.yaml
 #
-# Per-machine configuration for a bench-race agent.
-# This file is intentionally NOT tracked when copied to agent.yaml.
+# Example per-machine agent configuration for Bench-Race.
 #
-# Central controls required models and policies.
-# This file only configures how the agent runs and connects to backends.
+# This file controls how the agent:
+# - exposes its HTTP API
+# - connects to Ollama and ComfyUI
+# - samples runtime metrics
+# - executes Compute / Inference / Image workloads
+#
+# IMPORTANT:
+# - Copy this file to agent.yaml and customize per machine.
+# - agent.yaml is intentionally gitignored.
+# - Central controls which jobs are run; this file controls HOW they run.
 
-# Unique ID for this machine (must match central machines.yaml)
+########################################
+# Identity
+########################################
+
+# Must match a machine_id in central machines.yaml
 machine_id: "example-machine"
 
-# Human-friendly label shown in the UI
-label: "Example Machine (GPU / RAM)"
+# Human-friendly name (displayed in logs / diagnostics)
+label: "Example Machine Agent"
 
-# Address/port the agent HTTP server binds to
+########################################
+# Agent HTTP server
+########################################
+
 bind_host: "0.0.0.0"
 bind_port: 9001
 
-# Base URL for the local Ollama instance
-ollama_base_url: "http://127.0.0.1:11434"
+########################################
+# Central connectivity
+########################################
 
-# Central base URL (used for ComfyUI checkpoint sync)
+# Base URL for the central server (used for coordination and artifact sync)
 central_base_url: "http://127.0.0.1:8080"
 
-# Platform metadata for scheduling
-architecture: "nvidia_linux"
+########################################
+# Ollama configuration
+########################################
 
+ollama:
+  enabled: true
+
+  # Base URL where Ollama listens locally
+  base_url: "http://127.0.0.1:11434"
+
+  # Health endpoint used to verify readiness
+  health_endpoint: "/api/tags"
+
+  # Optional: override start command if agent manages Ollama lifecycle
+  # start_command: ["ollama", "serve"]
+
+########################################
 # ComfyUI configuration
+########################################
+
 comfyui:
   enabled: true
+
   host: "127.0.0.1"
   port: 8188
-  # Optional: install dir for ComfyUI (used for CPU fallback restart)
+
+  # Install directory for embedded ComfyUI (repo-relative)
   install_dir: "agent/third_party/comfyui"
 
-  # Path where agent caches downloaded checkpoints (before symlinking to ComfyUI)
-  # Default: agent/model_cache/comfyui (repo-relative)
+  # Cache path where agent stores downloaded checkpoints before linking
   cache_path: "agent/model_cache/comfyui"
 
-  # Path where ComfyUI scans for checkpoints
-  # Default: agent/third_party/comfyui/models/checkpoints (repo-relative embedded ComfyUI)
-  # Override for system installs: /opt/comfyui/models/checkpoints
+  # Directory ComfyUI scans for checkpoints
   checkpoints_dir: "agent/third_party/comfyui/models/checkpoints"
 
-  # Enable debug logging for ComfyUI /prompt failures
-  # Saves full request payloads to logs/debug/ for reproduction
-  # Can also be enabled via COMFY_DEBUG=1 environment variable
+  # Enable verbose logging for ComfyUI prompt failures
   debug: true
 
-  # Optional CPU fallback settings
+  # Optional CPU fallback behavior
   allow_cpu_fallback: false
   cpu_fallback_on:
     - "cuda_unsupported_arch"
 
-# Runtime sampler configuration (CPU/GPU/VRAM usage)
+########################################
+# Compute benchmark defaults
+########################################
+
+compute:
+  # Default algorithm used if central does not specify one
+  default_algorithm: "segmented_sieve"   # segmented_sieve | simple_sieve | trial_division
+
+  # Progress update interval for Compute streaming (seconds)
+  progress_interval_s: 1.0
+
+########################################
+# Runtime metrics sampling
+########################################
+
 runtime_sampler:
   enabled: true
+
+  # Sampling interval (seconds)
   interval_s: 1
+
+  # Number of samples to retain in rolling buffer
   buffer_len: 120
+
+########################################
+# Timeouts
+########################################
+
+timeouts:
+  ollama_start_timeout_s: 120
+  comfyui_start_timeout_s: 60
+
+########################################
+# Logging
+########################################
+
+logging:
+  level: "info"          # debug | info | warning | error
+  log_dir: "./logs"
+
+# Notes:
+# - Most fields above are optional and have sane defaults.
+# - Disabling Ollama or ComfyUI only affects those workloads.
+# - Compute benchmarks do not require Ollama or ComfyUI.
+

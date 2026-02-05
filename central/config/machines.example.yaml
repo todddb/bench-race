@@ -1,49 +1,93 @@
+# central/config/machines.example.yaml
+#
+# Example machine metadata for Bench-Race.
+#
+# This file defines STATIC machine capabilities used by the UI for:
+# - model fit estimation (FIT: GOOD / RISK / FAIL)
+# - memory headroom calculations
+# - hardware comparison context
+#
+# IMPORTANT:
+# - Copy this file to machines.yaml and customize per environment.
+# - machines.yaml is intentionally gitignored.
+# - Most fields below are OPTIONAL but RECOMMENDED.
+# - Runtime metrics (CPU/GPU/MEM %) come from the agent, not from this file.
+
 machines:
   - machine_id: "macbook"
     label: "MacBook Pro (M4 Max, 16 Cores, 128GB)"
-    agent_base_url: "http://192.168.11.22:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
+
+    # Used by the UI to select vendor logo (apple | nvidia)
+    logo: "apple"
+
+    # Base URL where central can reach the agent
+    agent_base_url: "http://127.0.0.1:9001"
+    notes: "Local macOS development machine"
+
+    # CPU metadata (optional; improves fit heuristics)
     cpu_cores: 16
     cpu_physical_cores: 12
-    total_system_ram_bytes: 137438953472
+
+    # Total system memory (bytes)
+    total_system_ram_bytes: 137438953472  # 128 GiB
+
+    # GPU metadata (optional but strongly recommended)
     gpu:
       name: "Apple M4 Max"
-      type: "unified"
-      vram_bytes: 137438953472
+      type: "unified"           # unified | discrete
+      vram_bytes: 137438953472  # unified memory shares system RAM
+
   - machine_id: "macmini"
     label: "Mac Mini (M4 Pro, 12 Cores, 24GB)"
-    agent_base_url: "http://192.168.11.20:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
+    logo: "apple"
+    agent_base_url: "http://127.0.0.1:9002"
+    notes: "Apple Silicon small-form-factor system"
+
     cpu_cores: 12
     cpu_physical_cores: 10
-    total_system_ram_bytes: 25769803776
+    total_system_ram_bytes: 25769803776  # 24 GiB
+
     gpu:
       name: "Apple M4 Pro"
       type: "unified"
       vram_bytes: 25769803776
+
   - machine_id: "alienware"
     label: "Alienware Area 51 (RTX5090, 32GB)"
-    agent_base_url: "http://192.168.11.21:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
+    logo: "nvidia"
+    agent_base_url: "http://127.0.0.1:9003"
+    notes: "High-end NVIDIA CUDA workstation"
+
     cpu_cores: 32
     cpu_physical_cores: 16
-    total_system_ram_bytes: 68719476736
+    total_system_ram_bytes: 68719476736  # 64 GiB
+
     gpu:
       name: "NVIDIA RTX5090"
       type: "discrete"
-      vram_bytes: 34359738368
-      cuda_compute: [12, 0]
+      vram_bytes: 34359738368              # 32 GiB
+      cuda_compute: [12, 0]                # optional; for compatibility checks
+
   - machine_id: "gb10"
     label: "Dell ProMax (GB10, 128GB)"
-    agent_base_url: "http://192.168.11.23:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
+    logo: "nvidia"
+    agent_base_url: "http://127.0.0.1:9004"
+    notes: "Large-memory NVIDIA workstation"
+
     cpu_cores: 64
     cpu_physical_cores: 32
-    total_system_ram_bytes: 137438953472
+    total_system_ram_bytes: 137438953472  # 128 GiB
+
     gpu:
       name: "NVIDIA GB10"
       type: "discrete"
-      vram_bytes: 68719476736
+      vram_bytes: 68719476736              # 64 GiB
       cuda_compute: [12, 1]
       driver_version: "545.101"
       pci_bus: "0000:01:00.0"
+
+# Notes:
+# - If cpu/gpu fields are omitted, the system will still run,
+#   but FIT scoring and preflight warnings will be degraded.
+# - These values are trusted as metadata, not live telemetry.
+
