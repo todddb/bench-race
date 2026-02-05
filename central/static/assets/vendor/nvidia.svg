@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <g fill="#76B900">
+    <!-- NVIDIA eye-like logo simplified -->
+    <path d="M 8 24 C 8 16 15 10 24 10 C 33 10 40 16 40 24 C 40 32 33 38 24 38 C 15 38 8 32 8 24 Z M 12 24 C 12 29 17 34 24 34 C 31 34 36 29 36 24 C 36 19 31 14 24 14 C 17 14 12 19 12 24 Z"/>
+    <circle cx="24" cy="24" r="6" fill="#76B900"/>
+  </g>
+  <text x="24" y="46" text-anchor="middle" font-size="6" fill="#888" font-family="system-ui">NVIDIA</text>
+</svg>

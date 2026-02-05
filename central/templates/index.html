@@ -114,9 +114,9 @@
 
           <div class="grid">
             {% for m in machines %}
-            <div class="pane card {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}">
+            <div class="pane card {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}" data-vendor="{{ m.vendor|default('other') }}">
               <div class="pane-header">
-                <img class="vendor-logo hidden" id="vendor-logo-{{ m.machine_id }}" alt="" />
+                <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.svg" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
                   <div class="model-fit" id="model-fit-{{ m.machine_id }}">
@@ -125,32 +125,41 @@
                   </div>
                 </div>
                 <div class="pane-status">
-                  {% if m.agent_reachable is defined and m.agent_reachable == true %}
-                  <span class="status-dot ready" id="status-dot-{{ m.machine_id }}" title="Online"></span>
-                  <span class="status-text" id="status-text-{{ m.machine_id }}">Online</span>
-                  {% elif m.agent_reachable is defined and m.agent_reachable == false %}
-                  <span class="status-dot offline" id="status-dot-{{ m.machine_id }}" title="Offline"></span>
-                  <span class="status-text" id="status-text-{{ m.machine_id }}">Offline</span>
-                  {% else %}
-                  <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
-                  <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
-                  {% endif %}
-                  <button
-                    class="btn btn-toggle-exclude {% if m.excluded %}excluded{% endif %}"
-                    id="toggle-exclude-{{ m.machine_id }}"
-                    data-machine-id="{{ m.machine_id }}"
-                    title="{% if m.excluded %}Click to activate{% else %}Click to exclude{% endif %}"
-                  >
-                    {% if m.excluded %}Excluded{% else %}Active{% endif %}
-                  </button>
-                  <button
-                    class="btn btn-reset"
-                    id="reset-{{ m.machine_id }}"
-                    data-machine-id="{{ m.machine_id }}"
-                    title="Reset Agent (restart Ollama + ComfyUI)"
-                  >
-                    Reset
-                  </button>
+                  <div class="status-row-top">
+                    <button
+                      class="btn btn-reset"
+                      id="reset-{{ m.machine_id }}"
+                      data-machine-id="{{ m.machine_id }}"
+                      title="Reset Agent (restart Ollama + ComfyUI)"
+                    >
+                      Reset
+                    </button>
+                    <span class="status-badge {% if m.agent_reachable is defined and m.agent_reachable == true %}ready{% elif m.agent_reachable is defined and m.agent_reachable == false %}offline{% else %}checking{% endif %} {% if m.excluded %}disabled{% endif %}" id="status-badge-{{ m.machine_id }}">
+                      {% if m.excluded %}
+                      Disabled
+                      {% elif m.agent_reachable is defined and m.agent_reachable == true %}
+                      Active
+                      {% elif m.agent_reachable is defined and m.agent_reachable == false %}
+                      Offline
+                      {% else %}
+                      Checking
+                      {% endif %}
+                    </span>
+                  </div>
+                  <div class="status-row-bottom">
+                    <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
+                      <input
+                        type="checkbox"
+                        class="toggle-exclude-input"
+                        id="toggle-exclude-{{ m.machine_id }}"
+                        data-machine-id="{{ m.machine_id }}"
+                        {% if not m.excluded %}checked{% endif %}
+                      />
+                      <span class="toggle-slider"></span>
+                      <span class="toggle-label-left">Disabled</span>
+                      <span class="toggle-label-right">Enabled</span>
+                    </label>
+                  </div>
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
                 </div>
               </div>
@@ -287,6 +296,96 @@
           <button id="settings-save" class="btn btn-primary" type="button">Save</button>
         </footer>
       </aside>
+    </div>
+
+    <!-- Reset Diagnostics Modal -->
+    <div id="reset-diagnostics-modal" class="modal hidden">
+      <div class="modal-overlay"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Reset Diagnostics</h2>
+          <button class="modal-close" id="reset-modal-close" title="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="diagnostics-summary">
+            <div class="diagnostics-field">
+              <strong>Agent:</strong> <span id="diag-agent-name">-</span>
+            </div>
+            <div class="diagnostics-field">
+              <strong>Status:</strong> <span id="diag-status" class="status-badge">-</span>
+            </div>
+            <div class="diagnostics-field">
+              <strong>Duration:</strong> <span id="diag-duration">-</span>
+            </div>
+          </div>
+
+          <div class="diagnostics-section" id="diag-notes-section">
+            <h3>Notes</h3>
+            <ul id="diag-notes" class="diagnostics-notes"></ul>
+          </div>
+
+          <div class="diagnostics-section">
+            <h3>Ollama</h3>
+            <div class="diagnostics-details">
+              <div class="diagnostics-field">
+                <strong>Healthy:</strong> <span id="diag-ollama-healthy">-</span>
+              </div>
+              <div class="diagnostics-field">
+                <strong>Time to Ready:</strong> <span id="diag-ollama-time">-</span>
+              </div>
+              <div class="diagnostics-field">
+                <strong>Log File:</strong>
+                <code id="diag-ollama-log" class="log-path">-</code>
+                <button class="btn btn-sm btn-copy" data-copy-target="diag-ollama-log" title="Copy to clipboard">Copy</button>
+              </div>
+            </div>
+            <details class="diagnostics-logs">
+              <summary>Stdout/Stderr Output</summary>
+              <div class="log-output">
+                <pre id="diag-ollama-stdout"></pre>
+                <pre id="diag-ollama-stderr" class="stderr"></pre>
+              </div>
+              <button class="btn btn-sm btn-copy" data-copy-target="diag-ollama-stdout" title="Copy stdout">Copy Stdout</button>
+              <button class="btn btn-sm btn-copy" data-copy-target="diag-ollama-stderr" title="Copy stderr">Copy Stderr</button>
+            </details>
+          </div>
+
+          <div class="diagnostics-section">
+            <h3>ComfyUI</h3>
+            <div class="diagnostics-details">
+              <div class="diagnostics-field">
+                <strong>Healthy:</strong> <span id="diag-comfyui-healthy">-</span>
+              </div>
+              <div class="diagnostics-field">
+                <strong>Time to Ready:</strong> <span id="diag-comfyui-time">-</span>
+              </div>
+              <div class="diagnostics-field">
+                <strong>Log File:</strong>
+                <code id="diag-comfyui-log" class="log-path">-</code>
+                <button class="btn btn-sm btn-copy" data-copy-target="diag-comfyui-log" title="Copy to clipboard">Copy</button>
+              </div>
+            </div>
+            <details class="diagnostics-logs">
+              <summary>Stdout/Stderr Output</summary>
+              <div class="log-output">
+                <pre id="diag-comfyui-stdout"></pre>
+                <pre id="diag-comfyui-stderr" class="stderr"></pre>
+              </div>
+              <button class="btn btn-sm btn-copy" data-copy-target="diag-comfyui-stdout" title="Copy stdout">Copy Stdout</button>
+              <button class="btn btn-sm btn-copy" data-copy-target="diag-comfyui-stderr" title="Copy stderr">Copy Stderr</button>
+            </details>
+          </div>
+
+          <div class="diagnostics-section">
+            <h3>Full JSON Response</h3>
+            <pre id="diag-full-json" class="json-output"></pre>
+            <button class="btn btn-sm btn-copy" data-copy-target="diag-full-json" title="Copy JSON">Copy JSON</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="reset-modal-close-btn">Close</button>
+        </div>
+      </div>
     </div>
 
     <script src="/static/js/app.js"></script>
