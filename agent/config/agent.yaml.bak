@@ -1,7 +1,0 @@
-machine_id: "gb10"
-label: "Dell ProMax (GB10, 128GB)"
-
-bind_host: "0.0.0.0"
-bind_port: 9001
-
-ollama_base_url: "http://192.168.11.22:11434"
