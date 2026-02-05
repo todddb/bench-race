@@ -948,7 +948,9 @@ function getPreflightStatus() {
   const ready = [];
 
   statusCache.forEach((machine, machineId) => {
-    if (!machine.reachable) {
+    if (machine.excluded) {
+      blocked.push({ machine_id: machineId, label: machine.label, reason: "excluded" });
+    } else if (!machine.reachable) {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
     } else if (!machine.has_selected_model) {
       blocked.push({
@@ -1796,6 +1798,79 @@ promptEl?.addEventListener("keydown", async (event) => {
     await startRun();
   }
 });
+
+// Toggle machine excluded status
+async function toggleMachineExcluded(machineId) {
+  const machine = statusCache.get(machineId);
+  if (!machine) return;
+
+  const newExcludedState = !machine.excluded;
+
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(machineId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ excluded: newExcludedState }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to update machine: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    // Update local state
+    machine.excluded = data.excluded;
+    statusCache.set(machineId, machine);
+
+    // Update UI
+    updateMachineExcludedUI(machineId, data.excluded);
+    updatePreflightBanner();
+
+    console.log(`Machine ${machineId} excluded status updated to: ${data.excluded}`);
+  } catch (error) {
+    console.error(`Failed to toggle excluded status for ${machineId}:`, error);
+    showToast(`Failed to update machine status: ${error.message}`, "error");
+  }
+}
+
+function updateMachineExcludedUI(machineId, excluded) {
+  const pane = document.getElementById(`pane-${machineId}`);
+  const toggleBtn = document.getElementById(`toggle-exclude-${machineId}`);
+
+  if (pane) {
+    pane.setAttribute("data-excluded", excluded.toString());
+    if (excluded) {
+      pane.classList.add("pane-excluded");
+    } else {
+      pane.classList.remove("pane-excluded");
+    }
+  }
+
+  if (toggleBtn) {
+    toggleBtn.textContent = excluded ? "Excluded" : "Active";
+    toggleBtn.title = excluded ? "Click to activate" : "Click to exclude";
+    if (excluded) {
+      toggleBtn.classList.add("excluded");
+    } else {
+      toggleBtn.classList.remove("excluded");
+    }
+  }
+}
+
+// Initialize toggle buttons for all machines
+function initToggleButtons() {
+  const toggleButtons = document.querySelectorAll(".btn-toggle-exclude");
+  toggleButtons.forEach((btn) => {
+    const machineId = btn.getAttribute("data-machine-id");
+    if (machineId) {
+      btn.addEventListener("click", () => toggleMachineExcluded(machineId));
+    }
+  });
+}
+
+// Call initialization after DOM is ready
+initToggleButtons();
 
 // Refresh status button
 document.getElementById("refresh-caps")?.addEventListener("click", async () => {

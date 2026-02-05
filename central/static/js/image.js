@@ -458,7 +458,14 @@ const fetchStatus = async () => {
     const data = await response.json();
     const machines = data.machines || [];
     let blockedCount = 0;
+    let excludedCount = 0;
     machines.forEach((m) => {
+      if (m.excluded) {
+        setPaneStatus(m.machine_id, "offline", "Excluded");
+        blockedCount += 1;
+        excludedCount += 1;
+        return;
+      }
       if (!m.reachable) {
         setPaneStatus(m.machine_id, "offline", "Agent offline");
         blockedCount += 1;
@@ -487,7 +494,17 @@ const fetchStatus = async () => {
     const banner = document.getElementById("preflight-banner");
     if (banner) {
       if (blockedCount > 0) {
-        banner.textContent = `${blockedCount} machine(s) blocked (missing checkpoint or ComfyUI offline).`;
+        let message = `${blockedCount} machine(s) blocked`;
+        if (excludedCount > 0) {
+          message += ` (${excludedCount} excluded`;
+          if (blockedCount > excludedCount) {
+            message += ", others missing checkpoint or ComfyUI offline";
+          }
+          message += ")";
+        } else {
+          message += " (missing checkpoint or ComfyUI offline)";
+        }
+        banner.textContent = message + ".";
         banner.classList.remove("hidden");
       } else {
         banner.classList.add("hidden");
@@ -1140,6 +1157,77 @@ document.getElementById("options-toggle")?.addEventListener("click", () => {
 });
 
 applyOptionsLayout();
+
+// Toggle machine excluded status
+async function toggleMachineExcluded(machineId) {
+  try {
+    // Get current state from pane data attribute
+    const pane = document.getElementById(`pane-${machineId}`);
+    const currentExcluded = pane?.getAttribute("data-excluded") === "true";
+    const newExcludedState = !currentExcluded;
+
+    const response = await fetch(`/api/machines/${encodeURIComponent(machineId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ excluded: newExcludedState }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to update machine: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    // Update UI
+    updateMachineExcludedUI(machineId, data.excluded);
+
+    // Refresh status to update banner
+    await fetchStatus();
+
+    console.log(`Machine ${machineId} excluded status updated to: ${data.excluded}`);
+  } catch (error) {
+    console.error(`Failed to toggle excluded status for ${machineId}:`, error);
+    showToast(`Failed to update machine status: ${error.message}`, "error");
+  }
+}
+
+function updateMachineExcludedUI(machineId, excluded) {
+  const pane = document.getElementById(`pane-${machineId}`);
+  const toggleBtn = document.getElementById(`toggle-exclude-${machineId}`);
+
+  if (pane) {
+    pane.setAttribute("data-excluded", excluded.toString());
+    if (excluded) {
+      pane.classList.add("pane-excluded");
+    } else {
+      pane.classList.remove("pane-excluded");
+    }
+  }
+
+  if (toggleBtn) {
+    toggleBtn.textContent = excluded ? "Excluded" : "Active";
+    toggleBtn.title = excluded ? "Click to activate" : "Click to exclude";
+    if (excluded) {
+      toggleBtn.classList.add("excluded");
+    } else {
+      toggleBtn.classList.remove("excluded");
+    }
+  }
+}
+
+// Initialize toggle buttons for all machines
+function initToggleButtons() {
+  const toggleButtons = document.querySelectorAll(".btn-toggle-exclude");
+  toggleButtons.forEach((btn) => {
+    const machineId = btn.getAttribute("data-machine-id");
+    if (machineId) {
+      btn.addEventListener("click", () => toggleMachineExcluded(machineId));
+    }
+  });
+}
+
+// Call initialization
+initToggleButtons();
 
 // Initialize settings and adaptive polling
 loadPollingSettings();
