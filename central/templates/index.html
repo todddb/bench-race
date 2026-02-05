@@ -114,7 +114,7 @@
 
           <div class="grid">
             {% for m in machines %}
-            <div class="pane card" id="pane-{{ m.machine_id }}">
+            <div class="pane card {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}">
               <div class="pane-header">
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
@@ -134,6 +134,14 @@
                   <span class="status-dot checking" id="status-dot-{{ m.machine_id }}" title="Checking..."></span>
                   <span class="status-text" id="status-text-{{ m.machine_id }}">Checking...</span>
                   {% endif %}
+                  <button
+                    class="btn btn-toggle-exclude {% if m.excluded %}excluded{% endif %}"
+                    id="toggle-exclude-{{ m.machine_id }}"
+                    data-machine-id="{{ m.machine_id }}"
+                    title="{% if m.excluded %}Click to activate{% else %}Click to exclude{% endif %}"
+                  >
+                    {% if m.excluded %}Excluded{% else %}Active{% endif %}
+                  </button>
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
                 </div>
               </div>

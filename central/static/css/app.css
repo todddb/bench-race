@@ -178,6 +178,56 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .btn-sync:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn-sync.hidden { display: none; }
 
+/* Toggle exclude button */
+.btn-toggle-exclude {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: #059669;
+  color: #fff;
+  border: 2px solid #047857;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-toggle-exclude:hover {
+  background: #047857;
+  transform: translateY(-1px);
+}
+.btn-toggle-exclude.excluded {
+  background: #dc2626;
+  border-color: #b91c1c;
+}
+.btn-toggle-exclude.excluded:hover {
+  background: #b91c1c;
+}
+
+/* Excluded machine state */
+.pane-excluded {
+  opacity: 0.6;
+  position: relative;
+}
+.pane-excluded::after {
+  content: "EXCLUDED";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(220, 38, 38, 0.9);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+  z-index: 10;
+}
+.pane-excluded .output,
+.pane-excluded .metrics,
+.pane-excluded .image-preview {
+  opacity: 0.5;
+}
+
 /* Run row with toggle */
 .run-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: flex-start; margin-top: auto; }
 .run-actions-left { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }

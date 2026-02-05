@@ -35,6 +35,7 @@ ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
 CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
 MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
 COMFY_SETTINGS_PATH = CENTRAL_DIR / "config" / "comfyui.yaml"
+MACHINE_STATE_PATH = CENTRAL_DIR / "config" / "machine_state.json"
 DEFAULT_CHECKPOINT_URL = (
     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/"
     "sd_xl_base_1.0.safetensors"
@@ -84,6 +85,7 @@ MODEL_POLICY_RATE_LIMIT_S = 5
 _model_policy_last_request: Dict[str, float] = {}
 MODEL_POLICY_LOCK = threading.Lock()
 RUNTIME_METRICS: Dict[str, Dict[str, Any]] = {}
+MACHINE_STATE_LOCK = threading.Lock()
 
 
 def _current_git_sha() -> str:
@@ -881,6 +883,30 @@ def _select_agent_for_sample(selected_model: Optional[str]) -> Optional[Dict[str
 # -----------------------------------------------------------------------------
 # Load machines config
 # -----------------------------------------------------------------------------
+def _load_machine_state() -> Dict[str, Dict[str, Any]]:
+    """Load machine state overrides (excluded status, etc.) from JSON file."""
+    if not MACHINE_STATE_PATH.exists():
+        return {}
+    try:
+        with open(MACHINE_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning(f"Failed to load machine state from {MACHINE_STATE_PATH}: {e}")
+        return {}
+
+
+def _save_machine_state(state: Dict[str, Dict[str, Any]]) -> None:
+    """Save machine state overrides to JSON file."""
+    with MACHINE_STATE_LOCK:
+        try:
+            # Ensure config directory exists
+            MACHINE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(MACHINE_STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            log.error(f"Failed to save machine state to {MACHINE_STATE_PATH}: {e}")
+
+
 def load_machines() -> List[Dict[str, Any]]:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(
@@ -895,6 +921,20 @@ def load_machines() -> List[Dict[str, Any]]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     machines = cfg.get("machines") or []
+
+    # Merge in state overrides (excluded status)
+    state = _load_machine_state()
+    for machine in machines:
+        machine_id = machine.get("machine_id")
+        if machine_id and machine_id in state:
+            # Apply overrides from state file
+            machine_overrides = state[machine_id]
+            if "excluded" in machine_overrides:
+                machine["excluded"] = machine_overrides["excluded"]
+        # Ensure excluded field exists (default: False)
+        if "excluded" not in machine:
+            machine["excluded"] = False
+
     return machines
 
 
@@ -1172,6 +1212,40 @@ def api_machines():
             }
         machines.append(machine)
     return jsonify(machines)
+
+
+@app.patch("/api/machines/<machine_id>")
+def api_update_machine(machine_id: str):
+    """Update machine settings (excluded status)."""
+    payload = request.get_json(force=True) or {}
+    excluded = payload.get("excluded")
+
+    # Validate machine_id exists
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    # Validate excluded is a boolean
+    if excluded is not None and not isinstance(excluded, bool):
+        return jsonify({"error": "excluded must be a boolean"}), 400
+
+    # Update in-memory state
+    if excluded is not None:
+        machine["excluded"] = excluded
+
+        # Persist to disk
+        state = _load_machine_state()
+        if machine_id not in state:
+            state[machine_id] = {}
+        state[machine_id]["excluded"] = excluded
+        _save_machine_state(state)
+
+        log.info(f"Machine {machine_id} excluded status updated to: {excluded}")
+
+    return jsonify({
+        "machine_id": machine_id,
+        "excluded": machine.get("excluded", False)
+    })
 
 
 @app.get("/api/capabilities")
@@ -1680,6 +1754,23 @@ def api_start_llm():
 
     results = []
     for m in MACHINES:
+        # Skip excluded machines
+        if m.get("excluded", False):
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "skipped",
+                    "reason": "excluded",
+                }
+            )
+            results.append({
+                "machine_id": m.get("machine_id"),
+                "skipped": True,
+                "reason": "excluded"
+            })
+            continue
+
         # Skip machines not in the list (if list is provided)
         if machine_ids is not None and m.get("machine_id") not in machine_ids:
             run_record["machines"].append(
@@ -1814,6 +1905,23 @@ def api_start_image():
 
     results = []
     for m in MACHINES:
+        # Skip excluded machines
+        if m.get("excluded", False):
+            run_record["machines"].append(
+                {
+                    "machine_id": m.get("machine_id"),
+                    "label": m.get("label"),
+                    "status": "skipped",
+                    "reason": "excluded",
+                }
+            )
+            results.append({
+                "machine_id": m.get("machine_id"),
+                "skipped": True,
+                "reason": "excluded"
+            })
+            continue
+
         try:
             health = requests.get(
                 f"{m['agent_base_url'].rstrip('/')}/api/comfy/health",
