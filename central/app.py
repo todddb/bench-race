@@ -907,6 +907,43 @@ def _save_machine_state(state: Dict[str, Dict[str, Any]]) -> None:
             log.error(f"Failed to save machine state to {MACHINE_STATE_PATH}: {e}")
 
 
+def detect_vendor(machine: Dict[str, Any]) -> str:
+    """
+    Detect vendor from machine metadata.
+
+    Checks (in order):
+    1. Explicit 'vendor' field if already set
+    2. Machine label (e.g., "MacBook Pro" -> apple)
+    3. GPU name (e.g., "NVIDIA RTX" -> nvidia, "Apple M4" -> apple)
+    4. Hardware fields (gpu_name, accelerator_type, etc.)
+
+    Returns:
+        'apple', 'nvidia', or 'other'
+    """
+    # If vendor explicitly set, use it
+    if "vendor" in machine:
+        return machine["vendor"]
+
+    label = machine.get("label", "").lower()
+    gpu_name = machine.get("gpu", {}).get("name", "") if isinstance(machine.get("gpu"), dict) else ""
+    gpu_name = gpu_name.lower() if gpu_name else ""
+
+    # Check label for vendor hints
+    if any(keyword in label for keyword in ["mac", "macbook", "imac", "apple"]):
+        return "apple"
+    if any(keyword in label for keyword in ["nvidia", "rtx", "gtx", "tesla"]):
+        return "nvidia"
+
+    # Check GPU name
+    if any(keyword in gpu_name for keyword in ["apple", "m1", "m2", "m3", "m4", "metal"]):
+        return "apple"
+    if any(keyword in gpu_name for keyword in ["nvidia", "rtx", "gtx", "tesla", "quadro"]):
+        return "nvidia"
+
+    # Default to "other"
+    return "other"
+
+
 def load_machines() -> List[Dict[str, Any]]:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(
@@ -934,6 +971,9 @@ def load_machines() -> List[Dict[str, Any]]:
         # Ensure excluded field exists (default: False)
         if "excluded" not in machine:
             machine["excluded"] = False
+
+        # Add vendor detection
+        machine["vendor"] = detect_vendor(machine)
 
     return machines
 
@@ -1252,39 +1292,84 @@ def api_update_machine(machine_id: str):
 def api_reset_agent(machine_id: str):
     """
     Proxy endpoint to reset an agent by restarting its Ollama and ComfyUI services.
-    Forwards the request to the agent's /api/reset endpoint.
+    Forwards the request to the agent's /api/reset endpoint and returns detailed diagnostics.
+
+    Returns:
+        - HTTP 200 with agent's full JSON response (includes detailed diagnostics)
+        - HTTP 404 if machine_id not found
+        - HTTP 502 if agent unreachable
+        - HTTP 504 if reset operation times out
     """
+    import time
+    t_start = time.time()
+
     # Find the machine
     machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
     if not machine:
-        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+        log.warning(f"Reset requested for unknown machine_id: {machine_id}")
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
 
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
-        return jsonify({"error": f"No agent_base_url configured for {machine_id}"}), 500
+        log.error(f"No agent_base_url configured for {machine_id}")
+        return jsonify({"error": f"No agent_base_url configured for {machine_id}", "ok": False}), 500
 
-    log.info(f"Resetting agent {machine_id} at {agent_base_url}")
+    log.info(f"central: reset requested for {machine_id} at {agent_base_url}")
 
     try:
-        # Forward to agent's reset endpoint with longer timeout (reset can take 1-2 minutes)
+        # Forward to agent's reset endpoint with longer timeout (OLLAMA_START_TIMEOUT_S + COMFYUI_START_TIMEOUT_S + overhead)
+        # Default timeouts: 120s + 60s + 60s overhead = 240s (4 minutes)
         response = requests.post(
             f"{agent_base_url}/api/reset",
-            timeout=180  # 3 minutes timeout
+            timeout=240
         )
-        response.raise_for_status()
-        result = response.json()
 
-        log.info(f"Reset agent {machine_id} completed: ok={result.get('ok')}")
-        return jsonify(result)
+        # Agent always returns HTTP 200 with detailed JSON
+        result = response.json()
+        duration_ms = int((time.time() - t_start) * 1000)
+
+        log.info(f"central: reset completed for {machine_id} in {duration_ms}ms: ok={result.get('ok')}")
+
+        # Forward agent's response exactly as-is
+        return jsonify(result), response.status_code
+
+    except requests.exceptions.ConnectionError as e:
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: reset failed for {machine_id} - agent unreachable: {e}")
+        return jsonify({
+            "error": "agent unreachable",
+            "details": str(e),
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 502
+
     except requests.exceptions.Timeout:
-        log.error(f"Reset agent {machine_id} timed out")
-        return jsonify({"error": "Reset operation timed out", "ok": False}), 504
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: reset timed out for {machine_id} after {duration_ms}ms")
+        return jsonify({
+            "error": "Reset operation timed out",
+            "ok": False,
+            "duration_ms": duration_ms,
+            "notes": ["Central proxy timeout (240s). Agent may still be processing reset."]
+        }), 504
+
     except requests.exceptions.RequestException as e:
-        log.error(f"Reset agent {machine_id} failed: {e}")
-        return jsonify({"error": f"Failed to reset agent: {str(e)}", "ok": False}), 500
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: reset failed for {machine_id}: {e}")
+        return jsonify({
+            "error": f"Failed to reset agent: {str(e)}",
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 500
+
     except Exception as e:
-        log.error(f"Reset agent {machine_id} unexpected error: {e}")
-        return jsonify({"error": f"Unexpected error: {str(e)}", "ok": False}), 500
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: reset unexpected error for {machine_id}: {e}")
+        return jsonify({
+            "error": f"Unexpected error: {str(e)}",
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 500
 
 
 @app.get("/api/capabilities")

@@ -905,6 +905,114 @@ codex "Fix the WebSocket reconnection logic in central/app.py"
 
 ---
 
+## Agent Reset & Diagnostics
+
+The system includes robust agent reset functionality with detailed diagnostics for troubleshooting Ollama and ComfyUI service issues.
+
+### Reset Agent via UI
+
+Click the **Reset** button on any agent card to restart both Ollama and ComfyUI services. If the reset fails, a diagnostics modal will display:
+- Detailed notes about what went wrong
+- Full stdout/stderr logs from service startup
+- Log file paths for deeper investigation
+- Time-to-ready metrics for each service
+- Full JSON response for debugging
+
+### Reset Agent via API
+
+**From central server:**
+```bash
+# Reset an agent through the central proxy
+curl -X POST http://localhost:8080/api/agents/macbook/reset
+```
+
+**Directly on agent:**
+```bash
+# Reset agent services directly
+curl -X POST http://localhost:9001/api/reset
+```
+
+**Example success response:**
+```json
+{
+  "ok": true,
+  "duration_ms": 45320,
+  "ollama": {
+    "stopped": true,
+    "start_command": ["brew", "services", "start", "ollama"],
+    "start_stdout_tail": "...",
+    "start_stderr_tail": "",
+    "start_log_file": "/path/to/logs/ollama_start_2026-02-05T16-53-36.log",
+    "healthy": true,
+    "time_to_ready_ms": 3450
+  },
+  "comfyui": {
+    "stopped": true,
+    "pid": 12345,
+    "start_log_file": "/path/to/logs/comfyui_start_2026-02-05T16-53-41.log",
+    "healthy": true,
+    "time_to_ready_ms": 18200
+  },
+  "notes": []
+}
+```
+
+**Example failure response:**
+```json
+{
+  "ok": false,
+  "duration_ms": 122450,
+  "ollama": {
+    "stopped": true,
+    "start_command": ["systemctl", "start", "ollama"],
+    "start_stdout_tail": "...",
+    "start_stderr_tail": "Error: service failed to start...",
+    "start_log_file": "/path/to/logs/ollama_start_2026-02-05T17-02-15.log",
+    "healthy": false,
+    "time_to_ready_ms": null
+  },
+  "comfyui": {...},
+  "notes": ["Ollama unhealthy after 120s"]
+}
+```
+
+### Reset Configuration
+
+Configure reset timeouts and logging via environment variables on the **agent**:
+
+```bash
+# Agent environment variables (agent/.env or systemd service config)
+OLLAMA_START_TIMEOUT_S=120        # Max time to wait for Ollama startup (default: 120)
+COMFYUI_START_TIMEOUT_S=60        # Max time to wait for ComfyUI startup (default: 60)
+HEALTH_POLL_INTERVAL_S=1.5        # Interval between health checks (default: 1.5)
+RESET_LOG_DIR=./logs              # Directory for reset log files (default: ./logs)
+```
+
+### Troubleshooting Reset Failures
+
+1. **Check the diagnostics modal** in the UI for detailed error messages
+2. **Review log files** at the paths shown in the diagnostics (on the agent machine)
+3. **Inspect stdout/stderr tails** for immediate context
+4. **Verify service configuration**:
+   ```bash
+   # macOS
+   brew services list | grep ollama
+
+   # Linux
+   systemctl status ollama
+   systemctl --user status ollama
+   ```
+5. **Check health endpoints manually**:
+   ```bash
+   # Ollama health (used by reset)
+   curl http://127.0.0.1:11434/api/tags
+
+   # ComfyUI health
+   curl http://127.0.0.1:8188/system_stats
+   ```
+
+---
+
 ## Contributing & License
 
 Contributions are welcome! Please:

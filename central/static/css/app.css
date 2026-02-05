@@ -443,3 +443,421 @@ body.options-expanded textarea.prompt { min-height: 220px; }
   .app-header { flex-direction: column; align-items: flex-start; }
   .app-actions { align-self: flex-end; }
 }
+
+/* ======================================
+   Vendor Logo and Pane Layout Updates
+   ====================================== */
+
+/* Vendor logo on left */
+.vendor-logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  flex-shrink: 0;
+  opacity: 0.7;
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* Update pane header layout to accommodate logo */
+.pane-header {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.pane-header-main {
+  min-width: 0; /* Allow text truncation */
+}
+
+/* Status area on right side */
+.pane-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.status-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Status badge styling */
+.status-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  line-height: 1;
+}
+
+.status-badge.ready {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #86efac;
+}
+
+.status-badge.offline {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+.status-badge.checking {
+  background: #f3f4f6;
+  color: #6b7280;
+  border: 1px solid #d1d5db;
+}
+
+.status-badge.disabled {
+  background: #f3f4f6;
+  color: #9ca3af;
+  border: 1px solid #d1d5db;
+  font-style: italic;
+}
+
+/* Toggle switch styling */
+.toggle-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+}
+
+.toggle-switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: relative;
+  width: 40px;
+  height: 20px;
+  background: #cbd5e1;
+  border-radius: 10px;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: #3b82f6;
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+.toggle-label-left,
+.toggle-label-right {
+  font-size: 11px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.toggle-switch input:not(:checked) ~ .toggle-label-right {
+  color: #d1d5db;
+}
+
+.toggle-switch input:checked ~ .toggle-label-left {
+  color: #d1d5db;
+}
+
+.toggle-switch input:checked ~ .toggle-label-right {
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+/* Dimming effect for disabled/excluded panes */
+.pane-excluded {
+  opacity: 0.6;
+  filter: grayscale(0.3);
+}
+
+.pane-excluded .vendor-logo {
+  opacity: 0.4;
+}
+
+/* Reset button smaller in top-right */
+.btn-reset {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.btn-reset:hover:not(:disabled) {
+  background: #e5e7eb;
+  border-color: #9ca3af;
+}
+
+.btn-reset:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ======================================
+   Reset Diagnostics Modal
+   ====================================== */
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.modal-content {
+  position: relative;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+  max-width: 800px;
+  max-height: 90vh;
+  width: 90%;
+  display: flex;
+  flex-direction: column;
+  z-index: 1;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.modal-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 28px;
+  line-height: 1;
+  color: #9ca3af;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.modal-close:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.modal-body {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+}
+
+/* Diagnostics content styling */
+.diagnostics-summary {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.diagnostics-field {
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.diagnostics-field:last-child {
+  margin-bottom: 0;
+}
+
+.diagnostics-field strong {
+  color: #6b7280;
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.diagnostics-section {
+  margin-bottom: 24px;
+}
+
+.diagnostics-section h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 12px 0;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.diagnostics-details {
+  margin-bottom: 12px;
+}
+
+.diagnostics-notes {
+  list-style: disc;
+  padding-left: 20px;
+  margin: 0;
+}
+
+.diagnostics-notes li {
+  margin-bottom: 4px;
+  color: #ef4444;
+  font-size: 14px;
+}
+
+.diagnostics-logs {
+  margin-top: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.diagnostics-logs summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #374151;
+  font-size: 13px;
+  user-select: none;
+}
+
+.diagnostics-logs summary:hover {
+  color: #111827;
+}
+
+.log-output {
+  margin: 12px 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.log-output pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Monaco', 'Consolas', monospace;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  margin: 8px 0;
+}
+
+.log-output pre.stderr {
+  background: #451a03;
+  color: #fca5a5;
+}
+
+.log-path {
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #1e293b;
+  word-break: break-all;
+}
+
+.json-output {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Monaco', 'Consolas', monospace;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.btn-sm {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.btn-copy {
+  background: #e5e7eb;
+  color: #374151;
+  border: 1px solid #d1d5db;
+  margin-left: 8px;
+}
+
+.btn-copy:hover {
+  background: #d1d5db;
+  border-color: #9ca3af;
+}
+
+.btn-copy:active {
+  background: #9ca3af;
+}

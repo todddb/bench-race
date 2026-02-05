@@ -1900,7 +1900,8 @@ async function toggleMachineExcluded(machineId) {
 
 function updateMachineExcludedUI(machineId, excluded) {
   const pane = document.getElementById(`pane-${machineId}`);
-  const toggleBtn = document.getElementById(`toggle-exclude-${machineId}`);
+  const toggleCheckbox = document.getElementById(`toggle-exclude-${machineId}`);
+  const statusBadge = document.getElementById(`status-badge-${machineId}`);
 
   if (pane) {
     pane.setAttribute("data-excluded", excluded.toString());
@@ -1911,29 +1912,47 @@ function updateMachineExcludedUI(machineId, excluded) {
     }
   }
 
-  if (toggleBtn) {
-    toggleBtn.textContent = excluded ? "Excluded" : "Active";
-    toggleBtn.title = excluded ? "Click to activate" : "Click to exclude";
+  // Update checkbox state (checked = enabled = NOT excluded)
+  if (toggleCheckbox) {
+    toggleCheckbox.checked = !excluded;
+  }
+
+  // Update status badge
+  if (statusBadge) {
     if (excluded) {
-      toggleBtn.classList.add("excluded");
+      statusBadge.textContent = "Disabled";
+      statusBadge.classList.add("disabled");
+      statusBadge.classList.remove("ready", "offline", "checking");
     } else {
-      toggleBtn.classList.remove("excluded");
+      // Restore based on actual online status
+      const machine = statusCache.get(machineId);
+      if (machine) {
+        if (machine.reachable) {
+          statusBadge.textContent = "Active";
+          statusBadge.classList.add("ready");
+          statusBadge.classList.remove("disabled", "offline", "checking");
+        } else {
+          statusBadge.textContent = "Offline";
+          statusBadge.classList.add("offline");
+          statusBadge.classList.remove("disabled", "ready", "checking");
+        }
+      }
     }
   }
 }
 
-// Initialize toggle buttons for all machines
+// Initialize toggle checkboxes for all machines
 function initToggleButtons() {
-  const toggleButtons = document.querySelectorAll(".btn-toggle-exclude");
-  toggleButtons.forEach((btn) => {
-    const machineId = btn.getAttribute("data-machine-id");
+  const toggleCheckboxes = document.querySelectorAll(".toggle-exclude-input");
+  toggleCheckboxes.forEach((checkbox) => {
+    const machineId = checkbox.getAttribute("data-machine-id");
     if (machineId) {
-      btn.addEventListener("click", () => toggleMachineExcluded(machineId));
+      checkbox.addEventListener("change", () => toggleMachineExcluded(machineId));
     }
   });
 }
 
-// Reset agent
+// Reset agent with detailed diagnostics
 async function resetAgent(machineId) {
   const btn = document.getElementById(`reset-${machineId}`);
   if (!btn) return;
@@ -1960,13 +1979,23 @@ async function resetAgent(machineId) {
     const result = await response.json();
 
     if (response.ok && result.ok) {
-      showToast(`Reset successful for ${machine.label || machineId}`, "success");
+      const durationText = result.duration_ms
+        ? ` in ${(result.duration_ms / 1000).toFixed(1)}s`
+        : "";
+      showToast(`Reset successful for ${machine.label || machineId}${durationText}`, "success");
       // Refresh status after reset
       await fetchStatus();
     } else {
+      // Show diagnostics modal for failed resets
       const errorMsg = result.error || "Reset failed";
-      showToast(`Reset failed: ${errorMsg}`, "error");
+      showToast(
+        `Reset failed for ${machine.label || machineId} — click to view diagnostics`,
+        "error",
+        () => showResetDiagnosticsModal(machineId, result)
+      );
       console.error("Reset failed:", result);
+      // Also show modal immediately
+      showResetDiagnosticsModal(machineId, result);
     }
   } catch (error) {
     showToast(`Reset error: ${error.message}`, "error");
@@ -2048,3 +2077,101 @@ const runId = params.get("run_id");
 if (runId) {
   loadRun(runId);
 }
+
+// ======================================
+// Reset Diagnostics Modal
+// ======================================
+
+let lastResetDiagnostics = new Map(); // Store diagnostics per machine
+
+function showResetDiagnosticsModal(machineId, diagnostics) {
+  lastResetDiagnostics.set(machineId, diagnostics);
+
+  const modal = document.getElementById("reset-diagnostics-modal");
+  if (!modal) return;
+
+  const machine = statusCache.get(machineId);
+  const machineName = machine ? (machine.label || machineId) : machineId;
+
+  // Fill in summary
+  document.getElementById("diag-agent-name").textContent = machineName;
+
+  const statusBadge = document.getElementById("diag-status");
+  statusBadge.textContent = diagnostics.ok ? "Success" : "Failed";
+  statusBadge.className = diagnostics.ok ? "status-badge ready" : "status-badge offline";
+
+  document.getElementById("diag-duration").textContent =
+    diagnostics.duration_ms ? `${(diagnostics.duration_ms / 1000).toFixed(1)}s` : "N/A";
+
+  // Fill in notes
+  const notesSection = document.getElementById("diag-notes-section");
+  const notesList = document.getElementById("diag-notes");
+  if (diagnostics.notes && diagnostics.notes.length > 0) {
+    notesList.innerHTML = "";
+    diagnostics.notes.forEach(note => {
+      const li = document.createElement("li");
+      li.textContent = note;
+      notesList.appendChild(li);
+    });
+    notesSection.style.display = "block";
+  } else {
+    notesSection.style.display = "none";
+  }
+
+  // Fill in Ollama details
+  const ollama = diagnostics.ollama || {};
+  document.getElementById("diag-ollama-healthy").textContent = ollama.healthy ? "✓ Yes" : "✗ No";
+  document.getElementById("diag-ollama-time").textContent =
+    ollama.time_to_ready_ms ? `${(ollama.time_to_ready_ms / 1000).toFixed(1)}s` : "N/A";
+  document.getElementById("diag-ollama-log").textContent = ollama.start_log_file || "N/A";
+  document.getElementById("diag-ollama-stdout").textContent = ollama.start_stdout_tail || "(empty)";
+  document.getElementById("diag-ollama-stderr").textContent = ollama.start_stderr_tail || "(empty)";
+
+  // Fill in ComfyUI details
+  const comfyui = diagnostics.comfyui || {};
+  document.getElementById("diag-comfyui-healthy").textContent = comfyui.healthy ? "✓ Yes" : "✗ No";
+  document.getElementById("diag-comfyui-time").textContent =
+    comfyui.time_to_ready_ms ? `${(comfyui.time_to_ready_ms / 1000).toFixed(1)}s` : "N/A";
+  document.getElementById("diag-comfyui-log").textContent = comfyui.start_log_file || "N/A";
+  document.getElementById("diag-comfyui-stdout").textContent = comfyui.start_stdout_tail || "(empty)";
+  document.getElementById("diag-comfyui-stderr").textContent = comfyui.start_stderr_tail || "(empty)";
+
+  // Fill in full JSON
+  document.getElementById("diag-full-json").textContent = JSON.stringify(diagnostics, null, 2);
+
+  // Show modal
+  modal.classList.remove("hidden");
+}
+
+function hideResetDiagnosticsModal() {
+  const modal = document.getElementById("reset-diagnostics-modal");
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+}
+
+// Initialize modal close handlers
+document.getElementById("reset-modal-close")?.addEventListener("click", hideResetDiagnosticsModal);
+document.getElementById("reset-modal-close-btn")?.addEventListener("click", hideResetDiagnosticsModal);
+document.querySelector("#reset-diagnostics-modal .modal-overlay")?.addEventListener("click", hideResetDiagnosticsModal);
+
+// Copy to clipboard functionality
+document.querySelectorAll(".btn-copy").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const targetId = btn.getAttribute("data-copy-target");
+    const targetEl = document.getElementById(targetId);
+    if (targetEl) {
+      const text = targetEl.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const originalText = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => {
+          btn.textContent = originalText;
+        }, 1500);
+      }).catch(err => {
+        console.error("Failed to copy:", err);
+        showToast("Failed to copy to clipboard", "error");
+      });
+    }
+  });
+});
