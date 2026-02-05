@@ -218,6 +218,137 @@ def _check_run_complete(run_id: str) -> None:
         log.info("Run completed: %s", run_id)
 
 
+# Timeout constants for image runs
+IMAGE_DISPATCH_TIMEOUT_S = 30   # pending > 30s after dispatch → error
+IMAGE_STALL_TIMEOUT_S = 120     # running with no update > 120s → error
+_image_watchdog_thread: Optional[threading.Thread] = None
+
+
+def _image_watchdog_loop() -> None:
+    """Background loop that checks for stuck image jobs and times them out."""
+    while not _stop_event.is_set():
+        _stop_event.wait(1.0)  # poll every 1s
+        if _stop_event.is_set():
+            break
+        try:
+            _check_image_timeouts()
+        except Exception:
+            log.exception("Error in image watchdog loop")
+
+
+def _check_image_timeouts() -> None:
+    """Check active image runs for dispatch timeout or stalled heartbeat."""
+    now = time.time()
+    timed_out_jobs: List[Dict[str, Any]] = []
+
+    with RUN_LOCK:
+        for run_id, run_info in list(ACTIVE_RUNS.items()):
+            if run_info.get("type") != "image":
+                continue
+            record = RUN_CACHE.get(run_id)
+            if not record:
+                continue
+            for machine_entry in record.get("machines") or []:
+                status = machine_entry.get("status")
+                if status in ("complete", "error", "skipped", "blocked"):
+                    continue
+                job_id = machine_entry.get("job_id")
+                if not job_id:
+                    continue
+
+                # Check dispatch timeout: pending > 30s
+                if status == "pending":
+                    start_time = run_info.get("start_time", now)
+                    if (now - start_time) > IMAGE_DISPATCH_TIMEOUT_S:
+                        timed_out_jobs.append({
+                            "run_id": run_id,
+                            "machine_id": machine_entry.get("machine_id"),
+                            "job_id": job_id,
+                            "reason": "dispatch timeout",
+                        })
+                # Check stall timeout: running with no update > 120s
+                elif status == "running":
+                    updated = record.get("updated_at")
+                    if updated:
+                        try:
+                            updated_ts = datetime.fromisoformat(updated.replace("Z", "+00:00")).timestamp()
+                        except (ValueError, AttributeError):
+                            updated_ts = run_info.get("start_time", now)
+                    else:
+                        updated_ts = run_info.get("start_time", now)
+                    if (now - updated_ts) > IMAGE_STALL_TIMEOUT_S:
+                        timed_out_jobs.append({
+                            "run_id": run_id,
+                            "machine_id": machine_entry.get("machine_id"),
+                            "job_id": job_id,
+                            "reason": "stalled",
+                        })
+
+    # Process timeouts outside the lock
+    for timeout_info in timed_out_jobs:
+        _timeout_image_job(
+            timeout_info["run_id"],
+            timeout_info["machine_id"],
+            timeout_info["job_id"],
+            timeout_info["reason"],
+        )
+
+
+def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -> None:
+    """Mark an image job as error due to timeout."""
+    error_msg = f"Job timed out: {reason}"
+    log.warning("Image job timeout: run=%s machine=%s job=%s reason=%s", run_id, machine_id, job_id, reason)
+    with RUN_LOCK:
+        record = RUN_CACHE.get(run_id)
+        if not record:
+            return
+        machine_entry = next(
+            (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+            None,
+        )
+        if not machine_entry:
+            return
+        # Only timeout if still in pending/running
+        if machine_entry.get("status") not in ("pending", "running"):
+            return
+        machine_entry.update({
+            "status": "error",
+            "error": error_msg,
+        })
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        RUN_CACHE[run_id] = record
+        _write_run_record(record)
+        JOB_RUN_MAP.pop(job_id, None)
+
+    # Broadcast error to UI
+    socketio.emit("agent_event", {
+        "machine_id": machine_id,
+        "job_id": job_id,
+        "type": "image_error",
+        "payload": {
+            "run_id": run_id,
+            "message": error_msg,
+            "category": "timeout",
+            "remediation": [
+                f"The image job on this machine was {reason}.",
+                "Check that ComfyUI is responsive on the agent.",
+                "Try restarting the agent or ComfyUI.",
+            ],
+        },
+    })
+    _check_run_complete(run_id)
+
+
+def _start_image_watchdog() -> None:
+    """Start the background image watchdog thread."""
+    global _image_watchdog_thread
+    if _image_watchdog_thread and _image_watchdog_thread.is_alive():
+        return
+    _image_watchdog_thread = threading.Thread(target=_image_watchdog_loop, daemon=True)
+    _image_watchdog_thread.start()
+    log.info("Image watchdog thread started")
+
+
 def _get_active_runs() -> Dict[str, Any]:
     """Get info about currently active runs."""
     with RUN_LOCK:
@@ -1635,6 +1766,9 @@ def api_image_status():
             cap = r.json()
             checkpoints = cap.get("checkpoints") or []
             has_checkpoint = bool(checkpoint_filename and checkpoint_filename in checkpoints)
+            # Get GPU/memory info from machine config for fit estimation
+            gpu_info = m.get("gpu") or {}
+            gpu_vram = gpu_info.get("vram_bytes") or m.get("total_system_ram_bytes") or 0
             statuses.append(
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
@@ -1648,6 +1782,12 @@ def api_image_status():
                     "missing_checkpoint": checkpoint_id if checkpoint_id and not has_checkpoint else None,
                     "last_checked": last_checked,
                     "error": cap.get("error"),
+                    "capabilities": {
+                        "gpu_vram_bytes": gpu_vram,
+                        "total_system_ram_bytes": m.get("total_system_ram_bytes"),
+                        "gpu_name": gpu_info.get("name"),
+                        "gpu_type": gpu_info.get("type"),
+                    },
                 }
             )
         except Exception as e:
@@ -2307,9 +2447,9 @@ def api_start_image():
     checkpoint_id = payload.get("checkpoint", "")
     seed_mode = payload.get("seed_mode", "fixed")
     seed = payload.get("seed")
-    steps = int(payload.get("steps", 30))
-    width = int(payload.get("width", 1024))
-    height = int(payload.get("height", 1024))
+    steps = int(payload.get("steps", 10))
+    width = int(payload.get("width", 512))
+    height = int(payload.get("height", 512))
     num_images = int(payload.get("num_images", 1))
     repeat = int(payload.get("repeat", 1))
 
@@ -2452,6 +2592,37 @@ def api_start_image():
         _mark_run_active(run_id, "image", active_machine_ids)
 
     return jsonify({"run_id": run_id, "seed": seed, "results": results})
+
+
+@app.get("/api/image/job_status")
+def api_image_job_status():
+    """Poll agent for job status by job_id. Useful as fallback when WS events are lost."""
+    job_id = request.args.get("job_id", "")
+    if not job_id:
+        return jsonify({"error": "job_id parameter required"}), 400
+
+    # Find which machine has this job
+    with RUN_LOCK:
+        job_info = JOB_RUN_MAP.get(job_id)
+
+    if not job_info:
+        return jsonify({"error": "Unknown job_id or job already completed"}), 404
+
+    machine_id = job_info.get("machine_id")
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Machine not found: {machine_id}"}), 404
+
+    try:
+        r = requests.get(
+            f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status",
+            params={"job_id": job_id},
+            timeout=5,
+        )
+        r.raise_for_status()
+        return jsonify(r.json())
+    except Exception as exc:
+        return jsonify({"error": str(exc), "machine_id": machine_id}), 502
 
 
 @app.post("/api/generate_sample_prompt")
@@ -2684,6 +2855,7 @@ def on_start_llm(payload):
 if __name__ == "__main__":
     # Start WS connectors before serving
     start_ws_connectors()
+    _start_image_watchdog()
     try:
         socketio.run(app, host="0.0.0.0", port=8080)
     finally:

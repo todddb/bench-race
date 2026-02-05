@@ -140,6 +140,10 @@ RUNNING_JOBS: Dict[str, asyncio.Task] = {}
 SYNC_TASKS: Dict[str, asyncio.Task] = {}
 CHECKPOINT_SYNC_STATUS: Dict[str, Any] = {"active": False, "results": []}
 
+# Per-job status tracking: job_id -> status dict
+# Allows central to poll job state without relying solely on websockets
+JOB_STATUS: Dict[str, Dict[str, Any]] = {}
+
 
 class SyncRequest(BaseModel):
     llm: List[str] = Field(default_factory=list)
@@ -152,9 +156,9 @@ class ComfyTxt2ImgRequest(BaseModel):
     prompt: str
     checkpoint: str
     seed: int
-    steps: int = 30
-    width: int = 1024
-    height: int = 1024
+    steps: int = 10
+    width: int = 512
+    height: int = 512
     num_images: int = 1
     repeat: int = 1
 
@@ -1602,6 +1606,21 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
 
     if job_id in RUNNING_JOBS:
         raise HTTPException(status_code=409, detail="job already running")
+
+    # Initialize job status tracking
+    JOB_STATUS[job_id] = {
+        "status": "pending",
+        "progress": {"current_step": 0, "total_steps": req.steps, "percent": 0},
+        "queue_latency_ms": None,
+        "gen_time_ms": None,
+        "total_ms": None,
+        "images": [],
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "run_id": req.run_id,
+    }
+
     task = asyncio.create_task(_job_runner_comfy(job_id, req))
     RUNNING_JOBS[job_id] = task
 
@@ -1610,9 +1629,42 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
         if t.exception():
             slog.error("job_failed", job_id=job_id, error="Task exception", stack_trace=str(t.exception()))
             log.exception("Comfy job %s terminated with exception", job_id)
+            # Update job status on task exception
+            if job_id in JOB_STATUS:
+                JOB_STATUS[job_id]["status"] = "error"
+                JOB_STATUS[job_id]["error"] = str(t.exception())
+                JOB_STATUS[job_id]["updated_at"] = time.time()
 
     task.add_done_callback(_on_done)
     return {"accepted": True, "agent_job_id": job_id}
+
+
+@app.post("/api/image/start")
+async def image_start(req: ComfyTxt2ImgRequest):
+    """Alias for /api/comfy/txt2img that also returns job_id field."""
+    return await comfy_txt2img(req)
+
+
+@app.get("/api/image/job_status")
+async def image_job_status(job_id: str = ""):
+    """Return status of a specific image generation job."""
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id parameter required")
+    status = JOB_STATUS.get(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
+    return JSONResponse(status)
+
+
+@app.get("/api/image/jobs")
+async def image_jobs(active: bool = False):
+    """List image generation jobs. If active=true, only return non-terminal jobs."""
+    jobs = []
+    for jid, status in JOB_STATUS.items():
+        if active and status.get("status") in ("complete", "error"):
+            continue
+        jobs.append({"job_id": jid, **status})
+    return JSONResponse({"jobs": jobs})
 
 
 @app.post("/api/comfy/sync")
@@ -1837,6 +1889,28 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     base_url = _comfy_base_url()
     checkpoints_dir = _comfy_checkpoints_dir()
 
+    def _update_job_status(updates: Dict[str, Any]) -> None:
+        """Update JOB_STATUS for this job_id."""
+        if job_id in JOB_STATUS:
+            JOB_STATUS[job_id].update(updates)
+            JOB_STATUS[job_id]["updated_at"] = time.time()
+
+    async def _emit_image_error(error_msg: str, formatted: Dict[str, Any]) -> None:
+        """Broadcast image_error event and update JOB_STATUS."""
+        _update_job_status({"status": "error", "error": error_msg})
+        await _broadcast_event(
+            Event(
+                job_id=job_id,
+                type="image_error",
+                payload={
+                    "run_id": req.run_id,
+                    "message": error_msg,
+                    "remediation": formatted["details"].get("remediation", []),
+                    "category": formatted["details"].get("category", "unknown"),
+                },
+            )
+        )
+
     # Log job accepted
     slog.info(
         "job_accepted",
@@ -1854,6 +1928,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     if not checkpoints_dir.exists():
         error_msg = f"Checkpoints dir missing: {checkpoints_dir}"
         formatted = _format_comfy_error(error_msg)
+        _update_job_status({"status": "error", "error": formatted["short"]})
         slog.error(
             "job_failed",
             job_id=job_id,
@@ -1880,6 +1955,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     if req.checkpoint not in _list_checkpoints():
         error_msg = "Checkpoint not found"
         formatted = _format_comfy_error(error_msg)
+        _update_job_status({"status": "error", "error": formatted["short"]})
         slog.error(
             "job_failed",
             job_id=job_id,
@@ -1921,6 +1997,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
 
     # Log job started
     slog.info("job_started", job_id=job_id, backend="comfyui")
+    _update_job_status({"status": "pending"})
 
     submit_time = time.perf_counter()
     total_images = []
@@ -2070,6 +2147,10 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     if started_at is None:
                         started_at = time.perf_counter()
                         queue_latency_ms = (started_at - submit_time) * 1000.0
+                        _update_job_status({
+                            "status": "running",
+                            "queue_latency_ms": queue_latency_ms,
+                        })
                         await _broadcast_event(
                             Event(
                                 job_id=job_id,
@@ -2085,6 +2166,17 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     # Track maximum step observed
                     if current_step > max_step_observed:
                         max_step_observed = current_step
+
+                    # Update job status with progress
+                    pct = round((current_step / total_steps_ws) * 100, 1) if total_steps_ws > 0 else 0
+                    _update_job_status({
+                        "status": "running",
+                        "progress": {
+                            "current_step": current_step,
+                            "total_steps": total_steps_ws,
+                            "percent": pct,
+                        },
+                    })
 
                     # Log first step (IMPORTANT for detecting "0 steps" issue)
                     if current_step >= 1 and not first_step_logged:
@@ -2408,6 +2500,16 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         payload["completed_with_fallback"] = True
     if payload_warning:
         payload["warning"] = payload_warning
+
+    # Update JOB_STATUS on completion
+    _update_job_status({
+        "status": "complete",
+        "queue_latency_ms": queue_latency_ms,
+        "gen_time_ms": gen_time_ms,
+        "total_ms": total_ms,
+        "images": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
+        "progress": {"current_step": req.steps, "total_steps": req.steps, "percent": 100},
+    })
 
     await _broadcast_event(
         Event(
