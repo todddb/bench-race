@@ -32,6 +32,7 @@ class Capabilities(BaseModel):
     ollama_reachable: Optional[bool] = None
     ollama_models: List[str] = Field(default_factory=list)  # Actually available on Ollama
     agent_reachable: Optional[bool] = None  # Set by central when aggregating
+    agent_status: Optional[Literal["ready", "degraded", "offline"]] = None  # Health status with hysteresis
     comfyui_gpu_ok: Optional[bool] = None
     comfyui_cpu_ok: Optional[bool] = None
 

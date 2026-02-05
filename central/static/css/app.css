@@ -561,6 +561,16 @@ body.options-expanded textarea.prompt { min-height: 220px; }
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
 }
 
+.status-badge.degraded {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.status-badge.degraded .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+
 .status-badge.offline {
   background: #fee2e2;
   color: #991b1b;

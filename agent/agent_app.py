@@ -275,6 +275,7 @@ async def _run_segmented_sieve(
             )
             last_progress = now
         low = high + 1
+        # Yield to event loop to allow health checks and other requests to be processed
         await asyncio.sleep(0)
     return count
 
@@ -301,7 +302,8 @@ async def _run_simple_sieve(
                     f"Progress: {pct:.0f}% | primes so far: {_format_count(count)} | elapsed: {elapsed:.1f}s"
                 )
                 last_progress = now
-        if i % 10000 == 0:
+        # Yield to event loop periodically to allow health checks and other requests
+        if i % 5000 == 0:
             await asyncio.sleep(0)
     return count
 
@@ -343,6 +345,7 @@ async def _run_trial_division(
                     f"Progress: {pct:.0f}% | primes so far: {_format_count(count)} | elapsed: {elapsed:.1f}s"
                 )
                 last_progress = now
+        # Yield to event loop periodically to allow health checks and other requests
         if candidate % 10001 == 1:
             await asyncio.sleep(0)
         candidate += 2

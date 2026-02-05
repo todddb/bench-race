@@ -87,6 +87,19 @@ MODEL_POLICY_LOCK = threading.Lock()
 RUNTIME_METRICS: Dict[str, Dict[str, Any]] = {}
 MACHINE_STATE_LOCK = threading.Lock()
 
+# Agent health tracking for hysteresis-based offline detection
+AGENT_HEALTH_STATE: Dict[str, Dict[str, Any]] = {}
+# Structure: {
+#   machine_id: {
+#       "last_success_ts": float,
+#       "consecutive_failures": int,
+#       "last_error": str,
+#       "current_status": str,  # "ready", "degraded", "offline"
+#   }
+# }
+OFFLINE_THRESHOLD_S = 12  # Mark offline after 12s without success
+CONSECUTIVE_FAILURE_THRESHOLD = 3  # Mark offline after 3 consecutive failures
+
 
 def _current_git_sha() -> str:
     try:
@@ -1499,22 +1512,117 @@ def api_reset_agent(machine_id: str):
         }), 500
 
 
+def _is_machine_running(machine_id: str) -> bool:
+    """Check if a machine is currently participating in any active run."""
+    with RUN_LOCK:
+        for run_data in ACTIVE_RUNS.values():
+            if machine_id in run_data.get("machine_ids", []):
+                return True
+    return False
+
+
+def _update_agent_health(machine_id: str, success: bool, error: Optional[str] = None, is_running: bool = False) -> str:
+    """
+    Update agent health state with hysteresis-based offline detection.
+
+    Args:
+        machine_id: The agent's machine ID
+        success: Whether the health check succeeded
+        error: Error message if health check failed
+        is_running: Whether the agent is currently running a job
+
+    Returns:
+        Current status: "ready", "degraded", or "offline"
+    """
+    now = time.time()
+
+    # Initialize health state if not exists
+    if machine_id not in AGENT_HEALTH_STATE:
+        AGENT_HEALTH_STATE[machine_id] = {
+            "last_success_ts": now if success else 0,
+            "consecutive_failures": 0 if success else 1,
+            "last_error": None,
+            "current_status": "ready" if success else "degraded",
+        }
+
+    state = AGENT_HEALTH_STATE[machine_id]
+    old_status = state["current_status"]
+
+    if success:
+        # Health check succeeded - reset failure counters
+        state["last_success_ts"] = now
+        state["consecutive_failures"] = 0
+        state["last_error"] = None
+        state["current_status"] = "ready"
+        new_status = "ready"
+
+        # Log status recovery if transitioning from degraded/offline
+        if old_status in ["degraded", "offline"]:
+            log.info(
+                f"Agent {machine_id} status recovered: {old_status} → {new_status}"
+            )
+    else:
+        # Health check failed - increment failure counter
+        state["consecutive_failures"] += 1
+        state["last_error"] = error or "unknown error"
+
+        time_since_success = now - state["last_success_ts"] if state["last_success_ts"] > 0 else float("inf")
+
+        # Determine new status based on hysteresis thresholds
+        # For agents running jobs, prefer degraded over offline
+        if state["consecutive_failures"] >= CONSECUTIVE_FAILURE_THRESHOLD or time_since_success >= OFFLINE_THRESHOLD_S:
+            # Mark offline only if not running OR if it's been too long
+            if is_running and state["consecutive_failures"] < CONSECUTIVE_FAILURE_THRESHOLD * 2:
+                # Agent is running a job - stay degraded unless severely overdue
+                new_status = "degraded"
+            else:
+                new_status = "offline"
+        elif state["consecutive_failures"] > 0:
+            # Some failures but not enough to mark offline - show degraded
+            new_status = "degraded"
+        else:
+            new_status = "ready"
+
+        state["current_status"] = new_status
+
+        # Log status transitions with diagnostic info
+        if old_status != new_status:
+            log.warning(
+                f"Agent {machine_id} status changed: {old_status} → {new_status} "
+                f"(consecutive_failures={state['consecutive_failures']}, "
+                f"last_success_age_s={time_since_success:.1f}s, "
+                f"last_error='{state['last_error']}')"
+            )
+
+    return state["current_status"]
+
+
 @app.get("/api/capabilities")
 def api_capabilities():
     caps = []
     for m in MACHINES:
+        machine_id = m.get("machine_id")
         try:
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
+
+            # Update health state - success
+            status = _update_agent_health(machine_id, success=True)
+
             cap["agent_reachable"] = True
+            cap["agent_status"] = status  # Add status field
             caps.append(cap)
         except Exception as e:
+            # Update health state - failure
+            status = _update_agent_health(machine_id, success=False, error=str(e))
+
             caps.append(
                 {
-                    "machine_id": m.get("machine_id"),
+                    "machine_id": machine_id,
                     "label": m.get("label"),
-                    "agent_reachable": False,
+                    "agent_reachable": status != "offline",  # degraded still counts as "reachable"
+                    "agent_status": status,
                     "ollama_reachable": None,
                     "ollama_models": [],
                     "llm_models": [],
@@ -1531,11 +1639,18 @@ def api_status():
     required = _required_models()
     statuses = []
     for m in MACHINES:
+        machine_id = m.get("machine_id")
         last_checked = time.time()
+        is_running = _is_machine_running(machine_id)
+
         try:
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
+
+            # Update health state - success
+            status = _update_agent_health(machine_id, success=True, is_running=is_running)
+
             cap["agent_reachable"] = True
             available_llm = _available_llm_models(cap)
             has_selected_model = bool(selected_model and selected_model in available_llm)
@@ -1552,20 +1667,30 @@ def api_status():
             elif cap.get("accelerator_type") == "metal":
                 memory_label = "Unified"
             fit = _compute_fit(m, cap, selected_model or "", num_ctx)
+
+            # Add health state info for UI diagnostics
+            health_state = AGENT_HEALTH_STATE.get(machine_id, {})
+
             statuses.append(
                 {
-                    "machine_id": cap.get("machine_id") or m.get("machine_id"),
+                    "machine_id": cap.get("machine_id") or machine_id,
                     "label": cap.get("label") or m.get("label"),
                     "logo": m.get("logo") or m.get("vendor"),
                     "excluded": m.get("excluded", False),
                     "reachable": True,
                     "agent_reachable": True,
+                    "agent_status": status,
                     "selected_model": selected_model,
                     "has_selected_model": has_selected_model,
                     "available_llm_models": available_llm,
                     "missing_required": missing_required,
                     "last_checked": last_checked,
                     "error": None,
+                    "health_diagnostics": {
+                        "consecutive_failures": health_state.get("consecutive_failures", 0),
+                        "last_success_age_s": time.time() - health_state.get("last_success_ts", time.time()),
+                        "last_error": health_state.get("last_error"),
+                    },
                     "capabilities": {
                         "agent_reachable": True,
                         "comfyui_gpu_ok": cap.get("comfyui_gpu_ok"),
@@ -1577,32 +1702,44 @@ def api_status():
                         **fit,
                         "memory_label": memory_label,
                     },
-                    "runtime_metrics": RUNTIME_METRICS.get(cap.get("machine_id") or m.get("machine_id")),
+                    "runtime_metrics": RUNTIME_METRICS.get(cap.get("machine_id") or machine_id),
                 }
             )
         except Exception as e:
+            # Update health state - failure (run-aware)
+            status = _update_agent_health(machine_id, success=False, error=str(e), is_running=is_running)
+
+            # Add health state info for UI diagnostics
+            health_state = AGENT_HEALTH_STATE.get(machine_id, {})
+
             statuses.append(
                 {
-                    "machine_id": m.get("machine_id"),
+                    "machine_id": machine_id,
                     "label": m.get("label"),
                     "logo": m.get("logo") or m.get("vendor"),
                     "excluded": m.get("excluded", False),
-                    "reachable": False,
-                    "agent_reachable": False,
+                    "reachable": status != "offline",  # degraded still counts as "reachable"
+                    "agent_reachable": status != "offline",
+                    "agent_status": status,
                     "selected_model": selected_model,
                     "has_selected_model": False,
                     "available_llm_models": [],
                     "missing_required": required,
                     "last_checked": last_checked,
                     "error": str(e),
-                    "capabilities": {"agent_reachable": False, "comfyui_gpu_ok": None, "comfyui_cpu_ok": None},
+                    "health_diagnostics": {
+                        "consecutive_failures": health_state.get("consecutive_failures", 0),
+                        "last_success_age_s": time.time() - health_state.get("last_success_ts", time.time()) if health_state.get("last_success_ts", 0) > 0 else float("inf"),
+                        "last_error": health_state.get("last_error"),
+                    },
+                    "capabilities": {"agent_reachable": status != "offline", "comfyui_gpu_ok": None, "comfyui_cpu_ok": None},
                     "model_fit": {
                         "label": "unknown",
                         "fit_score": None,
                         "fit_ratio": None,
                         "memory_label": "RAM",
                     },
-                    "runtime_metrics": RUNTIME_METRICS.get(m.get("machine_id")),
+                    "runtime_metrics": RUNTIME_METRICS.get(machine_id),
                 }
             )
     return jsonify({"model": selected_model, "required": required, "machines": statuses})

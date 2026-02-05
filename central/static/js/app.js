@@ -648,6 +648,10 @@ function updateMachineStatus(machine) {
   // Update vendor logo
   updateVendorLogo(machine);
 
+  // Get agent status from new health tracking system
+  const agentStatus = machine.agent_status || null;
+  const healthDiagnostics = machine.health_diagnostics || {};
+
   // Compute reachability with robust fallback chain
   // Priority: agent_reachable (top-level) > capabilities.agent_reachable > reachable (legacy)
   let agentReachable;
@@ -665,6 +669,36 @@ function updateMachineStatus(machine) {
 
   const isRunning = activeRunMachineIds.has(machine.machine_id);
 
+  // Build tooltip with health diagnostics
+  let tooltip = '';
+  if (agentStatus === 'degraded') {
+    const missedChecks = healthDiagnostics.consecutive_failures || 0;
+    const lastSeenAge = healthDiagnostics.last_success_age_s;
+    const lastSeenStr = lastSeenAge != null && lastSeenAge < 1000
+      ? `${lastSeenAge.toFixed(1)}s ago`
+      : 'unknown';
+
+    tooltip = `Missed ${missedChecks} health check${missedChecks !== 1 ? 's' : ''}; last seen ${lastSeenStr}. May be busy with compute.`;
+  } else if (agentStatus === 'offline' || !agentReachable) {
+    const missedChecks = healthDiagnostics.consecutive_failures || 0;
+    const lastSeenAge = healthDiagnostics.last_success_age_s;
+    const lastSeenStr = lastSeenAge != null && lastSeenAge < 1000
+      ? `${lastSeenAge.toFixed(1)}s ago`
+      : 'never';
+
+    if (missedChecks > 0) {
+      tooltip = `Missed ${missedChecks} health checks; last seen ${lastSeenStr}.`;
+    } else {
+      tooltip = 'Agent is not responding to health checks.';
+    }
+
+    if (healthDiagnostics.last_error) {
+      tooltip += ` Error: ${healthDiagnostics.last_error}`;
+    }
+  }
+
+  statusBadge.title = tooltip;
+
   // If machine is excluded, show "Standby" regardless of connection
   if (machine.excluded) {
     statusBadge.className = 'status-badge standby';
@@ -673,9 +707,13 @@ function updateMachineStatus(machine) {
     // If reachability is unknown, show "Checking..."
     statusBadge.className = 'status-badge checking';
     text.textContent = "Checking";
-  } else if (!agentReachable) {
+  } else if (agentStatus === 'offline' || !agentReachable) {
     statusBadge.className = 'status-badge offline';
     text.textContent = "Offline";
+  } else if (agentStatus === 'degraded') {
+    // Show degraded state for agents that missed some checks
+    statusBadge.className = 'status-badge degraded';
+    text.textContent = isRunning ? "Running" : "Degraded";
   } else if (isRunning) {
     statusBadge.className = 'status-badge running';
     text.textContent = "Running";
@@ -685,10 +723,11 @@ function updateMachineStatus(machine) {
   }
 
   if (DEBUG_UI && previousStatus !== text.textContent) {
-    console.log(`[${machine.machine_id}] Status changed: ${previousStatus} -> ${text.textContent}`);
+    console.log(`[${machine.machine_id}] Status changed: ${previousStatus} -> ${text.textContent} (agent_status=${agentStatus})`);
   }
 
   // Update reset button state based on agent reachability
+  // Degraded agents are still considered reachable
   updateResetButtonState(machine.machine_id, agentReachable);
 }
 
