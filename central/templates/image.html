@@ -130,6 +130,7 @@
             {% for m in machines %}
             <div class="pane card image-pane {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}">
               <div class="pane-header">
+                <img class="vendor-logo hidden" id="vendor-logo-{{ m.machine_id }}" alt="" />
                 <div class="pane-header-main">
                   <div class="pane-title">{{ m.label }}</div>
                   <div class="model-fit" id="model-fit-{{ m.machine_id }}">Checkpoint: --</div>
@@ -152,6 +153,14 @@
                     title="{% if m.excluded %}Click to activate{% else %}Click to exclude{% endif %}"
                   >
                     {% if m.excluded %}Excluded{% else %}Active{% endif %}
+                  </button>
+                  <button
+                    class="btn btn-reset"
+                    id="reset-{{ m.machine_id }}"
+                    data-machine-id="{{ m.machine_id }}"
+                    title="Reset Agent (restart Ollama + ComfyUI)"
+                  >
+                    Reset
                   </button>
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Checkpoints</button>
                 </div>

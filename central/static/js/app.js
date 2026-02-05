@@ -431,10 +431,71 @@ const buildMetricsHtml = (metrics, baselineMetrics) => {
   `;
 };
 
+function detectVendor(machine) {
+  // Detect vendor from machine/GPU metadata
+  const label = (machine.label || "").toLowerCase();
+  const gpuName = (machine.capabilities?.gpu_name || machine.gpu_name || "").toLowerCase();
+  const acceleratorType = machine.capabilities?.accelerator_type || machine.accelerator_type || "";
+
+  // Apple detection
+  if (
+    label.includes("macbook") ||
+    label.includes("mac mini") ||
+    label.includes("mac studio") ||
+    label.includes("mac pro") ||
+    label.includes("apple") ||
+    gpuName.includes("apple") ||
+    gpuName.includes("m1") ||
+    gpuName.includes("m2") ||
+    gpuName.includes("m3") ||
+    gpuName.includes("m4") ||
+    acceleratorType === "metal"
+  ) {
+    return "apple";
+  }
+
+  // NVIDIA detection
+  if (
+    gpuName.includes("nvidia") ||
+    gpuName.includes("rtx") ||
+    gpuName.includes("gtx") ||
+    gpuName.includes("tesla") ||
+    gpuName.includes("quadro") ||
+    acceleratorType === "cuda"
+  ) {
+    return "nvidia";
+  }
+
+  return null;
+}
+
+function updateVendorLogo(machineId, vendor) {
+  const logo = document.getElementById(`vendor-logo-${machineId}`);
+  if (!logo) return;
+
+  if (vendor === "apple") {
+    logo.src = "/static/assets/vendor/apple.png";
+    logo.alt = "Apple";
+    logo.title = "Apple Silicon";
+    logo.classList.remove("hidden");
+  } else if (vendor === "nvidia") {
+    logo.src = "/static/assets/vendor/nvidia.png";
+    logo.alt = "NVIDIA";
+    logo.title = "NVIDIA GPU";
+    logo.classList.remove("hidden");
+  } else {
+    logo.classList.add("hidden");
+  }
+}
+
 function updateMachineStatus(machine) {
   const dot = document.getElementById(`status-dot-${machine.machine_id}`);
   const text = document.getElementById(`status-text-${machine.machine_id}`);
   if (!dot || !text) return;
+
+  // Update vendor logo
+  const vendor = detectVendor(machine);
+  updateVendorLogo(machine.machine_id, vendor);
 
   // Compute reachability with robust fallback chain
   // Priority: agent_reachable (top-level) > capabilities.agent_reachable > reachable (legacy)
@@ -474,6 +535,9 @@ function updateMachineStatus(machine) {
   if (DEBUG_UI && previousStatus !== text.textContent) {
     console.log(`[${machine.machine_id}] Status changed: ${previousStatus} -> ${text.textContent}`);
   }
+
+  // Update reset button state based on agent reachability
+  updateResetButtonState(machine.machine_id, agentReachable);
 }
 
 function updateModelFit(machine) {
@@ -1869,8 +1933,77 @@ function initToggleButtons() {
   });
 }
 
+// Reset agent
+async function resetAgent(machineId) {
+  const btn = document.getElementById(`reset-${machineId}`);
+  if (!btn) return;
+
+  // Check if agent is online
+  const machine = statusCache.get(machineId);
+  if (!machine || !machine.reachable) {
+    showToast("Cannot reset: agent is offline", "error");
+    return;
+  }
+
+  // Disable button and show loading state
+  btn.disabled = true;
+  btn.classList.add("loading");
+  const originalText = btn.textContent;
+  btn.textContent = "Resetting...";
+
+  try {
+    const response = await fetch(`/api/agents/${encodeURIComponent(machineId)}/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const result = await response.json();
+
+    if (response.ok && result.ok) {
+      showToast(`Reset successful for ${machine.label || machineId}`, "success");
+      // Refresh status after reset
+      await fetchStatus();
+    } else {
+      const errorMsg = result.error || "Reset failed";
+      showToast(`Reset failed: ${errorMsg}`, "error");
+      console.error("Reset failed:", result);
+    }
+  } catch (error) {
+    showToast(`Reset error: ${error.message}`, "error");
+    console.error(`Failed to reset agent ${machineId}:`, error);
+  } finally {
+    // Restore button state
+    btn.disabled = false;
+    btn.classList.remove("loading");
+    btn.textContent = originalText;
+  }
+}
+
+// Initialize reset buttons for all machines
+function initResetButtons() {
+  const resetButtons = document.querySelectorAll(".btn-reset");
+  resetButtons.forEach((btn) => {
+    const machineId = btn.getAttribute("data-machine-id");
+    if (machineId) {
+      btn.addEventListener("click", () => resetAgent(machineId));
+    }
+  });
+}
+
+// Update reset button disabled state based on agent status
+function updateResetButtonState(machineId, reachable) {
+  const btn = document.getElementById(`reset-${machineId}`);
+  if (btn) {
+    btn.disabled = !reachable;
+    btn.title = reachable
+      ? "Reset Agent (restart Ollama + ComfyUI)"
+      : "Agent offline";
+  }
+}
+
 // Call initialization after DOM is ready
 initToggleButtons();
+initResetButtons();
 
 // Refresh status button
 document.getElementById("refresh-caps")?.addEventListener("click", async () => {

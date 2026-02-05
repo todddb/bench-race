@@ -79,9 +79,26 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .image-pane.error { border: 2px solid #fca5a5; background: #fef2f2; }
 
 /* Status and model fit row */
-.pane-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.pane-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; position: relative; }
 .pane-header-main { display: flex; flex-direction: column; gap: 4px; min-width: 200px; }
 .pane-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Vendor logo */
+.vendor-logo {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+.vendor-logo:hover {
+  opacity: 1;
+}
+.vendor-logo.hidden {
+  display: none;
+}
 .pane-status .status-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
 .pane-status .status-dot.ready { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
 .pane-status .status-dot.missing { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
@@ -202,25 +219,50 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
   background: #b91c1c;
 }
 
+/* Reset button */
+.btn-reset {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: #f59e0b;
+  color: #fff;
+  border: 2px solid #d97706;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-reset:hover {
+  background: #d97706;
+  transform: translateY(-1px);
+}
+.btn-reset:disabled {
+  background: #9ca3af;
+  border-color: #6b7280;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.btn-reset.loading {
+  position: relative;
+  color: transparent;
+}
+.btn-reset.loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border: 2px solid transparent;
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
 /* Excluded machine state */
 .pane-excluded {
   opacity: 0.6;
   position: relative;
-}
-.pane-excluded::after {
-  content: "EXCLUDED";
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  background: rgba(220, 38, 38, 0.9);
-  color: white;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  pointer-events: none;
-  z-index: 10;
 }
 .pane-excluded .output,
 .pane-excluded .metrics,
