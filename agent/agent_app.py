@@ -182,7 +182,7 @@ class ComputeRequest(BaseModel):
     n: int
     threads: int = 1
     repeat_index: int = 1
-    stream_first_k: int = 100
+    stream_first_k: int = 0
     progress_interval_s: float = 1.0
     job_id: Optional[str] = None
 
@@ -249,7 +249,6 @@ async def _run_segmented_sieve(
     base_primes = [i for i in range(2, sqrt_n + 1) if base_flags[i]]
     segment_size = max(sqrt_n, 1_000_000)
     count = 0
-    emitted = 0
     start_time = time.perf_counter()
     last_progress = start_time
 
@@ -266,11 +265,7 @@ async def _run_segmented_sieve(
                 segment[multiple - low] = 0
         for idx, is_prime in enumerate(segment):
             if is_prime:
-                prime = low + idx
                 count += 1
-                if emitted < stream_first_k:
-                    emitted += 1
-                    await emit_line(f"prime[{emitted}]={prime}")
         now = time.perf_counter()
         if progress_interval_s > 0 and now - last_progress >= progress_interval_s:
             pct = min(100.0, (high / n) * 100.0)
@@ -292,15 +287,11 @@ async def _run_simple_sieve(
 ) -> int:
     flags = await _simple_sieve(n)
     count = 0
-    emitted = 0
     start_time = time.perf_counter()
     last_progress = start_time
     for i in range(2, n + 1):
         if flags[i]:
             count += 1
-            if emitted < stream_first_k:
-                emitted += 1
-                await emit_line(f"prime[{emitted}]={i}")
         if progress_interval_s > 0:
             now = time.perf_counter()
             if now - last_progress >= progress_interval_s:
@@ -323,16 +314,12 @@ async def _run_trial_division(
 ) -> int:
     primes: List[int] = []
     count = 0
-    emitted = 0
     start_time = time.perf_counter()
     last_progress = start_time
 
     if n >= 2:
         primes.append(2)
         count = 1
-        if emitted < stream_first_k:
-            emitted += 1
-            await emit_line("prime[1]=2")
 
     candidate = 3
     while candidate <= n:
@@ -347,15 +334,13 @@ async def _run_trial_division(
         if is_prime:
             primes.append(candidate)
             count += 1
-            if emitted < stream_first_k:
-                emitted += 1
-                await emit_line(f"prime[{emitted}]={candidate}")
         if progress_interval_s > 0:
             now = time.perf_counter()
             if now - last_progress >= progress_interval_s:
+                pct = min(100.0, (candidate / n) * 100.0)
                 elapsed = now - start_time
                 await emit_line(
-                    f"Progress: tested up to {_format_count(candidate)} | primes so far: {_format_count(count)} | elapsed: {elapsed:.1f}s"
+                    f"Progress: {pct:.0f}% | primes so far: {_format_count(count)} | elapsed: {elapsed:.1f}s"
                 )
                 last_progress = now
         if candidate % 10001 == 1:
@@ -368,20 +353,10 @@ async def _run_compute(job_id: str, req: ComputeRequest) -> Dict[str, Any]:
     algorithm = req.algorithm
     n = int(req.n)
     threads_requested = int(req.threads)
-    stream_first_k = max(0, min(int(req.stream_first_k), 5000))
     progress_interval_s = max(0.1, float(req.progress_interval_s))
-    algorithm_labels = {
-        "segmented_sieve": "Segmented Sieve",
-        "simple_sieve": "Simple Sieve",
-        "trial_division": "Trial Division",
-    }
-    label = algorithm_labels.get(algorithm, algorithm)
+    algorithm_id = algorithm
 
     await _emit_compute_line(job_id, f"Compute: Count primes ≤ {n:,}")
-    await _emit_compute_line(
-        job_id,
-        f"Algorithm: {label} | Threads: {threads_requested} | Stream first K: {stream_first_k}",
-    )
     if algorithm == "trial_division":
         await _emit_compute_line(job_id, "Trial division is intentionally slow and for demo/education.")
     threads_used = 1
@@ -390,11 +365,11 @@ async def _run_compute(job_id: str, req: ComputeRequest) -> Dict[str, Any]:
 
     start_time = time.perf_counter()
     if algorithm == "segmented_sieve":
-        primes_found = await _run_segmented_sieve(n, stream_first_k, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
+        primes_found = await _run_segmented_sieve(n, 0, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
     elif algorithm == "simple_sieve":
-        primes_found = await _run_simple_sieve(n, stream_first_k, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
+        primes_found = await _run_simple_sieve(n, 0, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
     elif algorithm == "trial_division":
-        primes_found = await _run_trial_division(n, stream_first_k, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
+        primes_found = await _run_trial_division(n, 0, progress_interval_s, lambda line: _emit_compute_line(job_id, line))
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
@@ -402,12 +377,14 @@ async def _run_compute(job_id: str, req: ComputeRequest) -> Dict[str, Any]:
     elapsed_ms = int(elapsed_s * 1000)
     primes_per_sec = primes_found / elapsed_s if elapsed_s > 0 else None
 
-    await _emit_compute_line(job_id, "DONE")
-    await _emit_compute_line(job_id, f"Primes ≤ N: {_format_count(primes_found)}")
-    await _emit_compute_line(job_id, f"Elapsed: {elapsed_s:.2f}s")
+    await _emit_compute_line(job_id, f"Algorithm: {algorithm_id}")
+    await _emit_compute_line(job_id, f"N: {_format_count(n)}")
+    await _emit_compute_line(job_id, f"Primes: {_format_count(primes_found)}")
     if primes_per_sec is not None:
-        await _emit_compute_line(job_id, f"Rate: {primes_per_sec:.2f} primes/sec")
-    await _emit_compute_line(job_id, f"Algorithm: {label}")
+        await _emit_compute_line(job_id, f"Rate: {primes_per_sec:.1f} primes/s")
+    else:
+        await _emit_compute_line(job_id, "Rate: n/a")
+    await _emit_compute_line(job_id, f"Elapsed: {elapsed_s:.2f} s")
 
     return {
         "ok": True,

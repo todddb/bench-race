@@ -273,14 +273,22 @@
             <h4 class="drawer-section-title">Compute</h4>
             <div class="polling-settings">
               <div class="setting-row">
-                <label class="setting-label" for="compute-stream-first-k">Compute: primes to stream</label>
-                <input type="number" class="setting-input" id="compute-stream-first-k" value="100" min="0" max="5000" />
+                <label class="setting-label" for="compute-auto-n-segmented">Auto N (Segmented Sieve)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-segmented" value="100000000" min="10" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="compute-auto-n-simple">Auto N (Simple Sieve)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-simple" value="40000000" min="10" />
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" for="compute-auto-n-trial">Auto N (Trial Division)</label>
+                <input type="number" class="setting-input" id="compute-auto-n-trial" value="4000000" min="10" />
               </div>
               <div class="setting-row">
                 <label class="setting-label" for="compute-progress-interval">Compute: progress update interval (s)</label>
                 <input type="number" class="setting-input" id="compute-progress-interval" value="1" min="0.1" step="0.1" />
               </div>
-              <div class="setting-helper">Controls output volume for compute benchmarks.</div>
+              <div class="setting-helper">Auto N presets and progress cadence are saved per browser.</div>
             </div>
           </div>
         </div>

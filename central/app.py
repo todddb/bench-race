@@ -2174,7 +2174,7 @@ def api_compute_run():
     n = int(payload.get("n", 50_000_000))
     threads = int(payload.get("threads", 1))
     repeats = int(payload.get("repeats", 1))
-    stream_first_k = int(payload.get("stream_first_k", 100))
+    stream_first_k = int(payload.get("stream_first_k", 0))
     progress_interval_s = float(payload.get("progress_interval_s", 1.0))
     machine_ids = payload.get("machine_ids")
 
