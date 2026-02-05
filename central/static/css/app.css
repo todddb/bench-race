@@ -70,7 +70,7 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .main-layout { display: flex; gap: 16px; align-items: flex-start; }
 .main-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .pane { overflow: hidden; }
-.pane-title { font-weight: 700; margin-bottom: 8px; font-size: 18px; color: var(--title-blue); }
+.pane-title { font-weight: 700; margin-bottom: 0; font-size: 18px; color: var(--title-blue); }
 .output { min-height: 200px; max-height: 320px; background: #0b1020; color: #d7e1ff; padding: 12px; border-radius: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; border: 1px solid rgba(148, 163, 184, 0.2); }
 .metrics { margin-top: 8px; font-size: 13px; color: #111; }
 .muted { color: #666; }
@@ -78,34 +78,12 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .preview-image { max-width: 100%; border-radius: 10px; display: block; }
 .image-pane.error { border: 2px solid #fca5a5; background: #fef2f2; }
 
-/* Status and model fit row */
-.pane-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #e5e7eb;
-}
-.pane-header-main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 200px;
-  flex: 1;
-}
-.pane-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
+/* Status and model fit row - DEPRECATED - see updated layout below at line 488 */
 
 /* Vendor logo */
 .vendor-logo {
-  width: 64px;
-  height: 64px;
+  width: 56px;
+  height: 56px;
   object-fit: contain;
   flex-shrink: 0;
   transition: opacity 0.2s ease;
@@ -115,14 +93,6 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 }
 .vendor-logo.hidden {
   display: none;
-}
-
-/* Pane controls row */
-.pane-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
 }
 .pane-status .status-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
 .pane-status .status-dot.ready { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
@@ -473,47 +443,61 @@ body.options-expanded textarea.prompt { min-height: 220px; }
    Vendor Logo and Pane Layout Updates
    ====================================== */
 
-/* Vendor logo on left */
-.vendor-logo {
-  width: 48px;
-  height: 48px;
-  object-fit: contain;
-  flex-shrink: 0;
-  opacity: 0.7;
-  align-self: flex-start;
-  margin-top: 4px;
-}
-
-/* Update pane header layout to accommodate logo */
+/* Update pane header layout - 2-row grid with logo spanning both rows */
 .pane-header {
   display: grid;
-  grid-template-columns: 48px 1fr auto;
-  gap: 12px;
+  grid-template-columns: 56px 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 8px 12px;
   align-items: start;
+  margin-bottom: 12px;
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
-.pane-header-main {
-  min-width: 0; /* Allow text truncation */
+/* Vendor logo spans both rows on left */
+.vendor-logo {
+  grid-row: 1 / 3;
+  grid-column: 1;
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  opacity: 0.7;
+  align-self: flex-start;
 }
 
-/* Status area on right side */
+/* Row 1: Title and Status */
+.pane-title {
+  grid-row: 1;
+  grid-column: 2;
+  min-width: 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
 .pane-status {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-end;
-}
-
-.status-row-top {
+  grid-row: 1;
+  grid-column: 3;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
 }
 
-.status-row-bottom {
+/* Row 2: Model Fit and Controls */
+.model-fit {
+  grid-row: 2;
+  grid-column: 2;
+}
+
+.pane-controls {
+  grid-row: 2;
+  grid-column: 3;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 /* Status badge styling */
