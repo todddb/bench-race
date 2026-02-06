@@ -219,25 +219,33 @@ def _check_run_complete(run_id: str) -> None:
 
 
 # Timeout constants for image runs
-IMAGE_DISPATCH_TIMEOUT_S = 30   # pending > 30s after dispatch → error
+IMAGE_DISPATCH_TIMEOUT_S = 30   # pending > 30s after dispatch → error (only if no job_id)
 IMAGE_STALL_TIMEOUT_S = 120     # running with no update > 120s → error
+IMAGE_POLL_INTERVAL_S = 1.0     # poll cadence for fallback polling
 _image_watchdog_thread: Optional[threading.Thread] = None
+_polling_jobs: Dict[str, Dict[str, Any]] = {}  # job_id -> {machine_id, run_id, poll_start}
 
 
 def _image_watchdog_loop() -> None:
-    """Background loop that checks for stuck image jobs and times them out."""
+    """Background loop that checks for stuck image jobs and polls agents as fallback."""
     while not _stop_event.is_set():
-        _stop_event.wait(1.0)  # poll every 1s
+        _stop_event.wait(IMAGE_POLL_INTERVAL_S)
         if _stop_event.is_set():
             break
         try:
             _check_image_timeouts()
+            _poll_active_image_jobs()
         except Exception:
             log.exception("Error in image watchdog loop")
 
 
 def _check_image_timeouts() -> None:
-    """Check active image runs for dispatch timeout or stalled heartbeat."""
+    """Check active image runs for stalled heartbeat.
+
+    Dispatch timeout is no longer applied to jobs that have a valid job_id
+    (meaning the HTTP dispatch succeeded and the agent accepted the job).
+    For pending jobs with a job_id, polling fallback handles recovery.
+    """
     now = time.time()
     timed_out_jobs: List[Dict[str, Any]] = []
 
@@ -256,18 +264,21 @@ def _check_image_timeouts() -> None:
                 if not job_id:
                     continue
 
-                # Check dispatch timeout: pending > 30s
-                if status == "pending":
-                    start_time = run_info.get("start_time", now)
-                    if (now - start_time) > IMAGE_DISPATCH_TIMEOUT_S:
-                        timed_out_jobs.append({
-                            "run_id": run_id,
-                            "machine_id": machine_entry.get("machine_id"),
-                            "job_id": job_id,
-                            "reason": "dispatch timeout",
-                        })
-                # Check stall timeout: running with no update > 120s
-                elif status == "running":
+                # Ensure this job is being polled as fallback
+                if job_id not in _polling_jobs:
+                    machine_id = machine_entry.get("machine_id")
+                    _polling_jobs[job_id] = {
+                        "machine_id": machine_id,
+                        "run_id": run_id,
+                        "poll_start": now,
+                    }
+                    log.info("Poll fallback started: job=%s machine=%s run=%s",
+                             job_id, machine_id, run_id)
+
+                # For pending jobs WITH a valid job_id, do NOT apply dispatch timeout.
+                # The HTTP dispatch succeeded; rely on polling to detect completion.
+                # Only timeout if stalled (running with no update > IMAGE_STALL_TIMEOUT_S)
+                if status == "running":
                     updated = record.get("updated_at")
                     if updated:
                         try:
@@ -294,10 +305,123 @@ def _check_image_timeouts() -> None:
         )
 
 
+def _poll_active_image_jobs() -> None:
+    """Poll agents for status of active image jobs as WS fallback.
+
+    If WS events are missed (disconnection, fast jobs), this detects
+    completion via HTTP polling and finalizes state.
+    """
+    jobs_to_poll = dict(_polling_jobs)
+    for job_id, info in jobs_to_poll.items():
+        machine_id = info["machine_id"]
+        run_id = info["run_id"]
+
+        # Check if job is still in JOB_RUN_MAP (not yet finalized)
+        with RUN_LOCK:
+            if job_id not in JOB_RUN_MAP:
+                _polling_jobs.pop(job_id, None)
+                log.info("Poll fallback stopped (job finalized via WS): job=%s", job_id)
+                continue
+
+        machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+        if not machine:
+            _polling_jobs.pop(job_id, None)
+            continue
+
+        try:
+            r = requests.get(
+                f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status",
+                params={"job_id": job_id},
+                timeout=5,
+            )
+            r.raise_for_status()
+            agent_status = r.json()
+        except Exception as exc:
+            log.debug("Poll fallback: agent unreachable for job=%s machine=%s: %s",
+                       job_id, machine_id, exc)
+            continue
+
+        status = agent_status.get("status")
+        if status == "complete":
+            log.info("Poll fallback recovered completion: job=%s machine=%s run=%s",
+                      job_id, machine_id, run_id)
+            _polling_jobs.pop(job_id, None)
+            # Synthesize an image_complete event from polled data
+            payload = {
+                "run_id": run_id,
+                "completed_at_ms": agent_status.get("completed_at_ms"),
+                "queue_latency_ms": agent_status.get("queue_latency_ms"),
+                "gen_time_ms": agent_status.get("gen_time_ms"),
+                "total_ms": agent_status.get("total_ms"),
+                "steps": agent_status.get("progress", {}).get("total_steps"),
+                "seed": agent_status.get("seed"),
+                "checkpoint": agent_status.get("checkpoint"),
+                "images": agent_status.get("images") or [],
+                "resolution": agent_status.get("resolution"),
+                "recovery_source": "poll",
+            }
+            evt = {
+                "machine_id": machine_id,
+                "job_id": job_id,
+                "type": "image_complete",
+                "payload": payload,
+            }
+            _update_run_from_event(evt)
+            socketio.emit("agent_event", evt)
+        elif status == "error":
+            log.info("Poll fallback detected error: job=%s machine=%s", job_id, machine_id)
+            _polling_jobs.pop(job_id, None)
+            error_msg = agent_status.get("error") or "Generation failed"
+            evt = {
+                "machine_id": machine_id,
+                "job_id": job_id,
+                "type": "image_error",
+                "payload": {
+                    "run_id": run_id,
+                    "message": error_msg,
+                    "category": "agent_error",
+                    "remediation": [
+                        "The image generation failed on the agent.",
+                        "Check agent logs for details.",
+                    ],
+                    "recovery_source": "poll",
+                },
+            }
+            _update_run_from_event(evt)
+            socketio.emit("agent_event", evt)
+        elif status == "running" or status == "pending":
+            # Job still in progress on agent; update run record status if stale
+            with RUN_LOCK:
+                record = RUN_CACHE.get(run_id)
+                if record:
+                    machine_entry = next(
+                        (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                        None,
+                    )
+                    if machine_entry and machine_entry.get("status") == "pending" and status == "running":
+                        machine_entry["status"] = "running"
+                        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        RUN_CACHE[run_id] = record
+                        _write_run_record(record)
+                        # Notify UI that job is actually running
+                        progress = agent_status.get("progress") or {}
+                        socketio.emit("agent_event", {
+                            "machine_id": machine_id,
+                            "job_id": job_id,
+                            "type": "image_started",
+                            "payload": {
+                                "run_id": run_id,
+                                "started_at_ms": agent_status.get("started_at_ms"),
+                                "recovery_source": "poll",
+                            },
+                        })
+
+
 def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -> None:
     """Mark an image job as error due to timeout."""
     error_msg = f"Job timed out: {reason}"
     log.warning("Image job timeout: run=%s machine=%s job=%s reason=%s", run_id, machine_id, job_id, reason)
+    _polling_jobs.pop(job_id, None)
     with RUN_LOCK:
         record = RUN_CACHE.get(run_id)
         if not record:
@@ -320,7 +444,19 @@ def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -
         _write_run_record(record)
         JOB_RUN_MAP.pop(job_id, None)
 
-    # Broadcast error to UI
+    # Broadcast error to UI with appropriate remediation
+    if reason == "stalled":
+        remediation = [
+            "The image job was running but stopped sending updates.",
+            "Check that ComfyUI is responsive on the agent.",
+            "Try restarting the agent or ComfyUI.",
+        ]
+    else:
+        remediation = [
+            f"The image job on this machine was {reason}.",
+            "Check that ComfyUI is responsive on the agent.",
+            "Try restarting the agent or ComfyUI.",
+        ]
     socketio.emit("agent_event", {
         "machine_id": machine_id,
         "job_id": job_id,
@@ -329,11 +465,7 @@ def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -
             "run_id": run_id,
             "message": error_msg,
             "category": "timeout",
-            "remediation": [
-                f"The image job on this machine was {reason}.",
-                "Check that ComfyUI is responsive on the agent.",
-                "Try restarting the agent or ComfyUI.",
-            ],
+            "remediation": remediation,
         },
     })
     _check_run_complete(run_id)
@@ -1015,6 +1147,7 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                         "resolution": payload.get("resolution"),
                         "seed": payload.get("seed"),
                         "checkpoint": payload.get("checkpoint"),
+                        "sampler": payload.get("sampler"),
                         "num_images": payload.get("num_images"),
                     }
                 )
@@ -1446,9 +1579,9 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
     backoff = 1.0
     while not _stop_event.is_set():
         try:
-            log.info("Connecting to agent ws %s -> %s", machine_id, ws_uri)
+            log.info("WS connect: machine=%s url=%s", machine_id, ws_uri)
             async with websockets.connect(ws_uri) as ws:
-                log.info("Connected to agent ws %s", machine_id)
+                log.info("WS connected: machine=%s url=%s", machine_id, ws_uri)
                 backoff = 1.0
                 async for raw in ws:
                     if _stop_event.is_set():
@@ -1471,7 +1604,8 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
         except Exception as exc:
             if _stop_event.is_set():
                 break
-            log.warning("Agent ws %s disconnected: %s; retrying in %.1fs", machine_id, exc, backoff)
+            log.warning("WS disconnect: machine=%s url=%s error=%s; retrying in %.1fs",
+                        machine_id, ws_uri, exc, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.5, 10.0)
 
@@ -2508,6 +2642,7 @@ def api_start_image():
     height = int(payload.get("height", 512))
     num_images = int(payload.get("num_images", 1))
     repeat = int(payload.get("repeat", 1))
+    sampler = payload.get("sampler", "DPM++ 2M Karras")
 
     if seed_mode == "random" or seed is None:
         seed = random.randint(1, 2**31 - 1)
@@ -2546,6 +2681,7 @@ def api_start_image():
             "height": height,
             "num_images": num_images,
             "repeat": repeat,
+            "sampler": sampler,
         },
         "central_git_sha": _current_git_sha(),
         "machines": [],
@@ -2605,12 +2741,15 @@ def api_start_image():
                     "height": height,
                     "num_images": num_images,
                     "repeat": repeat,
+                    "sampler": sampler,
                 },
                 timeout=5,
             )
             resp.raise_for_status()
             job = resp.json()
             agent_job_id = job.get("agent_job_id")
+            log.info("Image dispatch OK: run=%s machine=%s job_id=%s",
+                     run_id, m.get("machine_id"), agent_job_id)
             if agent_job_id:
                 JOB_RUN_MAP[agent_job_id] = {
                     "run_id": run_id,

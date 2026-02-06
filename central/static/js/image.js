@@ -1,6 +1,8 @@
 const socket = io();
 const paneMap = new Map();
 const statusCache = new Map();
+const runtimeMetrics = new Map();
+const runSamples = new Map();
 const RUN_LIST_LIMIT = 20;
 const BASELINE_KEY = "bench-race-baseline-run";
 const OPTIONS_STORAGE_KEY = "bench-race-options-expanded";
@@ -419,10 +421,14 @@ const buildImageMetrics = ({
   resolution,
   seed,
   checkpoint,
+  sampler,
 }) => {
   const metrics = [];
   metrics.push(`<div><strong>Settings:</strong> ${formatImageSettings(resolution, steps, seed)}</div>`);
   metrics.push(`<div><strong>Checkpoint:</strong> ${checkpoint || "n/a"}</div>`);
+  if (sampler) {
+    metrics.push(`<div><strong>Sampler:</strong> ${sampler}</div>`);
+  }
   const timingLine = buildImageTimingLine(queueLatencyMs, genTimeMs, totalMs);
   if (timingLine) {
     metrics.push(timingLine);
@@ -827,57 +833,8 @@ const resetProgress = (machineId) => {
 };
 
 // ======================================
-// Checkpoint fit badge
+// Checkpoint fit badge (omitted for Image - not meaningful for checkpoints)
 // ======================================
-const CHECKPOINT_PEAK_VRAM_BYTES = {
-  // Rough estimates of peak VRAM for common checkpoints
-  "sd_xl_base_1.0.safetensors": 8 * 1024 ** 3,  // ~8 GB
-  "sd_xl_refiner_1.0.safetensors": 8 * 1024 ** 3,
-};
-const DEFAULT_CHECKPOINT_PEAK_VRAM = 6 * 1024 ** 3;  // 6 GB fallback
-
-const updateFitBadge = (machineId, machine) => {
-  const badge = document.getElementById(`fit-badge-${machineId}`);
-  if (!badge) return;
-
-  // Get machine memory from capabilities
-  const caps = machine.capabilities || {};
-  const vramBytes = caps.gpu_vram_bytes || caps.total_system_ram_bytes || machine.total_system_ram_bytes || 0;
-  if (!vramBytes) {
-    badge.className = "checkpoint-fit-badge fit-unknown";
-    badge.textContent = "?";
-    badge.title = "Memory info unavailable";
-    return;
-  }
-
-  // Get checkpoint filename from current selection
-  const checkpointId = document.getElementById("checkpoint")?.value || "";
-  const checkpointItem = checkpointCatalog.find((item) => (item.id || item.name) === checkpointId);
-  const filename = checkpointItem?.filename || "";
-  const peakVram = CHECKPOINT_PEAK_VRAM_BYTES[filename] || DEFAULT_CHECKPOINT_PEAK_VRAM;
-
-  const usableVram = vramBytes * 0.9;
-  const ratio = usableVram / peakVram;
-
-  let fitClass, fitLabel, fitTooltip;
-  if (ratio >= 1.2) {
-    fitClass = "fit-good";
-    fitLabel = "Good";
-    fitTooltip = `Fits comfortably (${(ratio).toFixed(1)}x headroom)`;
-  } else if (ratio >= 1.0) {
-    fitClass = "fit-risk";
-    fitLabel = "Tight";
-    fitTooltip = `May be tight (${(ratio).toFixed(1)}x ratio)`;
-  } else {
-    fitClass = "fit-fail";
-    fitLabel = "OOM Risk";
-    fitTooltip = `May run out of memory (${(ratio).toFixed(1)}x ratio)`;
-  }
-
-  badge.className = `checkpoint-fit-badge ${fitClass}`;
-  badge.textContent = fitLabel;
-  badge.title = fitTooltip;
-};
 
 // ======================================
 // ETA estimation
@@ -946,8 +903,7 @@ const fetchStatus = async () => {
           syncButton.classList.add("hidden");
         }
       }
-      // Update checkpoint fit badge
-      updateFitBadge(m.machine_id, m);
+      // Checkpoint fit badge omitted for Image (not meaningful for checkpoints)
     });
     const banner = document.getElementById("preflight-banner");
     if (banner) {
@@ -1020,6 +976,8 @@ const startRun = async () => {
   const repeat = parseInt(document.getElementById("repeat")?.value || "1", 10);
   const [width, height] = resolution.split("x").map((value) => parseInt(value, 10));
 
+  const sampler = document.getElementById("sampler")?.value || "DPM++ 2M Karras";
+
   const payload = {
     prompt,
     checkpoint,
@@ -1030,6 +988,7 @@ const startRun = async () => {
     height,
     num_images: numImages,
     repeat,
+    sampler,
   };
 
   paneMap.forEach((_, machineId) => {
@@ -1220,6 +1179,7 @@ const renderRunToPanes = (run) => {
       resolution,
       seed: entry.seed ?? run.settings?.seed,
       checkpoint: run.settings?.checkpoint_filename ?? entry.checkpoint ?? run.model,
+      sampler: entry.sampler ?? run.settings?.sampler,
     });
     setPaneMetrics(machineId, metricsHtml);
     if (entry.status === "error") {
@@ -1553,6 +1513,166 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
   });
 });
 
+// ======================================
+// Sparkline rendering (CPU/GPU + MEM %)
+// ======================================
+const SPARKLINE_WIDTH = 120;
+const SPARKLINE_HEIGHT = 24;
+
+const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
+  if (!values || values.length === 0) return "";
+  const filteredValues = values.filter((v) => v != null && !Number.isNaN(v));
+  if (filteredValues.length === 0) return "";
+  const max = maxValue || Math.max(...filteredValues, 1);
+  const hasTimes = Array.isArray(times) && times.length === values.length && startTime != null && endTime != null;
+  const range = hasTimes ? Math.max(endTime - startTime, 1) : null;
+  const step = values.length > 1 ? width / (values.length - 1) : width;
+  let d = "";
+  let started = false;
+  values.forEach((value, index) => {
+    if (value == null || Number.isNaN(value)) {
+      started = false;
+      return;
+    }
+    let x = index * step;
+    if (hasTimes) {
+      x = ((times[index] - startTime) / range) * width;
+    }
+    const y = height - (Math.min(value, max) / max) * height;
+    if (!started) {
+      d += `M ${x.toFixed(2)} ${y.toFixed(2)} `;
+      started = true;
+    } else {
+      d += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+    }
+  });
+  return d.trim();
+};
+
+const renderSparkline = (svg, series, options = {}) => {
+  if (!svg) return;
+  const width = options.width || SPARKLINE_WIDTH;
+  const height = options.height || SPARKLINE_HEIGHT;
+  const startTime = options.startTime ?? null;
+  const endTime = options.endTime ?? null;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = "";
+  series.forEach((item) => {
+    const pathData = buildSparklinePath(item.values, width, height, item.maxValue, item.times, startTime, endTime);
+    if (!pathData) return;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    path.setAttribute("class", item.className);
+    svg.appendChild(path);
+  });
+  if (options.title) svg.setAttribute("title", options.title);
+};
+
+const getLastNumeric = (values) => {
+  if (!Array.isArray(values)) return null;
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    const value = values[i];
+    if (value != null && !Number.isNaN(value)) return value;
+  }
+  return null;
+};
+
+const recordRunSample = (machineId, metrics) => {
+  if (!metrics) return;
+  const cpu = getLastNumeric(metrics.cpu_pct || []);
+  const gpu = getLastNumeric(metrics.gpu_pct || []);
+  const vramUsed = getLastNumeric(metrics.vram_used_mib || []);
+  const vramTotal = getLastNumeric(metrics.vram_total_mib || []);
+  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib || []);
+  const machine = statusCache.get(machineId);
+  const totalRamBytes = machine?.capabilities?.total_system_ram_bytes || machine?.total_system_ram_bytes;
+
+  let memPct = null;
+  if (vramUsed != null && vramTotal != null && vramTotal > 0) {
+    memPct = (vramUsed / vramTotal) * 100;
+  } else if (systemMemMib != null && totalRamBytes) {
+    memPct = ((systemMemMib * 1024 * 1024) / totalRamBytes) * 100;
+  }
+
+  if (cpu == null && gpu == null && memPct == null) return;
+
+  let samples = runSamples.get(machineId) || [];
+  samples.push({ t: performance.now(), cpu, gpu, mem: memPct });
+  // Rolling window of ~120 samples
+  if (samples.length > 120) samples = samples.slice(-120);
+  runSamples.set(machineId, samples);
+};
+
+const extractSeries = (samples, key) => {
+  const values = [];
+  const times = [];
+  samples.forEach((sample) => {
+    const value = sample[key];
+    if (value == null || Number.isNaN(value)) return;
+    values.push(value);
+    times.push(sample.t);
+  });
+  return { values, times };
+};
+
+const renderImageSparklines = (machineId, metrics = null) => {
+  const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
+  const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
+  const utilPlaceholder = document.getElementById(`sparkline-util-placeholder-${machineId}`);
+  const memPlaceholder = document.getElementById(`sparkline-mem-placeholder-${machineId}`);
+  const utilBlock = utilSvg?.closest(".sparkline-block");
+  const memBlock = memSvg?.closest(".sparkline-block");
+  const resolvedMetrics = metrics || runtimeMetrics.get(machineId);
+
+  if (!resolvedMetrics && !runSamples.get(machineId)?.length) {
+    utilPlaceholder?.classList.remove("hidden");
+    memPlaceholder?.classList.remove("hidden");
+    utilBlock?.classList.add("is-empty");
+    memBlock?.classList.add("is-empty");
+    return;
+  }
+
+  const samples = runSamples.get(machineId) || [];
+  const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
+  const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
+  const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+  const startTime = samples[0]?.t ?? performance.now();
+  const endTime = performance.now();
+
+  const hasGpuUtil = gpuValues.length > 0;
+  const hasCpuUtil = cpuValues.length > 0;
+  const hasUtil = hasGpuUtil || hasCpuUtil;
+
+  const utilSeries = [];
+  if (hasGpuUtil) {
+    utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
+    utilSeries.push({ values: gpuValues, times: gpuTimes, className: "gpu-line", maxValue: 100 });
+  } else if (hasCpuUtil) {
+    utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
+  }
+
+  utilPlaceholder?.classList.toggle("hidden", hasUtil);
+  utilBlock?.classList.toggle("is-empty", !hasUtil);
+  if (hasUtil) {
+    renderSparkline(utilSvg, utilSeries, { startTime, endTime });
+  }
+
+  const hasMemData = memValues.length > 0;
+  memPlaceholder?.classList.toggle("hidden", hasMemData);
+  memBlock?.classList.toggle("is-empty", !hasMemData);
+  if (hasMemData) {
+    renderSparkline(memSvg, [{ values: memValues, times: memTimes, className: "mem-line", maxValue: 100 }], {
+      startTime,
+      endTime,
+    });
+  }
+};
+
+const updateImageRuntimeMetrics = (machineId, metrics) => {
+  recordRunSample(machineId, metrics);
+  renderImageSparklines(machineId, metrics);
+};
+
 // Handle run lifecycle events for adaptive polling
 socket.on("run_lifecycle", (event) => {
   if (!event || !event.type) return;
@@ -1577,6 +1697,18 @@ socket.on("run_lifecycle", (event) => {
 
 socket.on("agent_event", (event) => {
   if (!event || !event.type) return;
+
+  // Handle runtime metrics for sparklines (applies to all event types)
+  if (event.type === "runtime_metrics_update") {
+    const metrics = event.payload || {};
+    const mid = event.machine_id;
+    if (mid) {
+      runtimeMetrics.set(mid, metrics);
+      updateImageRuntimeMetrics(mid, metrics);
+    }
+    return;
+  }
+
   if (!event.type.startsWith("image_")) return;
   const payload = event.payload || {};
   const runId = payload.run_id;
@@ -1673,6 +1805,7 @@ socket.on("agent_event", (event) => {
       resolution: payload.resolution,
       seed: payload.seed,
       checkpoint: payload.checkpoint,
+      sampler: payload.sampler,
     });
     setPaneMetrics(machineId, metricsHtml);
     setPaneStatus(machineId, "ready", "Complete");
@@ -1890,13 +2023,10 @@ etaInputIds.forEach((id) => {
 // Initial ETA computation
 computeETA();
 
-// Update fit badges when checkpoint changes
+// Update ETA when checkpoint changes
 const checkpointSelect = document.getElementById("checkpoint");
 if (checkpointSelect) {
   checkpointSelect.addEventListener("change", () => {
-    statusCache.forEach((machine, machineId) => {
-      updateFitBadge(machineId, machine);
-    });
     computeETA();
   });
 }
