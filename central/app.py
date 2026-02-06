@@ -115,6 +115,7 @@ def _valid_run_id(run_id: str) -> bool:
 
 
 def _write_run_record(record: Dict[str, Any]) -> None:
+    _normalize_run_record(record)
     path = _run_path(record["run_id"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
@@ -969,10 +970,57 @@ def _normalize_epoch_ms(value: Optional[float]) -> Optional[float]:
     return ts
 
 
+def _normalize_duration_ms(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _compute_latency_ms(start_ms: Optional[float], end_ms: Optional[float]) -> Optional[float]:
     if start_ms is None or end_ms is None:
         return None
     return max(0.0, end_ms - start_ms)
+
+
+def _normalize_image_machine_timing(machine_entry: Dict[str, Any]) -> None:
+    started_at_ms = _normalize_epoch_ms(machine_entry.get("started_at_ms"))
+    first_progress_at_ms = _normalize_epoch_ms(machine_entry.get("first_progress_at_ms"))
+    dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
+    queue_latency_ms = _normalize_duration_ms(machine_entry.get("queue_latency_ms"))
+    total_ms = _normalize_duration_ms(machine_entry.get("total_ms"))
+    completed_at_ms = _normalize_epoch_ms(machine_entry.get("completed_at_ms"))
+
+    if started_at_ms is None:
+        if first_progress_at_ms is not None:
+            started_at_ms = first_progress_at_ms
+        elif dispatch_at_ms is not None and queue_latency_ms is not None:
+            started_at_ms = dispatch_at_ms + queue_latency_ms
+
+    if first_progress_at_ms is None and started_at_ms is not None:
+        first_progress_at_ms = started_at_ms
+
+    if completed_at_ms is None:
+        if started_at_ms is not None and total_ms is not None:
+            completed_at_ms = started_at_ms + total_ms
+        elif dispatch_at_ms is not None and total_ms is not None:
+            completed_at_ms = dispatch_at_ms + total_ms
+
+    if started_at_ms is not None and machine_entry.get("started_at_ms") is None:
+        machine_entry["started_at_ms"] = started_at_ms
+    if first_progress_at_ms is not None and machine_entry.get("first_progress_at_ms") is None:
+        machine_entry["first_progress_at_ms"] = first_progress_at_ms
+    if completed_at_ms is not None and machine_entry.get("completed_at_ms") is None:
+        machine_entry["completed_at_ms"] = completed_at_ms
+
+
+def _normalize_run_record(record: Dict[str, Any]) -> None:
+    if record.get("type") != "image":
+        return
+    for machine_entry in record.get("machines") or []:
+        _normalize_image_machine_timing(machine_entry)
 
 
 def _normalize_images(images: Any) -> list:
