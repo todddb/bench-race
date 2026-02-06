@@ -54,6 +54,74 @@ let activeOverlay = null;
 let lastOverlayFocus = null;
 let checkpointCatalog = [];
 const checkpointSyncState = new Map();
+const finalImageByRunMachine = new Map();
+const machineRunState = new Map();
+
+const STATUS_RANK = {
+  pending: 0,
+  running: 1,
+  complete: 2,
+  error: 2,
+  skipped: 2,
+  blocked: 2,
+};
+
+const getStatusRank = (status) => {
+  if (!status) return -1;
+  return STATUS_RANK[status] ?? -1;
+};
+
+const ensureRunImageCache = (runId) => {
+  if (!runId) return null;
+  if (!finalImageByRunMachine.has(runId)) {
+    finalImageByRunMachine.set(runId, new Map());
+  }
+  return finalImageByRunMachine.get(runId);
+};
+
+const cacheFinalImage = (runId, machineId, src) => {
+  if (!runId || !machineId || !src) return;
+  const runCache = ensureRunImageCache(runId);
+  runCache?.set(machineId, src);
+};
+
+const getCachedFinalImage = (runId, machineId) => {
+  if (!runId || !machineId) return null;
+  return finalImageByRunMachine.get(runId)?.get(machineId) || null;
+};
+
+const clearCachedFinalImage = (runId, machineId) => {
+  if (!runId || !machineId) return;
+  finalImageByRunMachine.get(runId)?.delete(machineId);
+};
+
+const getMachineRunState = (machineId, runId) => {
+  if (!machineId) return null;
+  let state = machineRunState.get(machineId);
+  if (!state || (runId && state.runId && state.runId !== runId)) {
+    state = {
+      runId: runId || null,
+      status: null,
+      finalSrc: null,
+    };
+    machineRunState.set(machineId, state);
+  } else if (runId && !state.runId) {
+    state.runId = runId;
+  }
+  return state;
+};
+
+const shouldApplyStatusUpdate = (state, nextStatus) => {
+  if (!state || !nextStatus) return true;
+  const currentRank = getStatusRank(state.status);
+  const nextRank = getStatusRank(nextStatus);
+  return nextRank >= currentRank;
+};
+
+const resolveDisplayRunId = () => {
+  if (viewingMode === "history") return viewingRunId;
+  return liveRunId;
+};
 
 // Load saved settings from localStorage
 const loadPollingSettings = () => {
@@ -235,18 +303,20 @@ const fetchActiveRuns = async () => {
 // Preview visibility management - hide when idle, show when active
 const updatePreviewVisibility = () => {
   const showPreview = isRunActive && previewConfig.enableLivePreview;
+  const displayRunId = resolveDisplayRunId();
   paneMap.forEach((pane, machineId) => {
     const previewEl = document.getElementById(`preview-${machineId}`);
     const placeholderEl = document.getElementById(`preview-placeholder-${machineId}`);
+    const cachedFinal = getCachedFinalImage(displayRunId, machineId);
     if (previewEl) {
-      if (showPreview) {
+      if (showPreview || cachedFinal) {
         previewEl.classList.remove("preview-hidden");
       } else {
         previewEl.classList.add("preview-hidden");
       }
     }
     if (placeholderEl) {
-      placeholderEl.style.display = showPreview ? "none" : "block";
+      placeholderEl.style.display = showPreview || cachedFinal ? "none" : "block";
     }
   });
 };
@@ -315,6 +385,49 @@ const formatTimestamp = (isoString) => {
 const formatMetric = (value, unit, decimals = 1) => {
   if (value == null || Number.isNaN(value)) return "n/a";
   return `${value.toFixed(decimals)}${unit}`;
+};
+
+const formatDurationSeconds = (ms, decimals = 2) => {
+  if (ms == null || Number.isNaN(ms)) return null;
+  return (ms / 1000).toFixed(decimals);
+};
+
+const formatImageSettings = (resolution, steps, seed) => {
+  const safeResolution = resolution || "n/a";
+  const stepsText = steps != null ? `${steps} steps` : "n/a steps";
+  const seedText = seed != null ? seed : "n/a";
+  return `${safeResolution} @ ${stepsText} (seed ${seedText})`;
+};
+
+const buildImageTimingLine = (queueMs, genMs, totalMs) => {
+  const parts = [];
+  const queue = formatDurationSeconds(queueMs);
+  const gen = formatDurationSeconds(genMs);
+  const total = formatDurationSeconds(totalMs);
+  if (queue != null) parts.push(`Queue ${queue}s`);
+  if (gen != null) parts.push(`Gen ${gen}s`);
+  if (total != null) parts.push(`Total ${total}s`);
+  if (!parts.length) return "";
+  return `<div><strong>Timing:</strong> ${parts.join(" • ")}</div>`;
+};
+
+const buildImageMetrics = ({
+  queueLatencyMs,
+  genTimeMs,
+  totalMs,
+  steps,
+  resolution,
+  seed,
+  checkpoint,
+}) => {
+  const metrics = [];
+  metrics.push(`<div><strong>Settings:</strong> ${formatImageSettings(resolution, steps, seed)}</div>`);
+  metrics.push(`<div><strong>Checkpoint:</strong> ${checkpoint || "n/a"}</div>`);
+  const timingLine = buildImageTimingLine(queueLatencyMs, genTimeMs, totalMs);
+  if (timingLine) {
+    metrics.push(timingLine);
+  }
+  return metrics.join("");
 };
 
 const formatBytes = (bytes) => {
@@ -637,7 +750,7 @@ const updateMachinePaneStatus = (machine) => {
   return { blocked: false, excluded: false };
 };
 
-const setPreviewImage = (machineId, src, force = false) => {
+const setPreviewImage = (machineId, src, force = false, runId = null) => {
   const img = document.getElementById(`preview-${machineId}`);
   if (!img) return;
   // Force is used for final images (not live previews)
@@ -645,12 +758,29 @@ const setPreviewImage = (machineId, src, force = false) => {
     return;
   }
   img.src = src || "";
+  if (force && src) {
+    cacheFinalImage(runId, machineId, src);
+    const state = getMachineRunState(machineId, runId);
+    if (state) {
+      state.finalSrc = src;
+    }
+  }
   // Use CSS class instead of inline style for proper preview hiding
   if (src) {
     img.classList.remove("preview-hidden");
   } else {
     img.classList.add("preview-hidden");
   }
+};
+
+const clearMachineFinalImage = (machineId, runId) => {
+  clearCachedFinalImage(runId, machineId);
+  const state = getMachineRunState(machineId, runId);
+  if (state) {
+    state.finalSrc = null;
+    state.status = null;
+  }
+  setPreviewImage(machineId, "", true, runId);
 };
 
 const updateCheckpointLabel = (checkpointId) => {
@@ -870,6 +1000,9 @@ const handleJobResults = (results) => {
       setPaneMetrics(r.machine_id, `<span class="muted">Skipped</span>`);
       return;
     }
+    if (liveRunId) {
+      clearMachineFinalImage(r.machine_id, liveRunId);
+    }
     showProgress(r.machine_id, "Queued", 0, Date.now());
     setPaneMetrics(r.machine_id, `<span class="muted">Job started…</span>`);
   });
@@ -1057,19 +1190,37 @@ const renderRunToPanes = (run) => {
     if (!machineId) return;
     const images = entry.images || [];
     if (images.length > 0) {
-      setPreviewImage(machineId, `/api/runs/${encodeURIComponent(run.run_id)}/images/${images[0]}`);
+      setPreviewImage(
+        machineId,
+        `/api/runs/${encodeURIComponent(run.run_id)}/images/${images[0]}`,
+        true,
+        run.run_id,
+      );
     } else if (entry.preview_path) {
-      setPreviewImage(machineId, `/api/runs/${encodeURIComponent(run.run_id)}/images/${entry.preview_path}`);
+      setPreviewImage(
+        machineId,
+        `/api/runs/${encodeURIComponent(run.run_id)}/images/${entry.preview_path}`,
+      );
+    } else {
+      const cached = getCachedFinalImage(run.run_id, machineId);
+      if (cached) {
+        setPreviewImage(machineId, cached, true, run.run_id);
+      }
     }
-    const metricsHtml = `
-      <div><strong>Queue:</strong> ${formatMetric(entry.queue_latency_ms, " ms")}</div>
-      <div><strong>Gen:</strong> ${formatMetric(entry.gen_time_ms, " ms")}</div>
-      <div><strong>Total:</strong> ${formatMetric(entry.total_ms, " ms")}</div>
-      <div><strong>Steps:</strong> ${entry.steps ?? run.settings?.steps ?? "n/a"}</div>
-      <div><strong>Resolution:</strong> ${entry.resolution ?? `${run.settings?.width}x${run.settings?.height}`}</div>
-      <div><strong>Seed:</strong> ${entry.seed ?? run.settings?.seed ?? "n/a"}</div>
-      <div><strong>Checkpoint:</strong> ${entry.checkpoint ?? run.model ?? "n/a"}</div>
-    `;
+    const resolution = entry.resolution ?? (
+      run.settings?.width && run.settings?.height
+        ? `${run.settings.width}x${run.settings.height}`
+        : "n/a"
+    );
+    const metricsHtml = buildImageMetrics({
+      queueLatencyMs: entry.queue_latency_ms,
+      genTimeMs: entry.gen_time_ms,
+      totalMs: entry.total_ms,
+      steps: entry.steps ?? run.settings?.steps,
+      resolution,
+      seed: entry.seed ?? run.settings?.seed,
+      checkpoint: run.settings?.checkpoint_filename ?? entry.checkpoint ?? run.model,
+    });
     setPaneMetrics(machineId, metricsHtml);
     if (entry.status === "error") {
       hideProgress(machineId);
@@ -1407,8 +1558,14 @@ socket.on("run_lifecycle", (event) => {
   if (!event || !event.type) return;
   if (event.type === "run_start") {
     setRunActive(true, event.run_id);
+    if (viewingMode === "live" && (!liveRunId || liveRunId === event.run_id)) {
+      liveRunId = event.run_id;
+    }
     if (Array.isArray(event.machine_ids)) {
       setActiveRunMachines(event.run_id, event.machine_ids);
+      event.machine_ids.forEach((machineId) => {
+        clearMachineFinalImage(machineId, event.run_id);
+      });
     }
     console.log("Run started:", event.run_id);
   } else if (event.type === "run_end") {
@@ -1427,6 +1584,10 @@ socket.on("agent_event", (event) => {
   if (viewingMode === "live" && liveRunId && liveRunId !== runId) return;
   const machineId = event.machine_id;
   if (!machineId) return;
+  if (viewingMode === "live" && runId && (!liveRunId || liveRunId === runId)) {
+    liveRunId = runId;
+  }
+  const state = getMachineRunState(machineId, runId);
 
   if (event.type === "image_checkpoint_sync_start") {
     checkpointSyncState.set(machineId, { active: true, name: payload.items?.[0] });
@@ -1463,14 +1624,18 @@ socket.on("agent_event", (event) => {
   }
 
   if (event.type === "image_started") {
+    if (!shouldApplyStatusUpdate(state, "running")) return;
+    if (state) state.status = "running";
     showProgress(machineId, "Generating", 0, Date.now());
     setPaneMetrics(
       machineId,
-      `<div><strong>Queue latency:</strong> ${formatMetric(payload.queue_latency_ms, " ms")}</div>`,
+      buildImageTimingLine(payload.queue_latency_ms, null, null) || "<span class=\"muted\">Generating…</span>",
     );
     setPaneStatus(machineId, "running", "Running");
   }
   if (event.type === "image_progress") {
+    if (!shouldApplyStatusUpdate(state, "running")) return;
+    if (state) state.status = "running";
     const step = payload.step ?? 0;
     const totalSteps = payload.total_steps ?? 0;
     const pct = totalSteps > 0 ? (step / totalSteps) * 100 : 0;
@@ -1481,31 +1646,40 @@ socket.on("agent_event", (event) => {
     );
   }
   if (event.type === "image_preview") {
+    if (state && getStatusRank(state.status) >= getStatusRank("complete")) return;
     // Apply throttling to preview updates to reduce CPU/GPU load
     if (payload.image_b64 && canUpdatePreview(machineId)) {
-      setPreviewImage(machineId, `data:image/jpeg;base64,${payload.image_b64}`);
+      setPreviewImage(machineId, `data:image/jpeg;base64,${payload.image_b64}`, false, runId);
     }
   }
   if (event.type === "image_complete") {
+    if (state) state.status = "complete";
     const images = payload.images || [];
     if (images.length > 0 && images[0].image_b64) {
       // Force show final image even if live preview is disabled
-      setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`, true);
+      setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`, true, runId);
+    } else {
+      const cached = getCachedFinalImage(runId, machineId);
+      if (cached) {
+        setPreviewImage(machineId, cached, true, runId);
+      }
     }
     showProgress(machineId, "Complete", 100, Date.now());
-    const metricsHtml = `
-      <div><strong>Queue:</strong> ${formatMetric(payload.queue_latency_ms, " ms")}</div>
-      <div><strong>Gen:</strong> ${formatMetric(payload.gen_time_ms, " ms")}</div>
-      <div><strong>Total:</strong> ${formatMetric(payload.total_ms, " ms")}</div>
-      <div><strong>Steps:</strong> ${payload.steps ?? "n/a"}</div>
-      <div><strong>Resolution:</strong> ${payload.resolution ?? "n/a"}</div>
-      <div><strong>Seed:</strong> ${payload.seed ?? "n/a"}</div>
-      <div><strong>Checkpoint:</strong> ${payload.checkpoint ?? "n/a"}</div>
-    `;
+    const metricsHtml = buildImageMetrics({
+      queueLatencyMs: payload.queue_latency_ms,
+      genTimeMs: payload.gen_time_ms,
+      totalMs: payload.total_ms,
+      steps: payload.steps,
+      resolution: payload.resolution,
+      seed: payload.seed,
+      checkpoint: payload.checkpoint,
+    });
     setPaneMetrics(machineId, metricsHtml);
     setPaneStatus(machineId, "ready", "Complete");
   }
   if (event.type === "image_error") {
+    if (state && getStatusRank(state.status) > getStatusRank("running")) return;
+    if (state) state.status = "error";
     hideProgress(machineId);
     const remediation = Array.isArray(payload.remediation) && payload.remediation.length
       ? `<ul class="remediation">${payload.remediation.map((item) => `<li>${item}</li>`).join("")}</ul>`
@@ -1655,6 +1829,10 @@ async function resetAgent(machineId) {
         showToast(`Reset complete (warnings) for ${label}`, "warning");
       } else {
         showToast(`Reset successful for ${label}`, "success");
+      }
+      const displayRunId = resolveDisplayRunId();
+      if (displayRunId) {
+        clearMachineFinalImage(machineId, displayRunId);
       }
       // Refresh status after reset (will update to "Ready")
       await fetchStatus();

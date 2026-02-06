@@ -1608,6 +1608,7 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
         raise HTTPException(status_code=409, detail="job already running")
 
     # Initialize job status tracking
+    created_at_ms = time.time() * 1000.0
     JOB_STATUS[job_id] = {
         "status": "pending",
         "progress": {"current_step": 0, "total_steps": req.steps, "percent": 0},
@@ -1616,8 +1617,13 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
         "total_ms": None,
         "images": [],
         "error": None,
-        "created_at": time.time(),
-        "updated_at": time.time(),
+        "created_at": created_at_ms / 1000.0,
+        "created_at_ms": created_at_ms,
+        "updated_at": created_at_ms / 1000.0,
+        "updated_at_ms": created_at_ms,
+        "started_at_ms": None,
+        "first_progress_at_ms": None,
+        "completed_at_ms": None,
         "run_id": req.run_id,
     }
 
@@ -1893,7 +1899,9 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         """Update JOB_STATUS for this job_id."""
         if job_id in JOB_STATUS:
             JOB_STATUS[job_id].update(updates)
-            JOB_STATUS[job_id]["updated_at"] = time.time()
+            updated_at_ms = time.time() * 1000.0
+            JOB_STATUS[job_id]["updated_at"] = updated_at_ms / 1000.0
+            JOB_STATUS[job_id]["updated_at_ms"] = updated_at_ms
 
     async def _emit_image_error(error_msg: str, formatted: Dict[str, Any]) -> None:
         """Broadcast image_error event and update JOB_STATUS."""
@@ -2006,6 +2014,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     max_step_observed = 0  # Track maximum step for zero-step detection
     first_step_logged = False  # Track if we've logged job_first_step
     started_at = None
+    started_at_ms = None
     fallback_attempted = False
     fallback_used = False
 
@@ -2139,17 +2148,20 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
 
                 # Define progress callback to track steps and broadcast events
                 async def on_progress_async(progress: ProgressEvent):
-                    nonlocal current_step, max_step_observed, first_step_logged, started_at
+                    nonlocal current_step, max_step_observed, first_step_logged, started_at, started_at_ms
                     current_step = progress.current_step
                     total_steps_ws = progress.total_steps
 
                     # Mark started_at on first progress
                     if started_at is None:
                         started_at = time.perf_counter()
+                        started_at_ms = time.time() * 1000.0
                         queue_latency_ms = (started_at - submit_time) * 1000.0
                         _update_job_status({
                             "status": "running",
                             "queue_latency_ms": queue_latency_ms,
+                            "started_at_ms": started_at_ms,
+                            "first_progress_at_ms": started_at_ms,
                         })
                         await _broadcast_event(
                             Event(
@@ -2158,7 +2170,9 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                 payload={
                                     "run_id": req.run_id,
                                     "queue_latency_ms": queue_latency_ms,
-                                    "started_at": time.time(),
+                                    "started_at": started_at_ms / 1000.0,
+                                    "started_at_ms": started_at_ms,
+                                    "first_progress_at_ms": started_at_ms,
                                 },
                             )
                         )
@@ -2447,8 +2461,11 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 break
 
     end_time = time.perf_counter()
+    completed_at_ms = time.time() * 1000.0
     if started_at is None:
         started_at = submit_time
+    if started_at_ms is None:
+        started_at_ms = completed_at_ms
     queue_latency_ms = (started_at - submit_time) * 1000.0
     gen_time_ms = (end_time - started_at) * 1000.0
     total_ms = (end_time - submit_time) * 1000.0
@@ -2489,6 +2506,9 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "queue_latency_ms": queue_latency_ms,
         "gen_time_ms": gen_time_ms,
         "total_ms": total_ms,
+        "completed_at_ms": completed_at_ms,
+        "first_progress_at_ms": started_at_ms,
+        "started_at_ms": started_at_ms,
         "steps": req.steps,
         "resolution": f"{req.width}x{req.height}",
         "seed": req.seed,
@@ -2509,6 +2529,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "total_ms": total_ms,
         "images": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
         "progress": {"current_step": req.steps, "total_steps": req.steps, "percent": 100},
+        "completed_at_ms": completed_at_ms,
     })
 
     await _broadcast_event(
