@@ -1561,6 +1561,7 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
 const SPARKLINE_WIDTH = 120;
 const SPARKLINE_HEIGHT = 24;
 const SPARKLINE_FALLBACK_POINTS = 12;
+const { selectWindowedSampleIndices } = window.ImageSparklineUtils || {};
 
 const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
   if (!values || values.length === 0) return "";
@@ -1660,32 +1661,27 @@ const buildWindowedMetricSamples = (metrics, runEntry) => {
   if (!Array.isArray(timestamps) || timestamps.length === 0) return null;
 
   const window = deriveImageRunWindowMs(runEntry);
-  const indices = [];
-  if (window?.startMs != null || window?.endMs != null) {
-    const startS = window.startMs != null ? window.startMs / 1000 : null;
-    const endS = window.endMs != null ? window.endMs / 1000 : null;
-    timestamps.forEach((ts, index) => {
-      if ((startS == null || ts >= startS) && (endS == null || ts <= endS)) {
-        indices.push(index);
-      }
-    });
-  }
-
-  if (indices.length === 0) {
-    const startIndex = Math.max(0, timestamps.length - SPARKLINE_FALLBACK_POINTS);
-    for (let i = startIndex; i < timestamps.length; i += 1) {
-      indices.push(i);
-    }
-  }
+  const indices = selectWindowedSampleIndices
+    ? selectWindowedSampleIndices(
+      timestamps,
+      window,
+      metrics.sampler_interval_s,
+      SPARKLINE_FALLBACK_POINTS,
+    )
+    : [];
 
   if (indices.length === 0) return null;
 
-  const samples = indices.map((index) => ({
+  let samples = indices.map((index) => ({
     t: timestamps[index],
     cpu: metrics.cpu_pct?.[index],
     gpu: metrics.gpu_pct?.[index],
     mem: computeMetricMemPct(metrics, index),
   }));
+
+  if (samples.length === 1) {
+    samples = [samples[0], samples[0]];
+  }
 
   const startTime = window?.startMs != null ? window.startMs / 1000 : timestamps[indices[0]];
   const endTime = window?.endMs != null ? window.endMs / 1000 : timestamps[indices[indices.length - 1]];
@@ -1747,6 +1743,13 @@ const extractSeries = (samples, key) => {
   return { values, times };
 };
 
+const ensureSeriesMinimumPoints = ({ values, times }) => {
+  if (values.length === 1) {
+    return { values: [values[0], values[0]], times: [times[0], times[0]] };
+  }
+  return { values, times };
+};
+
 const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
   const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
   const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
@@ -1771,6 +1774,9 @@ const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
     startTime = imageRunStartTs ?? samples[0]?.t ?? performance.now();
     endTime = imageRunEndTs ?? performance.now();
   }
+  if (samples.length === 1) {
+    samples = [samples[0], samples[0]];
+  }
 
   if (!resolvedMetrics && samples.length === 0) {
     utilPlaceholder?.classList.remove("hidden");
@@ -1780,9 +1786,9 @@ const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
     return;
   }
 
-  const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
-  const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
-  const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+  const { values: cpuValues, times: cpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "cpu"));
+  const { values: gpuValues, times: gpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "gpu"));
+  const { values: memValues, times: memTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "mem"));
 
   const hasGpuUtil = gpuValues.length > 0;
   const hasCpuUtil = cpuValues.length > 0;
