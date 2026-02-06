@@ -536,18 +536,29 @@ const renderCheckpointOptions = (items) => {
   select.innerHTML = "";
   items.forEach((item) => {
     const option = document.createElement("option");
-    // Store by ID (stable across configs), display label
-    option.value = item.id || item.name; // Fallback to name for backwards compat
+    // Store by filename (canonical), display label
+    option.value = item.filename || item.name;
     option.textContent = item.label || item.name;
     // Add filename as data attribute for tooltip/reference
     if (item.filename) {
       option.setAttribute("data-filename", item.filename);
       option.setAttribute("title", `File: ${item.filename}`);
     }
+    if (item.id) {
+      option.setAttribute("data-id", item.id);
+    }
     select.appendChild(option);
   });
-  if (current && items.some((item) => (item.id || item.name) === current)) {
-    select.value = current;
+  if (current) {
+    const directMatch = items.find((item) => (item.filename || item.name) === current);
+    if (directMatch) {
+      select.value = current;
+      return;
+    }
+    const idMatch = items.find((item) => item.id === current);
+    if (idMatch && (idMatch.filename || idMatch.name)) {
+      select.value = idMatch.filename || idMatch.name;
+    }
   }
 };
 
@@ -1311,7 +1322,7 @@ syncAllButton?.addEventListener("click", async () => {
   if (selected) {
     checkpointNames = [selected];
   } else {
-    checkpointNames = checkpointCatalog.filter((item) => item.valid).map((item) => item.name);
+    checkpointNames = checkpointCatalog.filter((item) => item.valid).map((item) => item.filename || item.name);
   }
   if (!checkpointNames.length) {
     showToast("Select a checkpoint first.", "error");

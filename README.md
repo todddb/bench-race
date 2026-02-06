@@ -996,9 +996,44 @@ curl -X POST http://localhost:9001/api/reset
 
 ### Image Benchmark Notes
 
-- The `checkpoint` query parameter uses the checkpoint filename (e.g. `sd_xl_base_1.0.safetensors`). Digests are accepted for backwards compatibility and return a clear error if unknown.
+- The `checkpoint` query parameter uses the checkpoint filename (e.g. `sd_xl_base_1.0.safetensors`). 64-hex digests are accepted for backwards compatibility and return a clear 404 if unknown.
 - Image completion is determined via ComfyUI `/history/{prompt_id}` polling; websocket updates are best-effort for progress only.
-- If you see sudo errors during agent resets, re-run `scripts/install_agent.sh --install-sudoers` to install the passwordless sudo drop-in.
+- Jobs always move to a terminal state (`complete`, `error`, or `timeout`). Agents broadcast `job_timeout` events on timeout.
+
+### Sudo Troubleshooting (Agent Reset / Installer)
+
+If you see sudo errors during agent resets or installs, configure a narrow passwordless sudo rule:
+
+```bash
+# 1) Create the group and add your user
+sudo groupadd benchrace-agent
+sudo usermod -aG benchrace-agent <your-user>
+
+# 2) Install the sudoers drop-in (Linux)
+sudo tee /etc/sudoers.d/bench-race-agent >/dev/null <<'EOF'
+# bench-race agent sudoers
+%benchrace-agent ALL=(ALL) NOPASSWD: /bin/systemctl, /bin/systemctl *, /usr/bin/apt, /usr/bin/apt-get, /usr/bin/pip, /usr/bin/pip3, /bin/chown
+EOF
+
+# 3) Validate syntax
+sudo visudo -cf /etc/sudoers.d/bench-race-agent
+```
+
+Then re-run the installer:
+
+```bash
+./scripts/install_agent.sh --install-sudoers
+```
+
+### Installer Smoke Tests (Manual)
+
+```bash
+# Expect: friendly error about non-interactive sudo if not configured
+./scripts/install_agent.sh --install-sudoers
+
+# Expect: agent/config/agent.yaml contains central_base_url and is owned by your user
+cat agent/config/agent.yaml
+```
 
 ### Reset Configuration
 

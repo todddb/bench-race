@@ -151,3 +151,71 @@ def test_image_run_allowed_with_synced_checkpoint_and_missing_url(monkeypatch):
 
         # Verify the agent was called
         assert any("txt2img" in url for method, url in request_log if method == "post")
+
+
+def test_resolve_checkpoint_id_by_filename(monkeypatch):
+    entries = [
+        {
+            "url": "https://example.com/sd_xl_base_1.0.safetensors",
+            "filename": "sd_xl_base_1.0.safetensors",
+            "label": "SDXL Base",
+        }
+    ]
+    monkeypatch.setattr(central_app, "_checkpoint_entries", lambda settings=None: entries)
+
+    resolved, error = central_app._resolve_checkpoint_id("sd_xl_base_1.0.safetensors")
+
+    assert resolved == "sd_xl_base_1.0.safetensors"
+    assert error is None
+
+
+def test_resolve_checkpoint_id_by_digest(monkeypatch):
+    url = "https://example.com/sd_xl_refiner_1.0.safetensors"
+    digest = central_app.hashlib.sha256(url.encode("utf-8")).hexdigest()
+    entries = [
+        {
+            "url": url,
+            "filename": "sd_xl_refiner_1.0.safetensors",
+            "label": "SDXL Refiner",
+        }
+    ]
+    monkeypatch.setattr(central_app, "_checkpoint_entries", lambda settings=None: entries)
+
+    resolved, error = central_app._resolve_checkpoint_id(digest)
+
+    assert resolved == "sd_xl_refiner_1.0.safetensors"
+    assert error is None
+
+
+def test_resolve_checkpoint_id_unknown_digest(monkeypatch):
+    monkeypatch.setattr(central_app, "_checkpoint_entries", lambda settings=None: [])
+
+    resolved, error = central_app._resolve_checkpoint_id("c" * 64)
+
+    assert resolved is None
+    assert error == "unknown checkpoint digest"
+
+
+def test_resolve_checkpoint_id_unknown_name(monkeypatch):
+    entries = [
+        {
+            "url": "https://example.com/known.safetensors",
+            "filename": "known.safetensors",
+            "label": "Known",
+        }
+    ]
+    monkeypatch.setattr(central_app, "_checkpoint_entries", lambda settings=None: entries)
+
+    resolved, error = central_app._resolve_checkpoint_id("missing.safetensors")
+
+    assert resolved is None
+    assert error == "unknown checkpoint name"
+
+
+def test_resolve_checkpoint_id_rejects_paths(monkeypatch):
+    monkeypatch.setattr(central_app, "_checkpoint_entries", lambda settings=None: [])
+
+    resolved, error = central_app._resolve_checkpoint_id("../oops.safetensors")
+
+    assert resolved is None
+    assert error == "checkpoint must be a filename, not a path"
