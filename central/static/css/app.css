@@ -1036,29 +1036,7 @@ body.options-expanded textarea.prompt { min-height: 220px; }
    Pane Header Alignment (Image Cards)
    ====================================== */
 
-/* Ensure pane-header-main contains title + checkpoint in 2 rows */
-.pane-header-main {
-  grid-row: 1 / 3;
-  grid-column: 2;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-/* Override pane-title to not use grid directly since it's inside pane-header-main */
-.image-pane .pane-title {
-  grid-row: unset;
-  grid-column: unset;
-}
-
-/* Override model-fit to not use grid positioning when inside pane-header-main */
-.image-pane .model-fit {
-  grid-row: unset;
-  grid-column: unset;
-}
-
-/* Move controls and status to right column aligned */
+/* Image pane header: match inference layout without model-fit row */
 .image-pane .pane-status {
   grid-row: 1;
   grid-column: 3;
@@ -1066,8 +1044,8 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 
 .image-pane .pane-controls {
   grid-row: 2;
-  grid-column: 2 / 4;
-  justify-content: flex-start;
+  grid-column: 3;
+  justify-content: flex-end;
 }
 
 /* Syncing badge animation */

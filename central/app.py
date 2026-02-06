@@ -341,80 +341,89 @@ def _poll_active_image_jobs() -> None:
                        job_id, machine_id, exc)
             continue
 
-        status = agent_status.get("status")
-        if status == "complete":
-            log.info("Poll fallback recovered completion: job=%s machine=%s run=%s",
-                      job_id, machine_id, run_id)
-            _polling_jobs.pop(job_id, None)
-            # Synthesize an image_complete event from polled data
-            payload = {
-                "run_id": run_id,
-                "completed_at_ms": agent_status.get("completed_at_ms"),
-                "queue_latency_ms": agent_status.get("queue_latency_ms"),
-                "gen_time_ms": agent_status.get("gen_time_ms"),
-                "total_ms": agent_status.get("total_ms"),
-                "steps": agent_status.get("progress", {}).get("total_steps"),
-                "seed": agent_status.get("seed"),
-                "checkpoint": agent_status.get("checkpoint"),
-                "images": agent_status.get("images") or [],
-                "resolution": agent_status.get("resolution"),
-                "recovery_source": "poll",
-            }
-            evt = {
-                "machine_id": machine_id,
-                "job_id": job_id,
-                "type": "image_complete",
-                "payload": payload,
-            }
-            _update_run_from_event(evt)
-            socketio.emit("agent_event", evt)
-        elif status == "error":
-            log.info("Poll fallback detected error: job=%s machine=%s", job_id, machine_id)
-            _polling_jobs.pop(job_id, None)
-            error_msg = agent_status.get("error") or "Generation failed"
-            evt = {
-                "machine_id": machine_id,
-                "job_id": job_id,
-                "type": "image_error",
-                "payload": {
+        try:
+            status = agent_status.get("status")
+        except Exception:
+            log.exception("Bad poll response for job=%s (continuing): %r", job_id, agent_status)
+            continue
+
+        try:
+            if status == "complete":
+                log.info("Poll fallback recovered completion: job=%s machine=%s run=%s",
+                          job_id, machine_id, run_id)
+                _polling_jobs.pop(job_id, None)
+                # Synthesize an image_complete event from polled data
+                payload = {
                     "run_id": run_id,
-                    "message": error_msg,
-                    "category": "agent_error",
-                    "remediation": [
-                        "The image generation failed on the agent.",
-                        "Check agent logs for details.",
-                    ],
+                    "completed_at_ms": agent_status.get("completed_at_ms"),
+                    "queue_latency_ms": agent_status.get("queue_latency_ms"),
+                    "gen_time_ms": agent_status.get("gen_time_ms"),
+                    "total_ms": agent_status.get("total_ms"),
+                    "steps": agent_status.get("progress", {}).get("total_steps"),
+                    "seed": agent_status.get("seed"),
+                    "checkpoint": agent_status.get("checkpoint"),
+                    "images": agent_status.get("images") or [],
+                    "resolution": agent_status.get("resolution"),
                     "recovery_source": "poll",
-                },
-            }
-            _update_run_from_event(evt)
-            socketio.emit("agent_event", evt)
-        elif status == "running" or status == "pending":
-            # Job still in progress on agent; update run record status if stale
-            with RUN_LOCK:
-                record = RUN_CACHE.get(run_id)
-                if record:
-                    machine_entry = next(
-                        (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
-                        None,
-                    )
-                    if machine_entry and machine_entry.get("status") == "pending" and status == "running":
-                        machine_entry["status"] = "running"
-                        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-                        RUN_CACHE[run_id] = record
-                        _write_run_record(record)
-                        # Notify UI that job is actually running
-                        progress = agent_status.get("progress") or {}
-                        socketio.emit("agent_event", {
-                            "machine_id": machine_id,
-                            "job_id": job_id,
-                            "type": "image_started",
-                            "payload": {
-                                "run_id": run_id,
-                                "started_at_ms": agent_status.get("started_at_ms"),
-                                "recovery_source": "poll",
-                            },
-                        })
+                }
+                evt = {
+                    "machine_id": machine_id,
+                    "job_id": job_id,
+                    "type": "image_complete",
+                    "payload": payload,
+                }
+                _update_run_from_event(evt)
+                socketio.emit("agent_event", evt)
+            elif status == "error":
+                log.info("Poll fallback detected error: job=%s machine=%s", job_id, machine_id)
+                _polling_jobs.pop(job_id, None)
+                error_msg = agent_status.get("error") or "Generation failed"
+                evt = {
+                    "machine_id": machine_id,
+                    "job_id": job_id,
+                    "type": "image_error",
+                    "payload": {
+                        "run_id": run_id,
+                        "message": error_msg,
+                        "category": "agent_error",
+                        "remediation": [
+                            "The image generation failed on the agent.",
+                            "Check agent logs for details.",
+                        ],
+                        "recovery_source": "poll",
+                    },
+                }
+                _update_run_from_event(evt)
+                socketio.emit("agent_event", evt)
+            elif status == "running" or status == "pending":
+                # Job still in progress on agent; update run record status if stale
+                with RUN_LOCK:
+                    record = RUN_CACHE.get(run_id)
+                    if record:
+                        machine_entry = next(
+                            (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                            None,
+                        )
+                        if machine_entry and machine_entry.get("status") == "pending" and status == "running":
+                            machine_entry["status"] = "running"
+                            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            RUN_CACHE[run_id] = record
+                            _write_run_record(record)
+                            # Notify UI that job is actually running
+                            progress = agent_status.get("progress") or {}
+                            socketio.emit("agent_event", {
+                                "machine_id": machine_id,
+                                "job_id": job_id,
+                                "type": "image_started",
+                                "payload": {
+                                    "run_id": run_id,
+                                    "started_at_ms": agent_status.get("started_at_ms"),
+                                    "recovery_source": "poll",
+                                },
+                            })
+        except Exception:
+            log.exception("Bad image event in poll fallback (continuing): job=%s", job_id)
+            continue
 
 
 def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -> None:
@@ -934,6 +943,35 @@ def _compute_latency_ms(start_ms: Optional[float], end_ms: Optional[float]) -> O
     return max(0.0, end_ms - start_ms)
 
 
+def _normalize_images(images: Any) -> list:
+    """Normalize image payload to a list regardless of input format."""
+    if images is None:
+        return []
+    if isinstance(images, str):
+        s = images.strip()
+        if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+            try:
+                images = json.loads(s)
+            except Exception:
+                return [s]
+        else:
+            return [images]
+    if isinstance(images, dict):
+        return [images]
+    if isinstance(images, (list, tuple)):
+        return list(images)
+    return [str(images)]
+
+
+def _image_filename(image: Any, idx: int) -> str:
+    """Extract filename from an image entry that may be a dict or a string."""
+    if isinstance(image, dict):
+        return image.get("filename") or f"image_{idx + 1}.png"
+    if isinstance(image, str) and image.strip():
+        return image
+    return f"image_{idx + 1}.png"
+
+
 def _update_run_from_event(event: Dict[str, Any]) -> None:
     event_type = event.get("type")
     job_id = event.get("job_id")
@@ -1117,11 +1155,12 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                 completed_at_ms = _normalize_epoch_ms(payload.get("completed_at_ms"))
                 if completed_at_ms is None:
                     completed_at_ms = _normalize_epoch_ms(time.time())
-                images_payload = payload.get("images") or []
+                images_payload = _normalize_images(payload.get("images"))
                 stored_images = []
                 for idx, image in enumerate(images_payload):
-                    filename = image.get("filename") or f"image_{idx + 1}.png"
-                    saved_path = _save_image_payload(run_id, machine_id, filename, image.get("image_b64") or "")
+                    filename = _image_filename(image, idx)
+                    image_b64 = image.get("image_b64", "") if isinstance(image, dict) else ""
+                    saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
                     if saved_path:
                         stored_images.append(saved_path)
                 dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
@@ -1597,7 +1636,10 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
                     if evt.get("type") == "runtime_metrics_update":
                         payload = evt.get("payload") or {}
                         RUNTIME_METRICS[machine_id] = payload
-                    _update_run_from_event(evt)
+                    try:
+                        _update_run_from_event(evt)
+                    except Exception:
+                        log.exception("Bad event from %s (continuing): %r", machine_id, evt.get("type"))
                     _record_sample_event(evt)
                     socketio.emit("agent_event", evt)
 

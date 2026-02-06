@@ -48,6 +48,13 @@ const activeRunMachineIds = new Set();
 let statusPollTimer = null;
 let lastPreviewUpdate = new Map(); // machineId -> timestamp
 
+// Run-bounded sparkline tracking (mirrors inference page approach)
+let imageRunTrackingActive = false;
+let imageRunStartTs = null;
+let imageRunEndTs = null;
+let imageRunDone = new Set();
+let imageRunMachines = new Set();
+
 let viewingMode = "live";
 let viewingRunId = null;
 let liveRunId = null;
@@ -275,6 +282,38 @@ const clearActiveRunMachines = (runId) => {
   activeRunMachinesById.delete(runId);
   rebuildActiveRunMachineIds();
   updateAllPaneStatuses();
+};
+
+// Run-bounded sparkline tracking
+const renderAllImageSparklines = () => {
+  paneMap.forEach((_, machineId) => {
+    renderImageSparklines(machineId);
+  });
+};
+
+const beginImageRunTracking = (machineIds = []) => {
+  runSamples.clear();
+  imageRunDone = new Set();
+  imageRunMachines = new Set(machineIds);
+  imageRunStartTs = performance.now();
+  imageRunEndTs = null;
+  imageRunTrackingActive = true;
+  renderAllImageSparklines();
+};
+
+const endImageRunTracking = () => {
+  if (!imageRunStartTs || imageRunEndTs) return;
+  imageRunEndTs = performance.now();
+  imageRunTrackingActive = false;
+  renderAllImageSparklines();
+};
+
+const markImageMachineDone = (machineId) => {
+  if (!imageRunTrackingActive || imageRunDone.has(machineId)) return;
+  imageRunDone.add(machineId);
+  if (imageRunMachines.size > 0 && imageRunDone.size >= imageRunMachines.size) {
+    endImageRunTracking();
+  }
 };
 
 // Fetch active runs from server to initialize state
@@ -789,18 +828,9 @@ const clearMachineFinalImage = (machineId, runId) => {
   setPreviewImage(machineId, "", true, runId);
 };
 
-const updateCheckpointLabel = (checkpointId) => {
-  // Find checkpoint in catalog by ID to get label
-  let label = checkpointId || "--";
-  if (checkpointId && checkpointCatalog.length > 0) {
-    const found = checkpointCatalog.find((item) => (item.id || item.name) === checkpointId);
-    if (found) {
-      label = found.label || found.name || checkpointId;
-    }
-  }
-  document.querySelectorAll(".model-fit-checkpoint").forEach((el) => {
-    el.textContent = `Checkpoint: ${label}`;
-  });
+const updateCheckpointLabel = (_checkpointId) => {
+  // Checkpoint label removed from card headers (Part D cleanup).
+  // Kept as no-op to avoid breaking callers.
 };
 
 // ======================================
@@ -1578,19 +1608,26 @@ const getLastNumeric = (values) => {
 };
 
 const recordRunSample = (machineId, metrics) => {
-  if (!metrics) return;
+  if (!imageRunTrackingActive || imageRunDone.has(machineId) || !metrics) return;
   const cpu = getLastNumeric(metrics.cpu_pct || []);
   const gpu = getLastNumeric(metrics.gpu_pct || []);
   const vramUsed = getLastNumeric(metrics.vram_used_mib || []);
   const vramTotal = getLastNumeric(metrics.vram_total_mib || []);
+  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes || []);
+  const ramTotalBytes = getLastNumeric(metrics.ram_total_bytes || []);
   const systemMemMib = getLastNumeric(metrics.system_mem_used_mib || []);
+  const systemMemTotalMib = getLastNumeric(metrics.system_mem_total_mib || []);
   const machine = statusCache.get(machineId);
-  const totalRamBytes = machine?.capabilities?.total_system_ram_bytes || machine?.total_system_ram_bytes;
+  const totalRamBytes = ramTotalBytes || machine?.capabilities?.total_system_ram_bytes || machine?.total_system_ram_bytes;
 
   let memPct = null;
   if (vramUsed != null && vramTotal != null && vramTotal > 0) {
     memPct = (vramUsed / vramTotal) * 100;
-  } else if (systemMemMib != null && totalRamBytes) {
+  } else if (systemMemMib != null && systemMemTotalMib != null && systemMemTotalMib > 0) {
+    memPct = (systemMemMib / systemMemTotalMib) * 100;
+  } else if (ramUsedBytes != null && totalRamBytes && totalRamBytes > 0) {
+    memPct = (ramUsedBytes / totalRamBytes) * 100;
+  } else if (systemMemMib != null && totalRamBytes && totalRamBytes > 0) {
     memPct = ((systemMemMib * 1024 * 1024) / totalRamBytes) * 100;
   }
 
@@ -1636,8 +1673,8 @@ const renderImageSparklines = (machineId, metrics = null) => {
   const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
   const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
   const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
-  const startTime = samples[0]?.t ?? performance.now();
-  const endTime = performance.now();
+  const startTime = imageRunStartTs ?? samples[0]?.t ?? performance.now();
+  const endTime = imageRunEndTs ?? performance.now();
 
   const hasGpuUtil = gpuValues.length > 0;
   const hasCpuUtil = cpuValues.length > 0;
@@ -1687,10 +1724,16 @@ socket.on("run_lifecycle", (event) => {
         clearMachineFinalImage(machineId, event.run_id);
       });
     }
+    // Start run-bounded sparkline tracking
+    if (!imageRunTrackingActive) {
+      const machineIds = Array.isArray(event.machine_ids) ? event.machine_ids : Array.from(statusCache.keys());
+      beginImageRunTracking(machineIds);
+    }
     console.log("Run started:", event.run_id);
   } else if (event.type === "run_end") {
     setRunActive(false, event.run_id);
     clearActiveRunMachines(event.run_id);
+    endImageRunTracking();
     console.log("Run ended:", event.run_id);
   }
 });
@@ -1786,6 +1829,7 @@ socket.on("agent_event", (event) => {
   }
   if (event.type === "image_complete") {
     if (state) state.status = "complete";
+    markImageMachineDone(machineId);
     const images = payload.images || [];
     if (images.length > 0 && images[0].image_b64) {
       // Force show final image even if live preview is disabled
@@ -1813,6 +1857,7 @@ socket.on("agent_event", (event) => {
   if (event.type === "image_error") {
     if (state && getStatusRank(state.status) > getStatusRank("running")) return;
     if (state) state.status = "error";
+    markImageMachineDone(machineId);
     hideProgress(machineId);
     const remediation = Array.isArray(payload.remediation) && payload.remediation.length
       ? `<ul class="remediation">${payload.remediation.map((item) => `<li>${item}</li>`).join("")}</ul>`
