@@ -17,6 +17,7 @@
 #   --central-url URL     Central server URL (default: http://127.0.0.1:8080)
 #   --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
 #   --yes                 Non-interactive mode (use defaults)
+#   --install-sudoers     Install a passwordless sudoers drop-in (Linux only)
 #   --no-service          Skip systemd/launchctl service installation
 #   --update              Update existing installation
 #   --dry-run             Show what would be done without doing it
@@ -82,6 +83,7 @@ NO_SERVICE=false
 UPDATE_MODE=false
 SKIP_OLLAMA=false
 SKIP_COMFYUI=false
+INSTALL_SUDOERS=false
 
 AGENT_ID=""
 LABEL=""
@@ -168,6 +170,105 @@ run_command() {
         return 0
     fi
     "$@"
+}
+
+# ============================================================================
+# Passwordless sudo setup (Linux)
+# ============================================================================
+
+setup_passwordless_sudo() {
+    if [[ "$OS_TYPE" != "linux" ]]; then
+        return 0
+    fi
+
+    if [[ "$INSTALL_SUDOERS" != true ]]; then
+        if [[ "$YES_MODE" != true ]]; then
+            echo "" >&2
+            log_info "Optional: configure passwordless sudo for bench-race agent."
+            prompt "Install sudoers drop-in now? [y/N]: "
+            read -r sudoers_reply
+            if [[ "$sudoers_reply" =~ ^[Yy]$ ]]; then
+                INSTALL_SUDOERS=true
+            else
+                return 0
+            fi
+        else
+            return 0
+        fi
+    fi
+
+    if [[ "$INSTALL_SUDOERS" != true ]]; then
+        return 0
+    fi
+
+    log_step "Configuring passwordless sudo for bench-race agent..."
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[DRY-RUN] Would configure /etc/sudoers.d/bench-race-agent"
+        return 0
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        log_error "Passwordless sudo is not available for the current user."
+        log_error "This step requires sudo -n to succeed without prompting."
+        log_error "Re-run install_agent.sh after configuring sudoers or run as root."
+        exit 1
+    fi
+
+    if ! getent group bench-race >/dev/null 2>&1; then
+        log_info "Creating bench-race group..."
+        if ! sudo -n groupadd bench-race; then
+            log_error "Failed to create bench-race group via sudo."
+            exit 1
+        fi
+    fi
+
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx "bench-race"; then
+        log_info "Adding ${USER} to bench-race group..."
+        if ! sudo -n usermod -aG bench-race "$USER"; then
+            log_error "Failed to add user to bench-race group via sudo."
+            exit 1
+        fi
+        log_warning "You may need to log out and back in for group changes to apply."
+    fi
+
+    local systemctl_path journalctl_path sudoers_file visudo_path
+    systemctl_path=$(command -v systemctl || echo "/usr/bin/systemctl")
+    journalctl_path=$(command -v journalctl || echo "/usr/bin/journalctl")
+    sudoers_file="/etc/sudoers.d/bench-race-agent"
+    visudo_path=$(command -v visudo || true)
+    if [[ -z "$visudo_path" ]]; then
+        log_error "visudo not found; cannot validate sudoers file."
+        exit 1
+    fi
+
+    log_info "Writing sudoers drop-in to ${sudoers_file}..."
+    if ! cat <<EOF | sudo -n tee "$sudoers_file" >/dev/null; then
+# Allow bench-race agent to run a minimal set of privileged commands without password
+%bench-race ALL=(ALL) NOPASSWD: ${systemctl_path}, ${journalctl_path}
+Defaults! ${systemctl_path} !requiretty
+Defaults! ${journalctl_path} !requiretty
+EOF
+        log_error "Failed to write sudoers drop-in."
+        exit 1
+    fi
+
+    if ! sudo -n chmod 0440 "$sudoers_file"; then
+        log_error "Failed to set permissions on sudoers drop-in."
+        exit 1
+    fi
+
+    if ! sudo -n "$visudo_path" -cf "$sudoers_file"; then
+        log_error "sudoers validation failed for ${sudoers_file}."
+        exit 1
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        log_error "Passwordless sudo is not effective after configuration."
+        exit 1
+    fi
+
+    log_success "Passwordless sudo configured successfully."
 }
 
 # ============================================================================
@@ -404,13 +505,13 @@ install_or_update_ollama() {
         if ! command -v zstd &>/dev/null; then
             log_info "Installing zstd (required by Ollama)..."
             if command -v apt-get &>/dev/null; then
-                run_command sudo apt-get update && run_command sudo apt-get install -y zstd
+                run_command sudo -n apt-get update && run_command sudo -n apt-get install -y zstd
             elif command -v dnf &>/dev/null; then
-                run_command sudo dnf install -y zstd
+                run_command sudo -n dnf install -y zstd
             elif command -v yum &>/dev/null; then
-                run_command sudo yum install -y zstd
+                run_command sudo -n yum install -y zstd
             elif command -v pacman &>/dev/null; then
-                run_command sudo pacman -Sy --noconfirm zstd
+                run_command sudo -n pacman -Sy --noconfirm zstd
             else
                 log_warning "Could not determine package manager. Please install zstd manually."
             fi
@@ -802,6 +903,19 @@ write_agent_config() {
         if [[ -n "$LABEL" ]]; then
             printf "label: %s\n" "$LABEL"
         fi
+        printf "bind_host: \"0.0.0.0\"\n"
+        printf "bind_port: 9001\n"
+        printf "\n"
+        printf "ollama:\n"
+        printf "  enabled: true\n"
+        printf "  base_url: \"http://127.0.0.1:11434\"\n"
+        printf "\n"
+        printf "comfyui:\n"
+        printf "  enabled: true\n"
+        printf "  host: \"127.0.0.1\"\n"
+        printf "  port: 8188\n"
+        printf "  install_dir: \"agent/third_party/comfyui\"\n"
+        printf "  checkpoints_dir: \"agent/third_party/comfyui/models/checkpoints\"\n"
     } > "$tmp_file"
 
     # Move temp file to final location
@@ -1065,6 +1179,7 @@ Options:
   --central-url URL     Central server URL (default: http://127.0.0.1:8080)
   --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
   --yes                 Non-interactive mode (use defaults)
+  --install-sudoers     Install passwordless sudoers drop-in (Linux only)
   --no-service          Skip systemd/launchctl service installation
   --update              Update existing installation
   --dry-run             Show what would be done without doing it
@@ -1096,6 +1211,10 @@ parse_args() {
                 ;;
             --yes)
                 YES_MODE=true
+                shift
+                ;;
+            --install-sudoers)
+                INSTALL_SUDOERS=true
                 shift
                 ;;
             --no-service)
@@ -1189,6 +1308,9 @@ main() {
 
     # Check prerequisites
     ensure_prereqs
+
+    # Optional: Configure passwordless sudo on Linux
+    setup_passwordless_sudo
 
     # Install components
     install_or_update_ollama || log_warning "Ollama installation had issues"

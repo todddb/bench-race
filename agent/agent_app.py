@@ -1113,7 +1113,7 @@ async def _stop_ollama() -> dict:
             cmd = ["brew", "services", "stop", "ollama"]
         elif system == "Linux":
             # Linux: Try systemctl (try both system and user)
-            cmd = ["systemctl", "stop", "ollama"]
+            cmd = ["sudo", "-n", "systemctl", "stop", "ollama"]
         else:
             slog.warning("reset_stop_ollama_unsupported", platform=system)
             return {"stopped": False, "error": f"Unsupported platform: {system}"}
@@ -1141,6 +1141,7 @@ async def _stop_ollama() -> dict:
             "stop_stdout_tail": result["stdout_tail"],
             "stop_stderr_tail": result["stderr_tail"],
             "stop_log_file": result["log_file"],
+            "error": result.get("friendly_error"),
         }
     except Exception as e:
         ms = (time.time() - t_start) * 1000
@@ -1161,7 +1162,7 @@ async def _start_ollama() -> dict:
             cmd = ["brew", "services", "start", "ollama"]
         elif system == "Linux":
             # Linux: Try systemctl (try both system and user)
-            cmd = ["systemctl", "start", "ollama"]
+            cmd = ["sudo", "-n", "systemctl", "start", "ollama"]
         else:
             slog.warning("reset_start_ollama_unsupported", platform=system)
             return {"started": False, "error": f"Unsupported platform: {system}"}
@@ -1189,6 +1190,7 @@ async def _start_ollama() -> dict:
             "start_stdout_tail": result["stdout_tail"],
             "start_stderr_tail": result["stderr_tail"],
             "start_log_file": result["log_file"],
+            "error": result.get("friendly_error"),
         }
     except Exception as e:
         ms = (time.time() - t_start) * 1000
@@ -1696,7 +1698,7 @@ async def image_jobs(active: bool = False):
     """List image generation jobs. If active=true, only return non-terminal jobs."""
     jobs = []
     for jid, status in JOB_STATUS.items():
-        if active and status.get("status") in ("complete", "error"):
+        if active and status.get("status") in ("complete", "error", "timeout"):
             continue
         jobs.append({"job_id": jid, **status})
     return JSONResponse({"jobs": jobs})
@@ -2320,6 +2322,29 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     max_step_observed = ws_result.max_step
 
                 # Check for errors
+                if ws_result.timed_out:
+                    error_msg = "Job timed out"
+                    slog.error(
+                        "job_timeout",
+                        job_id=job_id,
+                        prompt_id=prompt_id,
+                        timeout_seconds=300.0,
+                    )
+                    _update_job_status({"status": "timeout", "error": error_msg})
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="image_error",
+                            payload={
+                                "run_id": req.run_id,
+                                "message": error_msg,
+                                "remediation": ["Check ComfyUI responsiveness and retry."],
+                                "category": "timeout",
+                            },
+                        )
+                    )
+                    return
+
                 if ws_result.error:
                     formatted = _format_comfy_error(ws_result.error, ws_result.history_status)
                     if (
@@ -2499,6 +2524,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     queue_latency_ms = (started_at - submit_time) * 1000.0
     gen_time_ms = (end_time - started_at) * 1000.0
     total_ms = (end_time - submit_time) * 1000.0
+    total_time_s = total_ms / 1000.0
 
     # CRITICAL: Detect suspicious "zero steps" completion
     if max_step_observed == 0:
@@ -2536,6 +2562,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "queue_latency_ms": queue_latency_ms,
         "gen_time_ms": gen_time_ms,
         "total_ms": total_ms,
+        "total_time_s": total_time_s,
         "completed_at_ms": completed_at_ms,
         "first_progress_at_ms": started_at_ms,
         "started_at_ms": started_at_ms,
@@ -2546,6 +2573,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "sampler": req.sampler,
         "num_images": req.num_images,
         "images": total_images,
+        "image_filenames": [img.get("filename") for img in total_images if isinstance(img, dict)],
     }
     if fallback_used:
         payload["completed_with_fallback"] = True
@@ -2558,6 +2586,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "queue_latency_ms": queue_latency_ms,
         "gen_time_ms": gen_time_ms,
         "total_ms": total_ms,
+        "total_time_s": total_time_s,
         "images": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
         "progress": {"current_step": req.steps, "total_steps": req.steps, "percent": 100},
         "completed_at_ms": completed_at_ms,

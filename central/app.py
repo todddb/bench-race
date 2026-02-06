@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import re
 import uuid
 
@@ -258,7 +258,7 @@ def _check_image_timeouts() -> None:
                 continue
             for machine_entry in record.get("machines") or []:
                 status = machine_entry.get("status")
-                if status in ("complete", "error", "skipped", "blocked"):
+                if status in ("complete", "error", "timeout", "skipped", "blocked"):
                     continue
                 job_id = machine_entry.get("job_id")
                 if not job_id:
@@ -374,10 +374,20 @@ def _poll_active_image_jobs() -> None:
                 }
                 _update_run_from_event(evt)
                 socketio.emit("agent_event", evt)
-            elif status == "error":
+            elif status == "error" or status == "timeout":
                 log.info("Poll fallback detected error: job=%s machine=%s", job_id, machine_id)
                 _polling_jobs.pop(job_id, None)
                 error_msg = agent_status.get("error") or "Generation failed"
+                category = "timeout" if status == "timeout" else "agent_error"
+                remediation = [
+                    "The image generation failed on the agent.",
+                    "Check agent logs for details.",
+                ]
+                if category == "timeout":
+                    remediation = [
+                        "The image job timed out on the agent.",
+                        "Check that ComfyUI is responsive and retry.",
+                    ]
                 evt = {
                     "machine_id": machine_id,
                     "job_id": job_id,
@@ -385,11 +395,8 @@ def _poll_active_image_jobs() -> None:
                     "payload": {
                         "run_id": run_id,
                         "message": error_msg,
-                        "category": "agent_error",
-                        "remediation": [
-                            "The image generation failed on the agent.",
-                            "Check agent logs for details.",
-                        ],
+                        "category": category,
+                        "remediation": remediation,
                         "recovery_source": "poll",
                     },
                 }
@@ -427,7 +434,7 @@ def _poll_active_image_jobs() -> None:
 
 
 def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -> None:
-    """Mark an image job as error due to timeout."""
+    """Mark an image job as timeout due to stalls or dispatch issues."""
     error_msg = f"Job timed out: {reason}"
     log.warning("Image job timeout: run=%s machine=%s job=%s reason=%s", run_id, machine_id, job_id, reason)
     _polling_jobs.pop(job_id, None)
@@ -445,7 +452,7 @@ def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -
         if machine_entry.get("status") not in ("pending", "running"):
             return
         machine_entry.update({
-            "status": "error",
+            "status": "timeout",
             "error": error_msg,
         })
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -834,6 +841,20 @@ def _find_checkpoint_by_id(checkpoint_id: str, settings: Optional[Dict[str, Any]
     return checkpoint
 
 
+def _resolve_checkpoint_id(checkpoint_param: str, settings: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve checkpoint identifier to a filename for API usage."""
+    if not checkpoint_param:
+        return "", None
+    if "/" in checkpoint_param or "\\" in checkpoint_param:
+        return None, "checkpoint must be a filename, not a path"
+    if re.fullmatch(r"[0-9a-f]{64}", checkpoint_param):
+        checkpoint = _find_checkpoint_by_id(checkpoint_param, settings)
+        if checkpoint:
+            return checkpoint["filename"], None
+        return None, "unknown checkpoint digest"
+    return checkpoint_param, None
+
+
 def _list_cached_checkpoints(settings: Optional[Dict[str, Any]] = None) -> List[str]:
     cache_dir = _comfy_cache_dir(settings)
     if not cache_dir.exists():
@@ -1192,9 +1213,11 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                 )
                 JOB_RUN_MAP.pop(job_id, None)
             elif event_type == "image_error":
+                error_category = payload.get("category")
+                status_value = "timeout" if error_category == "timeout" else "error"
                 machine_entry.update(
                     {
-                        "status": "error",
+                        "status": status_value,
                         "error": payload.get("message") or "Generation failed",
                     }
                 )
@@ -1979,15 +2002,13 @@ def api_runtime_metrics():
 @app.get("/api/image/status")
 def api_image_status():
     checkpoint_id = request.args.get("checkpoint") or ""
-    # Look up checkpoint by ID to get filename
     checkpoint_filename = ""
     if checkpoint_id:
-        checkpoint_obj = _find_checkpoint_by_id(checkpoint_id)
-        if checkpoint_obj:
-            checkpoint_filename = checkpoint_obj["filename"]
-        else:
-            # Fall back to treating it as a filename for backwards compatibility
-            checkpoint_filename = checkpoint_id
+        resolved, error = _resolve_checkpoint_id(checkpoint_id)
+        if error:
+            status_code = 404 if error == "unknown checkpoint digest" else 400
+            return jsonify({"error": error, "checkpoint": checkpoint_id}), status_code
+        checkpoint_filename = resolved or ""
 
     statuses = []
     for m in MACHINES:
@@ -2011,7 +2032,7 @@ def api_image_status():
                     "comfy_running": cap.get("running", False),
                     "checkpoints": checkpoints,
                     "has_checkpoint": has_checkpoint,
-                    "missing_checkpoint": checkpoint_id if checkpoint_id and not has_checkpoint else None,
+                    "missing_checkpoint": checkpoint_filename if checkpoint_filename and not has_checkpoint else None,
                     "last_checked": last_checked,
                     "error": cap.get("error"),
                     "capabilities": {
@@ -2033,12 +2054,12 @@ def api_image_status():
                     "comfy_running": False,
                     "checkpoints": [],
                     "has_checkpoint": False,
-                    "missing_checkpoint": checkpoint_id or None,
+                    "missing_checkpoint": checkpoint_filename or None,
                     "last_checked": last_checked,
                     "error": str(e),
                 }
             )
-    return jsonify({"checkpoint": checkpoint_id, "machines": statuses})
+    return jsonify({"checkpoint": checkpoint_filename or checkpoint_id, "machines": statuses})
 
 
 @app.get("/api/image/checkpoints")
