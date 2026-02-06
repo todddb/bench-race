@@ -1232,6 +1232,7 @@ const renderRunToPanes = (run) => {
     } else {
       hideProgress(machineId);
     }
+    renderImageSparklines(machineId, null, entry);
   });
 };
 
@@ -1559,6 +1560,7 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
 // ======================================
 const SPARKLINE_WIDTH = 120;
 const SPARKLINE_HEIGHT = 24;
+const SPARKLINE_FALLBACK_POINTS = 12;
 
 const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
   if (!values || values.length === 0) return "";
@@ -1607,6 +1609,88 @@ const renderSparkline = (svg, series, options = {}) => {
     svg.appendChild(path);
   });
   if (options.title) svg.setAttribute("title", options.title);
+};
+
+const deriveImageRunWindowMs = (entry) => {
+  if (!entry) return null;
+  const dispatchAtMs = Number(entry.dispatch_at_ms);
+  const queueLatencyMs = Number(entry.queue_latency_ms ?? 0);
+  const startedAtMs = Number(
+    entry.started_at_ms
+    ?? entry.first_progress_at_ms
+    ?? (Number.isFinite(dispatchAtMs) ? dispatchAtMs + queueLatencyMs : null),
+  );
+  const totalMs = Number(entry.total_ms);
+  const completedAtMs = Number(entry.completed_at_ms);
+
+  const startMs = Number.isFinite(startedAtMs) ? startedAtMs : null;
+  let endMs = Number.isFinite(completedAtMs) ? completedAtMs : null;
+  if (endMs == null && startMs != null && Number.isFinite(totalMs)) {
+    endMs = startMs + totalMs;
+  } else if (endMs == null && Number.isFinite(dispatchAtMs) && Number.isFinite(totalMs)) {
+    endMs = dispatchAtMs + totalMs;
+  }
+
+  if (startMs == null && endMs == null) return null;
+  return { startMs, endMs };
+};
+
+const computeMetricMemPct = (metrics, index) => {
+  const vramUsed = metrics?.vram_used_mib?.[index];
+  const vramTotal = metrics?.vram_total_mib?.[index];
+  if (vramUsed != null && vramTotal != null && vramTotal > 0) {
+    return (vramUsed / vramTotal) * 100;
+  }
+  const systemMemUsed = metrics?.system_mem_used_mib?.[index];
+  const systemMemTotal = metrics?.system_mem_total_mib?.[index];
+  if (systemMemUsed != null && systemMemTotal != null && systemMemTotal > 0) {
+    return (systemMemUsed / systemMemTotal) * 100;
+  }
+  const ramUsedBytes = metrics?.ram_used_bytes?.[index];
+  const ramTotalBytes = metrics?.ram_total_bytes?.[index];
+  if (ramUsedBytes != null && ramTotalBytes != null && ramTotalBytes > 0) {
+    return (ramUsedBytes / ramTotalBytes) * 100;
+  }
+  return null;
+};
+
+const buildWindowedMetricSamples = (metrics, runEntry) => {
+  if (!metrics) return null;
+  const timestamps = metrics.timestamps || [];
+  if (!Array.isArray(timestamps) || timestamps.length === 0) return null;
+
+  const window = deriveImageRunWindowMs(runEntry);
+  const indices = [];
+  if (window?.startMs != null || window?.endMs != null) {
+    const startS = window.startMs != null ? window.startMs / 1000 : null;
+    const endS = window.endMs != null ? window.endMs / 1000 : null;
+    timestamps.forEach((ts, index) => {
+      if ((startS == null || ts >= startS) && (endS == null || ts <= endS)) {
+        indices.push(index);
+      }
+    });
+  }
+
+  if (indices.length === 0) {
+    const startIndex = Math.max(0, timestamps.length - SPARKLINE_FALLBACK_POINTS);
+    for (let i = startIndex; i < timestamps.length; i += 1) {
+      indices.push(i);
+    }
+  }
+
+  if (indices.length === 0) return null;
+
+  const samples = indices.map((index) => ({
+    t: timestamps[index],
+    cpu: metrics.cpu_pct?.[index],
+    gpu: metrics.gpu_pct?.[index],
+    mem: computeMetricMemPct(metrics, index),
+  }));
+
+  const startTime = window?.startMs != null ? window.startMs / 1000 : timestamps[indices[0]];
+  const endTime = window?.endMs != null ? window.endMs / 1000 : timestamps[indices[indices.length - 1]];
+
+  return { samples, startTime, endTime };
 };
 
 const getLastNumeric = (values) => {
@@ -1663,7 +1747,7 @@ const extractSeries = (samples, key) => {
   return { values, times };
 };
 
-const renderImageSparklines = (machineId, metrics = null) => {
+const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
   const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
   const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
   const utilPlaceholder = document.getElementById(`sparkline-util-placeholder-${machineId}`);
@@ -1671,8 +1755,24 @@ const renderImageSparklines = (machineId, metrics = null) => {
   const utilBlock = utilSvg?.closest(".sparkline-block");
   const memBlock = memSvg?.closest(".sparkline-block");
   const resolvedMetrics = metrics || runtimeMetrics.get(machineId);
+  let samples = [];
+  let startTime = null;
+  let endTime = null;
+  if (runEntry) {
+    const windowed = buildWindowedMetricSamples(resolvedMetrics, runEntry);
+    if (windowed) {
+      samples = windowed.samples;
+      startTime = windowed.startTime;
+      endTime = windowed.endTime;
+    }
+  }
+  if (samples.length === 0) {
+    samples = runSamples.get(machineId) || [];
+    startTime = imageRunStartTs ?? samples[0]?.t ?? performance.now();
+    endTime = imageRunEndTs ?? performance.now();
+  }
 
-  if (!resolvedMetrics && !runSamples.get(machineId)?.length) {
+  if (!resolvedMetrics && samples.length === 0) {
     utilPlaceholder?.classList.remove("hidden");
     memPlaceholder?.classList.remove("hidden");
     utilBlock?.classList.add("is-empty");
@@ -1680,12 +1780,9 @@ const renderImageSparklines = (machineId, metrics = null) => {
     return;
   }
 
-  const samples = runSamples.get(machineId) || [];
   const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
   const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
   const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
-  const startTime = imageRunStartTs ?? samples[0]?.t ?? performance.now();
-  const endTime = imageRunEndTs ?? performance.now();
 
   const hasGpuUtil = gpuValues.length > 0;
   const hasCpuUtil = cpuValues.length > 0;
