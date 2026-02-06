@@ -784,6 +784,24 @@ def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Opt
         return None
 
 
+def _normalize_epoch_ms(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts < 1e12:
+        ts *= 1000.0
+    return ts
+
+
+def _compute_latency_ms(start_ms: Optional[float], end_ms: Optional[float]) -> Optional[float]:
+    if start_ms is None or end_ms is None:
+        return None
+    return max(0.0, end_ms - start_ms)
+
+
 def _update_run_from_event(event: Dict[str, Any]) -> None:
     event_type = event.get("type")
     job_id = event.get("job_id")
@@ -912,14 +930,37 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                 record.setdefault("machines", []).append(machine_entry)
 
             if event_type == "image_started":
+                started_at_ms = _normalize_epoch_ms(
+                    payload.get("started_at_ms")
+                    or payload.get("first_progress_at_ms")
+                    or payload.get("started_at")
+                )
+                if started_at_ms is None:
+                    started_at_ms = _normalize_epoch_ms(time.time())
+                dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
+                queue_latency_ms = _compute_latency_ms(dispatch_at_ms, started_at_ms)
+                if queue_latency_ms is not None:
+                    payload["queue_latency_ms"] = queue_latency_ms
+                payload["first_progress_at_ms"] = started_at_ms
                 machine_entry.update(
                     {
                         "status": "running",
-                        "queue_latency_ms": payload.get("queue_latency_ms"),
-                        "started_at": payload.get("started_at"),
+                        "queue_latency_ms": queue_latency_ms if queue_latency_ms is not None else payload.get("queue_latency_ms"),
+                        "first_progress_at_ms": started_at_ms,
+                        "started_at_ms": started_at_ms,
                     }
                 )
             elif event_type == "image_progress":
+                dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
+                first_progress_at_ms = _normalize_epoch_ms(machine_entry.get("first_progress_at_ms"))
+                if first_progress_at_ms is None:
+                    first_progress_at_ms = _normalize_epoch_ms(time.time())
+                    queue_latency_ms = _compute_latency_ms(dispatch_at_ms, first_progress_at_ms)
+                    if queue_latency_ms is not None:
+                        payload["queue_latency_ms"] = queue_latency_ms
+                    machine_entry["first_progress_at_ms"] = first_progress_at_ms
+                    if queue_latency_ms is not None:
+                        machine_entry["queue_latency_ms"] = queue_latency_ms
                 machine_entry.update(
                     {
                         "status": "running",
@@ -941,6 +982,9 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                     }
                 )
             elif event_type == "image_complete":
+                completed_at_ms = _normalize_epoch_ms(payload.get("completed_at_ms"))
+                if completed_at_ms is None:
+                    completed_at_ms = _normalize_epoch_ms(time.time())
                 images_payload = payload.get("images") or []
                 stored_images = []
                 for idx, image in enumerate(images_payload):
@@ -948,12 +992,24 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                     saved_path = _save_image_payload(run_id, machine_id, filename, image.get("image_b64") or "")
                     if saved_path:
                         stored_images.append(saved_path)
+                dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
+                first_progress_at_ms = _normalize_epoch_ms(machine_entry.get("first_progress_at_ms"))
+                queue_latency_ms = _compute_latency_ms(dispatch_at_ms, first_progress_at_ms)
+                gen_time_ms = _compute_latency_ms(first_progress_at_ms, completed_at_ms)
+                total_ms = _compute_latency_ms(dispatch_at_ms, completed_at_ms)
+                if queue_latency_ms is not None:
+                    payload["queue_latency_ms"] = queue_latency_ms
+                if gen_time_ms is not None:
+                    payload["gen_time_ms"] = gen_time_ms
+                if total_ms is not None:
+                    payload["total_ms"] = total_ms
                 machine_entry.update(
                     {
                         "status": "complete",
-                        "queue_latency_ms": payload.get("queue_latency_ms"),
-                        "gen_time_ms": payload.get("gen_time_ms"),
-                        "total_ms": payload.get("total_ms"),
+                        "queue_latency_ms": queue_latency_ms if queue_latency_ms is not None else payload.get("queue_latency_ms"),
+                        "gen_time_ms": gen_time_ms if gen_time_ms is not None else payload.get("gen_time_ms"),
+                        "total_ms": total_ms if total_ms is not None else payload.get("total_ms"),
+                        "completed_at_ms": completed_at_ms,
                         "images": stored_images,
                         "steps": payload.get("steps"),
                         "resolution": payload.get("resolution"),
@@ -2515,6 +2571,7 @@ def api_start_image():
             continue
 
         try:
+            dispatch_at_ms = time.time() * 1000.0
             health = requests.get(
                 f"{m['agent_base_url'].rstrip('/')}/api/comfy/health",
                 timeout=3,
@@ -2568,6 +2625,7 @@ def api_start_image():
                     "status": "pending",
                     "job_id": agent_job_id,
                     "checkpoint": checkpoint_label,  # Store label for display
+                    "dispatch_at_ms": dispatch_at_ms,
                 }
             )
         except Exception as exc:
