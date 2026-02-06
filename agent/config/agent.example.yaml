@@ -12,6 +12,7 @@
 # - Copy this file to agent.yaml and customize per machine.
 # - agent.yaml is intentionally gitignored.
 # - Central controls which jobs are run; this file controls HOW they run.
+# - Minimal required fields: machine_id, bind_host, bind_port, central_base_url, and ollama/comfyui blocks.
 
 ########################################
 # Identity
@@ -124,4 +125,3 @@ logging:
 # - Most fields above are optional and have sane defaults.
 # - Disabling Ollama or ComfyUI only affects those workloads.
 # - Compute benchmarks do not require Ollama or ComfyUI.
-

@@ -1646,7 +1646,9 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
         "queue_latency_ms": None,
         "gen_time_ms": None,
         "total_ms": None,
+        "total_time_s": None,
         "images": [],
+        "image_filenames": [],
         "error": None,
         "created_at": created_at_ms / 1000.0,
         "created_at_ms": created_at_ms,
@@ -1656,6 +1658,13 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
         "first_progress_at_ms": None,
         "completed_at_ms": None,
         "run_id": req.run_id,
+        "checkpoint": req.checkpoint,
+        "resolution": f"{req.width}x{req.height}",
+        "seed": req.seed,
+        "steps": req.steps,
+        "sampler": req.sampler,
+        "num_images": req.num_images,
+        "repeat": req.repeat,
     }
 
     task = asyncio.create_task(_job_runner_comfy(job_id, req))
@@ -1934,9 +1943,18 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
             JOB_STATUS[job_id]["updated_at"] = updated_at_ms / 1000.0
             JOB_STATUS[job_id]["updated_at_ms"] = updated_at_ms
 
+    def _remediation_hint(remediation: List[str]) -> Optional[str]:
+        return remediation[0] if remediation else None
+
     async def _emit_image_error(error_msg: str, formatted: Dict[str, Any]) -> None:
         """Broadcast image_error event and update JOB_STATUS."""
-        _update_job_status({"status": "error", "error": error_msg})
+        remediation = formatted["details"].get("remediation", [])
+        _update_job_status({
+            "status": "error",
+            "error": error_msg,
+            "error_category": formatted["details"].get("category", "unknown"),
+            "remediation_hint": _remediation_hint(remediation),
+        })
         await _broadcast_event(
             Event(
                 job_id=job_id,
@@ -1944,7 +1962,8 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 payload={
                     "run_id": req.run_id,
                     "message": error_msg,
-                    "remediation": formatted["details"].get("remediation", []),
+                    "remediation": remediation,
+                    "remediation_hint": _remediation_hint(remediation),
                     "category": formatted["details"].get("category", "unknown"),
                 },
             )
@@ -1967,7 +1986,6 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
     if not checkpoints_dir.exists():
         error_msg = f"Checkpoints dir missing: {checkpoints_dir}"
         formatted = _format_comfy_error(error_msg)
-        _update_job_status({"status": "error", "error": formatted["short"]})
         slog.error(
             "job_failed",
             job_id=job_id,
@@ -1976,25 +1994,13 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
             category=formatted["details"]["category"],
             raw_error=error_msg,
         )
-        await _broadcast_event(
-            Event(
-                job_id=job_id,
-                type="image_error",
-                payload={
-                    "run_id": req.run_id,
-                    "message": formatted["short"],
-                    "remediation": formatted["details"]["remediation"],
-                    "category": formatted["details"]["category"],
-                },
-            )
-        )
+        await _emit_image_error(formatted["short"], formatted)
         return
 
     # Validate checkpoint availability
     if req.checkpoint not in _list_checkpoints():
         error_msg = "Checkpoint not found"
         formatted = _format_comfy_error(error_msg)
-        _update_job_status({"status": "error", "error": formatted["short"]})
         slog.error(
             "job_failed",
             job_id=job_id,
@@ -2004,18 +2010,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
             category=formatted["details"]["category"],
             raw_error=error_msg,
         )
-        await _broadcast_event(
-            Event(
-                job_id=job_id,
-                type="image_error",
-                payload={
-                    "run_id": req.run_id,
-                    "message": formatted["short"],
-                    "remediation": formatted["details"]["remediation"],
-                    "category": formatted["details"]["category"],
-                },
-            )
-        )
+        await _emit_image_error(formatted["short"], formatted)
         return
 
     # Log checkpoint resolved
@@ -2126,18 +2121,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
 
                     # Include full error details in the broadcast message
                     full_error_msg = formatted["short"]
-                    await _broadcast_event(
-                        Event(
-                            job_id=job_id,
-                            type="image_error",
-                            payload={
-                                "run_id": req.run_id,
-                                "message": full_error_msg,
-                                "remediation": formatted["details"]["remediation"],
-                                "category": formatted["details"]["category"],
-                            },
-                        )
-                    )
+                    await _emit_image_error(full_error_msg, formatted)
                     return
                 except Exception as exc:
                     # Handle other errors (connection errors, timeouts, etc.)
@@ -2164,18 +2148,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     )
 
                     full_error_msg = formatted["short"]
-                    await _broadcast_event(
-                        Event(
-                            job_id=job_id,
-                            type="image_error",
-                            payload={
-                                "run_id": req.run_id,
-                                "message": full_error_msg,
-                                "remediation": formatted["details"]["remediation"],
-                                "category": formatted["details"]["category"],
-                            },
-                        )
-                    )
+                    await _emit_image_error(full_error_msg, formatted)
                     return
 
                 # Define progress callback to track steps and broadcast events
@@ -2324,13 +2297,22 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 # Check for errors
                 if ws_result.timed_out:
                     error_msg = "Job timed out"
+                    timeout_total_ms = (time.perf_counter() - submit_time) * 1000.0
                     slog.error(
                         "job_timeout",
                         job_id=job_id,
                         prompt_id=prompt_id,
                         timeout_seconds=300.0,
                     )
-                    _update_job_status({"status": "timeout", "error": error_msg})
+                    _update_job_status({
+                        "status": "timeout",
+                        "error": error_msg,
+                        "total_ms": timeout_total_ms,
+                        "total_time_s": timeout_total_ms / 1000.0,
+                        "image_filenames": [],
+                        "error_category": "timeout",
+                        "remediation_hint": "Check ComfyUI responsiveness and retry.",
+                    })
                     await _broadcast_event(
                         Event(
                             job_id=job_id,
@@ -2339,7 +2321,21 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                 "run_id": req.run_id,
                                 "message": error_msg,
                                 "remediation": ["Check ComfyUI responsiveness and retry."],
+                                "remediation_hint": "Check ComfyUI responsiveness and retry.",
                                 "category": "timeout",
+                                "total_time_s": timeout_total_ms / 1000.0,
+                            },
+                        )
+                    )
+                    await _broadcast_event(
+                        Event(
+                            job_id=job_id,
+                            type="job_timeout",
+                            payload={
+                                "run_id": req.run_id,
+                                "message": error_msg,
+                                "category": "timeout",
+                                "total_time_s": timeout_total_ms / 1000.0,
                             },
                         )
                     )
@@ -2384,18 +2380,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         node_type=formatted["details"].get("node_type"),
                         node_id=formatted["details"].get("node_id"),
                     )
-                    await _broadcast_event(
-                        Event(
-                            job_id=job_id,
-                            type="image_error",
-                            payload={
-                                "run_id": req.run_id,
-                                "message": formatted["short"],
-                                "remediation": formatted["details"]["remediation"],
-                                "category": formatted["details"]["category"],
-                            },
-                        )
-                    )
+                    await _emit_image_error(formatted["short"], formatted)
                     return
 
                 if not ws_result.completed:
@@ -2419,10 +2404,17 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                 "run_id": req.run_id,
                                 "message": "Job did not complete - no outputs found",
                                 "remediation": [],
+                                "remediation_hint": None,
                                 "category": "unknown",
                             },
                         )
                     )
+                    _update_job_status({
+                        "status": "error",
+                        "error": "Job did not complete - no outputs found",
+                        "error_category": "unknown",
+                        "remediation_hint": None,
+                    })
                     return
 
                 # Fetch history and extract images
@@ -2453,10 +2445,17 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                     "run_id": req.run_id,
                                     "message": "Job completed but no images found in outputs",
                                     "remediation": [],
+                                    "remediation_hint": None,
                                     "category": "unknown",
                                 },
                             )
                         )
+                        _update_job_status({
+                            "status": "error",
+                            "error": "Job completed but no images found in outputs",
+                            "error_category": "unknown",
+                            "remediation_hint": None,
+                        })
                         return
 
                     # Download each image
@@ -2500,18 +2499,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         category=formatted["details"]["category"],
                         raw_error=str(exc),
                     )
-                    await _broadcast_event(
-                        Event(
-                            job_id=job_id,
-                            type="image_error",
-                            payload={
-                                "run_id": req.run_id,
-                                "message": formatted["short"],
-                                "remediation": formatted["details"]["remediation"],
-                                "category": formatted["details"]["category"],
-                            },
-                        )
-                    )
+                    await _emit_image_error(formatted["short"], formatted)
                     return
                 break
 
@@ -2588,6 +2576,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "total_ms": total_ms,
         "total_time_s": total_time_s,
         "images": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
+        "image_filenames": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
         "progress": {"current_step": req.steps, "total_steps": req.steps, "percent": 100},
         "completed_at_ms": completed_at_ms,
         "sampler": req.sampler,

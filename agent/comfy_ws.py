@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 import websockets
-from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger("bench-agent.comfy_ws")
 
@@ -68,7 +68,7 @@ class ComfyWSTracker:
     client_id: str
     base_url: str
     timeout_seconds: float = 300.0  # 5 minutes default
-    poll_interval: float = 0.5  # How often to poll /history
+    poll_interval: float = 0.75  # How often to poll /history (0.5-1.0s)
 
     # Callbacks
     on_progress: Optional[Callable[[ProgressEvent], None]] = None
@@ -185,17 +185,16 @@ class ComfyWSTracker:
                 if node_type:
                     error_parts.append(f"Node: {node_type} (id={node_id})")
 
-                self._error = " | ".join(error_parts)
-                log.error(f"Execution error for prompt {self.prompt_id}: {self._error}")
-                return True
+                log.error(f"Execution error for prompt {self.prompt_id}: {' | '.join(error_parts)}")
+                # Websocket is best-effort; rely on /history for final error state.
+                return False
             return False
 
         if msg_type == "execution_interrupted":
             msg_prompt_id = msg_data.get("prompt_id")
             if msg_prompt_id == self.prompt_id:
-                self._error = "Execution was interrupted"
                 log.warning(f"Execution interrupted for prompt {self.prompt_id}")
-                return True
+                return False
             return False
 
         return False

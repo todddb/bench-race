@@ -359,10 +359,12 @@ def _poll_active_image_jobs() -> None:
                     "queue_latency_ms": agent_status.get("queue_latency_ms"),
                     "gen_time_ms": agent_status.get("gen_time_ms"),
                     "total_ms": agent_status.get("total_ms"),
+                    "total_time_s": agent_status.get("total_time_s"),
                     "steps": agent_status.get("progress", {}).get("total_steps"),
                     "seed": agent_status.get("seed"),
                     "checkpoint": agent_status.get("checkpoint"),
                     "images": agent_status.get("images") or [],
+                    "image_filenames": agent_status.get("image_filenames") or [],
                     "resolution": agent_status.get("resolution"),
                     "recovery_source": "poll",
                 }
@@ -397,6 +399,7 @@ def _poll_active_image_jobs() -> None:
                         "message": error_msg,
                         "category": category,
                         "remediation": remediation,
+                        "remediation_hint": remediation[0] if remediation else None,
                         "recovery_source": "poll",
                     },
                 }
@@ -482,6 +485,7 @@ def _timeout_image_job(run_id: str, machine_id: str, job_id: str, reason: str) -
             "message": error_msg,
             "category": "timeout",
             "remediation": remediation,
+            "remediation_hint": remediation[0] if remediation else None,
         },
     })
     _check_run_complete(run_id)
@@ -847,12 +851,19 @@ def _resolve_checkpoint_id(checkpoint_param: str, settings: Optional[Dict[str, A
         return "", None
     if "/" in checkpoint_param or "\\" in checkpoint_param:
         return None, "checkpoint must be a filename, not a path"
+    entries = _checkpoint_entries(settings)
     if re.fullmatch(r"[0-9a-f]{64}", checkpoint_param):
-        checkpoint = _find_checkpoint_by_id(checkpoint_param, settings)
-        if checkpoint:
-            return checkpoint["filename"], None
+        for entry in entries:
+            url = entry.get("url") or ""
+            if not url:
+                continue
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            if digest == checkpoint_param:
+                return entry["filename"], None
         return None, "unknown checkpoint digest"
-    return checkpoint_param, None
+    if any(entry["filename"] == checkpoint_param for entry in entries):
+        return checkpoint_param, None
+    return None, "unknown checkpoint name"
 
 
 def _list_cached_checkpoints(settings: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1092,6 +1103,37 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                     "primes_per_sec": payload.get("primes_per_sec"),
                     "repeat_index": repeat_index,
                     "error": payload.get("error"),
+                }
+            )
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            RUN_CACHE[run_id] = record
+            _write_run_record(record)
+            JOB_RUN_MAP.pop(job_id, None)
+        _check_run_complete(run_id)
+        return
+
+    if event_type == "job_timeout":
+        with RUN_LOCK:
+            job_info = JOB_RUN_MAP.get(job_id)
+            if not job_info:
+                return
+            run_id = job_info["run_id"]
+            record = RUN_CACHE.get(run_id) or _load_run_record(run_id)
+            if not record:
+                return
+            machine_id = job_info["machine_id"]
+            payload = event.get("payload") or {}
+            machine_entry = next(
+                (m for m in (record.get("machines") or []) if m.get("machine_id") == machine_id),
+                None,
+            )
+            if not machine_entry:
+                machine_entry = {"machine_id": machine_id, "label": job_info.get("label")}
+                record.setdefault("machines", []).append(machine_entry)
+            machine_entry.update(
+                {
+                    "status": "timeout",
+                    "error": payload.get("message") or "Job timed out",
                 }
             )
             record["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -2006,7 +2048,7 @@ def api_image_status():
     if checkpoint_id:
         resolved, error = _resolve_checkpoint_id(checkpoint_id)
         if error:
-            status_code = 404 if error == "unknown checkpoint digest" else 400
+            status_code = 404 if error in ("unknown checkpoint digest", "unknown checkpoint name") else 400
             return jsonify({"error": error, "checkpoint": checkpoint_id}), status_code
         checkpoint_filename = resolved or ""
 
@@ -2059,7 +2101,12 @@ def api_image_status():
                     "error": str(e),
                 }
             )
-    return jsonify({"checkpoint": checkpoint_filename or checkpoint_id, "machines": statuses})
+    return jsonify({
+        "checkpoint": checkpoint_filename or checkpoint_id,
+        "checkpoint_name": checkpoint_filename or None,
+        "checkpoint_id": checkpoint_id or None,
+        "machines": statuses,
+    })
 
 
 @app.get("/api/image/checkpoints")

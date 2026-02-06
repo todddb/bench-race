@@ -18,8 +18,9 @@ import asyncio
 
 # Friendly sudo failure message for non-interactive usage
 SUDO_NONINTERACTIVE_HINT = (
-    "This action requires passwordless sudo. "
-    "Re-run install_agent.sh or add the sudoers drop-in (/etc/sudoers.d/bench-race-agent)."
+    "Non-interactive sudo failed (sudo -n). "
+    "Configure passwordless sudo for the benchrace-agent group or run the command as root. "
+    "See /etc/sudoers.d/bench-race-agent."
 )
 
 # Configuration from environment variables
@@ -64,6 +65,23 @@ def tail_lines(text: str, max_lines: int = 200, max_bytes: int = 32768) -> str:
     return "\n".join(lines)
 
 
+def is_sudo_noninteractive_error(stderr_text: str) -> bool:
+    """Return True if stderr looks like a sudo -n non-interactive failure."""
+    if not stderr_text:
+        return False
+    lowered = stderr_text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "a password is required",
+            "password is required",
+            "no tty present",
+            "no askpass program",
+            "a terminal is required",
+        )
+    )
+
+
 def run_subprocess_with_capture(
     cmd: List[str],
     log_prefix: str,
@@ -104,7 +122,7 @@ def run_subprocess_with_capture(
         friendly_error = None
         if cmd and os.path.basename(cmd[0]) == "sudo" and result.returncode == 1:
             stderr_text = result.stderr or ""
-            if "a password is required" in stderr_text or "sudo: a terminal is required" in stderr_text:
+            if is_sudo_noninteractive_error(stderr_text):
                 friendly_error = SUDO_NONINTERACTIVE_HINT
 
         # Write full output to log file
