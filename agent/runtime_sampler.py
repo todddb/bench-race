@@ -63,7 +63,9 @@ class RuntimeSampler:
         self.vram_used_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
         self.vram_total_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
         self.system_mem_used_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
+        self.system_mem_total_mib: Deque[Optional[float]] = deque(maxlen=self.buffer_len)
         self.ram_used_bytes: Deque[Optional[int]] = deque(maxlen=self.buffer_len)
+        self.ram_total_bytes: Deque[Optional[int]] = deque(maxlen=self.buffer_len)
         self.timestamps: Deque[float] = deque(maxlen=self.buffer_len)
         self._nvml, self._nvml_handle = _try_load_nvml()
         self._thread: Optional[threading.Thread] = None
@@ -76,10 +78,11 @@ class RuntimeSampler:
     def _sample_cpu(self) -> float:
         return float(psutil.cpu_percent(interval=None))
 
-    def _sample_system_memory(self) -> Tuple[int, float]:
+    def _sample_system_memory(self) -> Tuple[int, int, float, float]:
         mem = psutil.virtual_memory()
+        total_bytes = int(mem.total)
         used_bytes = int(mem.total - mem.available)
-        return used_bytes, float(used_bytes) / (1024 * 1024)
+        return used_bytes, total_bytes, float(used_bytes) / (1024 * 1024), float(total_bytes) / (1024 * 1024)
 
     def _sample_nvidia_smi(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         if not self._nvidia_smi_available:
@@ -120,9 +123,11 @@ class RuntimeSampler:
 
     def sample_once(self) -> None:
         self.cpu_pct.append(self._sample_cpu())
-        used_bytes, used_mib = self._sample_system_memory()
+        used_bytes, total_bytes, used_mib, total_mib = self._sample_system_memory()
         self.ram_used_bytes.append(used_bytes)
+        self.ram_total_bytes.append(total_bytes)
         self.system_mem_used_mib.append(used_mib)
+        self.system_mem_total_mib.append(total_mib)
         gpu_pct, vram_used, vram_total = self._sample_gpu()
         self.gpu_pct.append(gpu_pct)
         self.vram_used_mib.append(vram_used)
@@ -155,7 +160,9 @@ class RuntimeSampler:
             "vram_used_mib": list(self.vram_used_mib),
             "vram_total_mib": list(self.vram_total_mib),
             "system_mem_used_mib": list(self.system_mem_used_mib),
+            "system_mem_total_mib": list(self.system_mem_total_mib),
             "ram_used_bytes": list(self.ram_used_bytes),
+            "ram_total_bytes": list(self.ram_total_bytes),
             "timestamps": list(self.timestamps),
             "gpu_metrics_available": self._gpu_metrics_available and has_gpu_samples,
         }
