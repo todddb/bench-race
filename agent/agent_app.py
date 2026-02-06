@@ -161,6 +161,7 @@ class ComfyTxt2ImgRequest(BaseModel):
     height: int = 512
     num_images: int = 1
     repeat: int = 1
+    sampler: str = "DPM++ 2M Karras"
 
 
 class ComfySyncRequest(BaseModel):
@@ -978,6 +979,32 @@ async def _verify_checkpoint_in_object_info(filename: str) -> Dict[str, Any]:
 COMFY_OUTPUT_NODE = "7"  # SaveImage node ID
 COMFY_OUTPUT_INDEX = 0   # Output slot index
 
+# Mapping of UI sampler labels to ComfyUI sampler_name + scheduler pairs
+SAMPLER_MAP: Dict[str, Dict[str, str]] = {
+    "Euler":                {"sampler_name": "euler",       "scheduler": "normal"},
+    "Euler a":              {"sampler_name": "euler_ancestral", "scheduler": "normal"},
+    "DPM++ 2M":             {"sampler_name": "dpmpp_2m",    "scheduler": "normal"},
+    "DPM++ 2M Karras":      {"sampler_name": "dpmpp_2m",    "scheduler": "karras"},
+    "DPM++ SDE Karras":     {"sampler_name": "dpmpp_sde",   "scheduler": "karras"},
+}
+DEFAULT_SAMPLER_KEY = "DPM++ 2M Karras"
+
+
+def _resolve_sampler(sampler_label: str) -> Dict[str, str]:
+    """Resolve a UI sampler label to ComfyUI sampler_name + scheduler.
+
+    Strips any '(recommended)' suffix and falls back to the default if unknown.
+    """
+    clean = sampler_label.strip()
+    # Strip "(recommended)" or similar parenthetical suffixes
+    if "(" in clean:
+        clean = clean[:clean.index("(")].strip()
+    result = SAMPLER_MAP.get(clean)
+    if result:
+        return result
+    log.warning("Unknown sampler '%s', falling back to '%s'", sampler_label, DEFAULT_SAMPLER_KEY)
+    return SAMPLER_MAP[DEFAULT_SAMPLER_KEY]
+
 
 def _build_comfy_workflow(
     prompt: str,
@@ -986,8 +1013,10 @@ def _build_comfy_workflow(
     steps: int,
     width: int,
     height: int,
+    sampler: str = "DPM++ 2M Karras",
 ) -> Dict[str, Any]:
     """Build ComfyUI workflow graph with ONLY valid nodes (no metadata keys)."""
+    sampler_cfg = _resolve_sampler(sampler)
     return {
         "1": {
             "class_type": "CheckpointLoaderSimple",
@@ -1011,8 +1040,8 @@ def _build_comfy_workflow(
                 "seed": seed,
                 "steps": steps,
                 "cfg": 7,
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
+                "sampler_name": sampler_cfg["sampler_name"],
+                "scheduler": sampler_cfg["scheduler"],
                 "denoise": 1,
                 "model": ["1", 0],
                 "positive": ["2", 0],
@@ -2032,6 +2061,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     req.steps,
                     req.width,
                     req.height,
+                    sampler=req.sampler,
                 )
 
                 # Validate and clean workflow (strip any non-node keys)
@@ -2513,6 +2543,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "resolution": f"{req.width}x{req.height}",
         "seed": req.seed,
         "checkpoint": req.checkpoint,
+        "sampler": req.sampler,
         "num_images": req.num_images,
         "images": total_images,
     }
@@ -2530,6 +2561,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
         "images": [img.get("filename", f"image_{i}.png") for i, img in enumerate(total_images)],
         "progress": {"current_step": req.steps, "total_steps": req.steps, "percent": 100},
         "completed_at_ms": completed_at_ms,
+        "sampler": req.sampler,
     })
 
     await _broadcast_event(

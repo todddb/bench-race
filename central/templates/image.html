@@ -101,6 +101,17 @@
                     </div>
 
                     <div class="control-field">
+                      <label for="sampler" class="control-label">Sampler</label>
+                      <select id="sampler">
+                        <option value="Euler">Euler</option>
+                        <option value="Euler a">Euler a</option>
+                        <option value="DPM++ 2M">DPM++ 2M</option>
+                        <option value="DPM++ 2M Karras" selected>DPM++ 2M Karras (recommended)</option>
+                        <option value="DPM++ SDE Karras">DPM++ SDE Karras</option>
+                      </select>
+                    </div>
+
+                    <div class="control-field">
                       <label for="num-images" class="control-label">Num Images</label>
                       <input id="num-images" type="number" value="1" />
                     </div>
@@ -140,13 +151,7 @@
             <div class="pane card image-pane {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}" data-vendor="{{ m.vendor|default('other') }}">
               <div class="pane-header">
                 <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.png" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
-                <div class="pane-header-main">
-                  <div class="pane-title">{{ m.label }}</div>
-                  <div class="model-fit" id="model-fit-{{ m.machine_id }}">
-                    <span class="model-fit-checkpoint">Checkpoint: --</span>
-                    <span class="checkpoint-fit-badge fit-unknown" id="fit-badge-{{ m.machine_id }}" title="Checkpoint fit unknown">?</span>
-                  </div>
-                </div>
+                <div class="pane-title">{{ m.label }}</div>
                 <div class="pane-status">
                   <span class="status-badge {% if m.agent_reachable is defined and m.agent_reachable == true %}ready{% elif m.agent_reachable is defined and m.agent_reachable == false %}offline{% else %}checking{% endif %} {% if m.excluded %}standby{% endif %}" id="status-badge-{{ m.machine_id }}">
                     <span class="status-dot"></span>
@@ -163,28 +168,31 @@
                     </span>
                   </span>
                 </div>
-              </div>
-              <div class="pane-controls">
-                <button
-                  class="btn btn-reset"
-                  id="reset-{{ m.machine_id }}"
-                  data-machine-id="{{ m.machine_id }}"
-                  title="Reset Agent (restart Ollama + ComfyUI)"
-                >
-                  Reset
-                </button>
-                <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
-                  <input
-                    type="checkbox"
-                    class="toggle-exclude-input"
-                    id="toggle-exclude-{{ m.machine_id }}"
+                <div class="model-fit" id="model-fit-{{ m.machine_id }}">
+                  <span class="model-fit-checkpoint">Checkpoint: --</span>
+                </div>
+                <div class="pane-controls">
+                  <button
+                    class="btn btn-reset"
+                    id="reset-{{ m.machine_id }}"
                     data-machine-id="{{ m.machine_id }}"
-                    {% if not m.excluded %}checked{% endif %}
-                  />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">Enabled</span>
-                </label>
-                <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Checkpoints</button>
+                    title="Reset Agent (restart Ollama + ComfyUI)"
+                  >
+                    Reset
+                  </button>
+                  <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
+                    <input
+                      type="checkbox"
+                      class="toggle-exclude-input"
+                      id="toggle-exclude-{{ m.machine_id }}"
+                      data-machine-id="{{ m.machine_id }}"
+                      {% if not m.excluded %}checked{% endif %}
+                    />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Enabled</span>
+                  </label>
+                  <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Checkpoints</button>
+                </div>
               </div>
               <div class="image-progress hidden" id="progress-{{ m.machine_id }}">
                 <div class="image-progress-bar">
@@ -199,8 +207,28 @@
               <div class="image-preview">
                 <img id="preview-{{ m.machine_id }}" class="preview-image" alt="Preview" />
               </div>
-              <div class="metrics" id="metrics-{{ m.machine_id }}">
-                <span class="muted">Waiting…</span>
+              <div class="footer-row">
+                <div class="metrics" id="metrics-{{ m.machine_id }}">
+                  <span class="muted">Waiting…</span>
+                </div>
+                <div class="mini-sparklines" id="runtime-sparklines-{{ m.machine_id }}">
+                  <div class="sparkline-block">
+                    <div class="sparkline-label">
+                      UTIL (%) <span class="sparkline-label-detail"><span class="cpu-label">CPU</span> / <span class="gpu-label">GPU</span></span>
+                    </div>
+                    <svg class="sparkline" id="sparkline-util-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                    <div class="sparkline-placeholder" id="sparkline-util-placeholder-{{ m.machine_id }}">
+                      Metrics unavailable
+                    </div>
+                  </div>
+                  <div class="sparkline-block">
+                    <div class="sparkline-label">MEM (%)</div>
+                    <svg class="sparkline" id="sparkline-mem-{{ m.machine_id }}" viewBox="0 0 120 24"></svg>
+                    <div class="sparkline-placeholder" id="sparkline-mem-placeholder-{{ m.machine_id }}">
+                      Metrics unavailable
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             {% endfor %}
