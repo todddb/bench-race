@@ -16,6 +16,12 @@ from typing import Dict, List, Optional, Tuple
 import asyncio
 
 
+# Friendly sudo failure message for non-interactive usage
+SUDO_NONINTERACTIVE_HINT = (
+    "This action requires passwordless sudo. "
+    "Re-run install_agent.sh or add the sudoers drop-in (/etc/sudoers.d/bench-race-agent)."
+)
+
 # Configuration from environment variables
 OLLAMA_START_TIMEOUT_S = float(os.getenv("OLLAMA_START_TIMEOUT_S", "120"))
 COMFYUI_START_TIMEOUT_S = float(os.getenv("COMFYUI_START_TIMEOUT_S", "60"))
@@ -95,6 +101,12 @@ def run_subprocess_with_capture(
             **kwargs
         )
 
+        friendly_error = None
+        if cmd and os.path.basename(cmd[0]) == "sudo" and result.returncode == 1:
+            stderr_text = result.stderr or ""
+            if "a password is required" in stderr_text or "sudo: a terminal is required" in stderr_text:
+                friendly_error = SUDO_NONINTERACTIVE_HINT
+
         # Write full output to log file
         with open(log_file, "w") as f:
             f.write(f"Command: {' '.join(cmd)}\n")
@@ -106,6 +118,9 @@ def run_subprocess_with_capture(
             f.write("-" * 80 + "\n")
             f.write("STDERR:\n")
             f.write(result.stderr or "(empty)\n")
+            if friendly_error:
+                f.write("-" * 80 + "\n")
+                f.write(f"FRIENDLY_ERROR:\n{friendly_error}\n")
 
         return {
             "returncode": result.returncode,
@@ -115,6 +130,8 @@ def run_subprocess_with_capture(
             "stderr_tail": tail_lines(result.stderr or ""),
             "log_file": str(log_file.absolute()),
             "command": cmd,
+            "friendly_error": friendly_error,
+            "error": friendly_error,
         }
     except subprocess.TimeoutExpired as e:
         # Write timeout info to log

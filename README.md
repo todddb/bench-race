@@ -994,6 +994,12 @@ curl -X POST http://localhost:9001/api/reset
 }
 ```
 
+### Image Benchmark Notes
+
+- The `checkpoint` query parameter uses the checkpoint filename (e.g. `sd_xl_base_1.0.safetensors`). Digests are accepted for backwards compatibility and return a clear error if unknown.
+- Image completion is determined via ComfyUI `/history/{prompt_id}` polling; websocket updates are best-effort for progress only.
+- If you see sudo errors during agent resets, re-run `scripts/install_agent.sh --install-sudoers` to install the passwordless sudo drop-in.
+
 ### Reset Configuration
 
 Configure reset timeouts and logging via environment variables on the **agent**:

@@ -83,6 +83,8 @@ class ComfyWSTracker:
     _start_time: float = field(default=0.0, init=False)
     _execution_started: bool = field(default=False, init=False)
     _ws_connected: bool = field(default=False, init=False)
+    _history_status: Optional[Dict[str, Any]] = field(default=None, init=False)
+    _timed_out: bool = field(default=False, init=False)
 
     def _get_ws_url(self) -> str:
         """Convert HTTP URL to WebSocket URL."""
@@ -204,46 +206,40 @@ class ComfyWSTracker:
         structured_logger: Any = None,
     ) -> ComfyWSResult:
         """
-        Wait for the prompt to complete using websocket + polling fallback.
+        Wait for the prompt to complete using history polling as the source of truth.
 
         This method:
-        1. Connects to ComfyUI websocket
-        2. Listens for completion events for our specific prompt_id
-        3. Falls back to /history polling if websocket fails
-        4. Validates that history contains outputs before returning success
+        1. Starts a best-effort websocket listener for progress/preview events
+        2. Polls /history deterministically for completion or error
+        3. Times out after timeout_seconds
         """
         self._start_time = time.perf_counter()
         ws_url = self._get_ws_url()
 
+        ws_task = asyncio.create_task(self._wait_via_websocket(ws_url, http_client, structured_logger))
         try:
-            await self._wait_via_websocket(ws_url, http_client, structured_logger)
-        except Exception as e:
-            log.warning(f"WebSocket tracking failed, falling back to polling: {e}")
-            if not self._completed and not self._error:
-                await self._wait_via_polling(http_client, structured_logger)
+            await self._wait_via_polling(http_client, structured_logger)
+        finally:
+            if ws_task:
+                ws_task.cancel()
+                try:
+                    await ws_task
+                except asyncio.CancelledError:
+                    pass
 
         execution_time_ms = (time.perf_counter() - self._start_time) * 1000.0
 
-        # Final validation: check history for actual outputs
-        history_status, has_outputs = await self._validate_history(http_client, structured_logger)
-
         result = ComfyWSResult(
-            completed=self._completed and has_outputs and not self._error,
+            completed=self._completed and not self._error and not self._timed_out,
             error=self._error,
             max_step=self._max_step,
             total_steps=self._total_steps,
             events_seen=self._events_seen,
             execution_time_ms=execution_time_ms,
-            timed_out=False,
+            timed_out=self._timed_out,
             prompt_id=self.prompt_id,
-            history_status=history_status,
+            history_status=self._history_status,
         )
-
-        # If we thought we completed but have no outputs, it's an error
-        if self._completed and not has_outputs and not self._error:
-            result.completed = False
-            result.error = "Job reported complete but history contains no outputs"
-            log.error(f"Prompt {self.prompt_id} completed but has no outputs in history")
 
         return result
 
@@ -253,58 +249,60 @@ class ComfyWSTracker:
         http_client: httpx.AsyncClient,
         structured_logger: Any = None,
     ) -> None:
-        """Wait for completion via websocket events."""
+        """Listen for websocket events for progress/preview (best-effort)."""
         deadline = time.perf_counter() + self.timeout_seconds
 
         log.info(f"Connecting to ComfyUI websocket: {ws_url}")
 
-        async with websockets.connect(ws_url, ping_interval=20, ping_timeout=30) as ws:
-            self._ws_connected = True
-            log.info(f"Connected to ComfyUI websocket for prompt {self.prompt_id}")
+        try:
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=30) as ws:
+                self._ws_connected = True
+                log.info(f"Connected to ComfyUI websocket for prompt {self.prompt_id}")
 
-            while time.perf_counter() < deadline:
-                try:
-                    # Use a shorter timeout for each receive to allow checking deadline
-                    msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
-
-                    if isinstance(msg, bytes):
-                        # Binary message = preview image
-                        if self._execution_started and self.on_preview:
-                            try:
-                                self.on_preview(msg, self._max_step, self._total_steps)
-                            except Exception as e:
-                                log.debug(f"Preview callback error: {e}")
-                        continue
-
+                while time.perf_counter() < deadline:
                     try:
-                        data = json.loads(msg)
-                    except json.JSONDecodeError:
-                        log.debug(f"Non-JSON websocket message: {msg[:100]}")
+                        # Use a shorter timeout for each receive to allow checking deadline
+                        msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
+
+                        if isinstance(msg, bytes):
+                            # Binary message = preview image
+                            if self._execution_started and self.on_preview:
+                                try:
+                                    self.on_preview(msg, self._max_step, self._total_steps)
+                                except Exception as e:
+                                    log.debug(f"Preview callback error: {e}")
+                            continue
+
+                        if not isinstance(msg, str):
+                            log.debug(f"Unexpected websocket message type: {type(msg)}")
+                            continue
+
+                        try:
+                            data = json.loads(msg)
+                        except json.JSONDecodeError:
+                            log.debug(f"Non-JSON websocket message: {msg[:100]}")
+                            continue
+
+                        await self._handle_message(data)
+                    except asyncio.TimeoutError:
+                        if time.perf_counter() >= deadline:
+                            return
                         continue
-
-                    should_stop = await self._handle_message(data)
-                    if should_stop:
+                    except ConnectionClosed:
+                        log.warning("ComfyUI websocket connection closed unexpectedly")
                         return
-
-                except asyncio.TimeoutError:
-                    # Check if we should keep waiting
-                    if time.perf_counter() >= deadline:
-                        self._error = f"Timeout waiting for ComfyUI (>{self.timeout_seconds}s)"
-                        return
-                    continue
-                except ConnectionClosed:
-                    log.warning("ComfyUI websocket connection closed unexpectedly")
-                    raise
-
-        # If we get here, we timed out
-        self._error = f"Timeout waiting for ComfyUI (>{self.timeout_seconds}s)"
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning(f"ComfyUI websocket listener error: {e}")
+            return
 
     async def _wait_via_polling(
         self,
         http_client: httpx.AsyncClient,
         structured_logger: Any = None,
     ) -> None:
-        """Fallback: poll /history until completion or timeout."""
+        """Poll /history until completion, error, or timeout."""
         deadline = time.perf_counter() + self.timeout_seconds
         poll_count = 0
 
@@ -326,10 +324,17 @@ class ComfyWSTracker:
                     prompt_history = history[self.prompt_id]
                     status = prompt_history.get("status", {})
                     outputs = prompt_history.get("outputs", {})
+                    self._history_status = status
 
-                    # Check for completion
+                    # Check for errors in status
                     status_str = status.get("status_str", "")
-                    completed = status.get("completed", False)
+                    error_info = status.get("error")
+                    if status_str == "error" or error_info:
+                        error_msg = error_info
+                        if isinstance(error_msg, dict):
+                            error_msg = error_msg.get("message", str(error_msg))
+                        self._error = f"ComfyUI error: {error_msg}"
+                        return
 
                     # Check if there are actual outputs
                     has_images = any(
@@ -337,43 +342,15 @@ class ComfyWSTracker:
                         for node_outputs in outputs.values()
                     )
 
-                    # Check for errors in status
-                    if "error" in status or status_str == "error":
-                        error_msg = status.get("error", {})
-                        if isinstance(error_msg, dict):
-                            error_msg = error_msg.get("message", str(error_msg))
-                        self._error = f"ComfyUI error: {error_msg}"
+                    completed_flag = status.get("completed", False) or status_str == "completed"
+                    if completed_flag and not has_images:
+                        self._error = "Job reported complete but history contains no outputs"
                         return
 
-                    if completed or has_images:
+                    if has_images:
                         self._completed = True
                         log.info(f"Prompt {self.prompt_id} completed via polling (poll #{poll_count})")
                         return
-
-                # Also check queue to see if job is still pending
-                queue_resp = await http_client.get(f"{self.base_url}/queue", timeout=5.0)
-                queue_resp.raise_for_status()
-                queue = queue_resp.json()
-
-                # Check if prompt is in running or pending queue
-                running = queue.get("queue_running", [])
-                pending = queue.get("queue_pending", [])
-
-                in_running = any(item[1] == self.prompt_id for item in running)
-                in_pending = any(item[1] == self.prompt_id for item in pending)
-
-                if not in_running and not in_pending:
-                    # Not in queue and not in history - might have failed silently
-                    if self.prompt_id not in history:
-                        log.warning(f"Prompt {self.prompt_id} not in queue or history - checking more carefully")
-                        # Give it a moment and check history again
-                        await asyncio.sleep(0.5)
-                        continue
-
-                log.debug(
-                    f"Polling {self.prompt_id}: in_queue={in_pending}, "
-                    f"running={in_running}, poll_count={poll_count}"
-                )
 
             except Exception as e:
                 log.warning(f"Poll error: {e}")
@@ -381,7 +358,8 @@ class ComfyWSTracker:
             await asyncio.sleep(self.poll_interval)
 
         # Timed out
-        self._error = f"Timeout waiting for ComfyUI via polling (>{self.timeout_seconds}s)"
+        self._timed_out = True
+        self._error = f"Timeout waiting for ComfyUI (>{self.timeout_seconds}s)"
 
     async def _validate_history(
         self,
