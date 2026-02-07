@@ -1113,6 +1113,10 @@ const openSparklineModal = (machineId, type) => {
 function updateSyncButton(machine) {
   const btn = document.getElementById(`sync-${machine.machine_id}`);
   if (!btn) return;
+  if (MODE === "compute") {
+    btn.classList.add("hidden");
+    return;
+  }
   const missingRequired = machine.missing_required || {};
   const missingCount = Object.values(missingRequired)
     .flat()
