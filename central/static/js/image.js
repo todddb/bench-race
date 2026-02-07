@@ -12,6 +12,7 @@ const CHECKPOINT_CATALOG_ENDPOINT = "/api/image/checkpoints";
 const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
 const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
 const COMPUTE_SETTINGS_KEY = "bench-race-compute-settings";
+const MODE = document.body?.dataset?.mode || "image";
 
 // Adaptive polling configuration
 const DEFAULT_POLLING_CONFIG = {
@@ -414,6 +415,16 @@ const showToast = (message, type = "info", onClick = null) => {
   }
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 3500);
+};
+
+const showInitFailure = (error) => {
+  const message = "Image UI failed to initialize; check console.";
+  const banner = document.getElementById("preflight-banner");
+  if (banner) {
+    banner.textContent = message;
+    banner.classList.remove("hidden");
+  }
+  showToast(message, "error", error ? () => console.error("Image init error:", error) : null);
 };
 
 const formatTimestamp = (isoString) => {
@@ -2190,23 +2201,32 @@ if (checkpointSelect) {
   });
 }
 
-// Call initialization
-initToggleButtons();
-initResetButtons();
+const bootImageUi = () => {
+  // Call initialization
+  initToggleButtons();
+  initResetButtons();
 
-// Initialize settings and adaptive polling
-loadPollingSettings();
-loadPreviewSettings();
-loadComputeSettings();
-loadCheckpointCatalog();
-fetchStatus();
-scheduleStatusPoll();
-fetchRecentRuns();
-// Fetch initial run state
-fetchActiveRuns();
+  // Initialize settings and adaptive polling
+  loadPollingSettings();
+  loadPreviewSettings();
+  loadComputeSettings();
+  loadCheckpointCatalog();
+  fetchStatus();
+  scheduleStatusPoll();
+  fetchRecentRuns();
+  // Fetch initial run state
+  fetchActiveRuns();
 
-const params = new URLSearchParams(window.location.search);
-const runId = params.get("run_id");
-if (runId) {
-  loadRun(runId);
+  const params = new URLSearchParams(window.location.search);
+  const runId = params.get("run_id");
+  if (runId) {
+    loadRun(runId);
+  }
+};
+
+try {
+  bootImageUi();
+} catch (error) {
+  console.error("Image UI failed to initialize.", error);
+  showInitFailure(error);
 }
