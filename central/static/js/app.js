@@ -58,6 +58,8 @@ let viewingRunId = null;
 let currentRunData = null;
 let liveRunId = null;
 let recentRuns = [];
+let selectMode = false;
+let selectedRunIds = new Set();
 let activeOverlay = null;
 let lastOverlayFocus = null;
 let checkpointCatalog = [];
@@ -1517,6 +1519,99 @@ const deleteRun = async (runId) => {
   }
 };
 
+const toggleSelectMode = () => {
+  selectMode = !selectMode;
+  selectedRunIds.clear();
+  updateSelectModeUI();
+  renderRecentRuns();
+};
+
+const updateSelectModeUI = () => {
+  const toggleBtn = document.getElementById("toggle-select-mode");
+  const selectAllBtn = document.getElementById("select-all-runs");
+  const deleteSelectedBtn = document.getElementById("delete-selected-runs");
+  if (toggleBtn) toggleBtn.textContent = selectMode ? "Cancel" : "Select";
+  if (selectAllBtn) selectAllBtn.classList.toggle("hidden", !selectMode);
+  if (deleteSelectedBtn) {
+    deleteSelectedBtn.classList.toggle("hidden", !selectMode);
+    deleteSelectedBtn.textContent = `Delete Selected (${selectedRunIds.size})`;
+    deleteSelectedBtn.disabled = selectedRunIds.size === 0;
+  }
+};
+
+const toggleRunSelection = (runId) => {
+  if (selectedRunIds.has(runId)) {
+    selectedRunIds.delete(runId);
+  } else {
+    selectedRunIds.add(runId);
+  }
+  updateSelectModeUI();
+  const item = document.querySelector(`.recent-run-item[data-run-id="${runId}"]`);
+  if (item) {
+    item.classList.toggle("selected", selectedRunIds.has(runId));
+    const checkbox = item.querySelector(".run-select-checkbox");
+    if (checkbox) checkbox.checked = selectedRunIds.has(runId);
+  }
+};
+
+const selectAllRuns = () => {
+  const allSelected = selectedRunIds.size === recentRuns.length;
+  selectedRunIds.clear();
+  if (!allSelected) {
+    recentRuns.forEach((run) => selectedRunIds.add(run.run_id));
+  }
+  updateSelectModeUI();
+  document.querySelectorAll(".recent-run-item").forEach((item) => {
+    const runId = item.dataset.runId;
+    item.classList.toggle("selected", selectedRunIds.has(runId));
+    const checkbox = item.querySelector(".run-select-checkbox");
+    if (checkbox) checkbox.checked = selectedRunIds.has(runId);
+  });
+  const selectAllBtn = document.getElementById("select-all-runs");
+  if (selectAllBtn) selectAllBtn.textContent = allSelected ? "Select All" : "Deselect All";
+};
+
+const bulkDeleteRuns = async (runIds) => {
+  if (!runIds.length) return;
+  const confirmed = window.confirm(`Delete ${runIds.length} run(s) permanently? This cannot be undone.`);
+  if (!confirmed) return;
+  try {
+    const response = await fetch("/api/runs/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_ids: runIds }),
+    });
+    if (!response.ok) {
+      showToast("Failed to delete runs.", "error");
+      return;
+    }
+    const result = await response.json();
+    const deletedSet = new Set(result.deleted);
+    recentRuns = recentRuns.filter((run) => !deletedSet.has(run.run_id));
+    if (baselineRunId && deletedSet.has(baselineRunId)) {
+      await setBaselineRunId(null);
+      showToast("Baseline cleared because the run was deleted.", "info");
+    }
+    selectedRunIds.clear();
+    selectMode = false;
+    updateSelectModeUI();
+    renderRecentRuns();
+    updateHistoryBadge();
+    const msg = result.errors.length
+      ? `Deleted ${result.deleted.length} run(s). ${result.errors.length} failed.`
+      : `Deleted ${result.deleted.length} run(s).`;
+    showToast(msg, result.errors.length ? "error" : "success");
+  } catch (error) {
+    console.error("Failed to bulk delete runs", error);
+    showToast("Failed to delete runs.", "error");
+  }
+};
+
+const deleteAllRuns = async () => {
+  const ids = recentRuns.map((run) => run.run_id);
+  await bulkDeleteRuns(ids);
+};
+
 const renderRecentRuns = () => {
   const list = document.getElementById("recent-runs-list");
   if (!list) return;
@@ -1533,6 +1628,7 @@ const renderRecentRuns = () => {
   recentRuns.forEach((run) => {
     const item = document.createElement("div");
     item.className = "recent-run-item";
+    if (selectMode && selectedRunIds.has(run.run_id)) item.classList.add("selected");
     item.dataset.runId = run.run_id;
 
     const badges = [];
@@ -1553,8 +1649,13 @@ const renderRecentRuns = () => {
       ? '<div class="run-warning-text">Mock engine used on at least one machine.</div>'
       : "";
 
+    const checkboxHtml = selectMode
+      ? `<label class="run-select-label" title="Select run"><input type="checkbox" class="run-select-checkbox" ${selectedRunIds.has(run.run_id) ? "checked" : ""} /></label>`
+      : "";
+
     item.innerHTML = `
-      <button class="run-delete-button" type="button" aria-label="Delete run" title="Delete run">🗑️</button>
+      ${checkboxHtml}
+      <button class="run-delete-button${selectMode ? " hidden" : ""}" type="button" aria-label="Delete run" title="Delete run">🗑️</button>
       <div class="recent-run-header">
         <div>
           <div class="recent-run-title">${run.model ?? "n/a"}</div>
@@ -1572,32 +1673,44 @@ const renderRecentRuns = () => {
       </div>
     `;
 
-    const deleteButton = item.querySelector(".run-delete-button");
-    deleteButton?.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await deleteRun(run.run_id);
-    });
-
-    item.querySelectorAll("button").forEach((button) => {
-      if (button.classList.contains("run-delete-button")) return;
-      button.addEventListener("click", async (event) => {
+    if (selectMode) {
+      const checkbox = item.querySelector(".run-select-checkbox");
+      checkbox?.addEventListener("change", (event) => {
         event.stopPropagation();
-        const action = button.dataset.action;
-        if (action === "view") {
-          await loadRun(run.run_id);
-        } else if (action === "pin") {
-          await setBaselineRunId(run.run_id);
-        } else if (action === "csv") {
-          window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.csv`;
-        } else if (action === "json") {
-          window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.json`;
-        }
+        toggleRunSelection(run.run_id);
       });
-    });
+      item.addEventListener("click", (event) => {
+        if (event.target.tagName === "INPUT" || event.target.tagName === "BUTTON") return;
+        toggleRunSelection(run.run_id);
+      });
+    } else {
+      const deleteButton = item.querySelector(".run-delete-button");
+      deleteButton?.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await deleteRun(run.run_id);
+      });
 
-    item.addEventListener("click", async () => {
-      await loadRun(run.run_id);
-    });
+      item.querySelectorAll("button").forEach((button) => {
+        if (button.classList.contains("run-delete-button")) return;
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const action = button.dataset.action;
+          if (action === "view") {
+            await loadRun(run.run_id);
+          } else if (action === "pin") {
+            await setBaselineRunId(run.run_id);
+          } else if (action === "csv") {
+            window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.csv`;
+          } else if (action === "json") {
+            window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.json`;
+          }
+        });
+      });
+
+      item.addEventListener("click", async () => {
+        await loadRun(run.run_id);
+      });
+    }
 
     list.appendChild(item);
   });
@@ -2091,6 +2204,22 @@ settingsButton?.addEventListener("click", async () => {
 
 document.getElementById("refresh-runs")?.addEventListener("click", async () => {
   await fetchRecentRuns();
+});
+
+document.getElementById("toggle-select-mode")?.addEventListener("click", () => {
+  toggleSelectMode();
+});
+
+document.getElementById("select-all-runs")?.addEventListener("click", () => {
+  selectAllRuns();
+});
+
+document.getElementById("delete-selected-runs")?.addEventListener("click", async () => {
+  await bulkDeleteRuns([...selectedRunIds]);
+});
+
+document.getElementById("delete-all-runs")?.addEventListener("click", async () => {
+  await deleteAllRuns();
 });
 
 document.getElementById("recheck-checkpoints")?.addEventListener("click", async () => {
