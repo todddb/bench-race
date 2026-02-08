@@ -4,7 +4,16 @@
 
 Run the same prompt across local or networked machines (agents) and collect streaming output + performance metrics to compare models, hardware, and settings.
 
-For runtime sampling and model-fit scoring details, see `docs/metrics_and_fit.md`.
+### Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Configuration Guide](docs/configuration-guide.md) | Complete reference for all config files, IP address setup, and environment variables |
+| [GPU Benchmarking Guide](docs/gpu-benchmarking-guide.md) | GPU-specific setup including NVIDIA GB10, PyTorch nightly builds, and Ollama optimization |
+| [Prime Number Algorithms](docs/prime-algorithms.md) | Deep-dive into the three compute benchmark algorithms and when to use each |
+| [Architecture Overview](docs/architecture.md) | System design, component interaction, and data flow diagrams |
+| [Runtime Metrics & Model Fit](docs/metrics_and_fit.md) | Runtime sampling and model-fit scoring details |
+| [machines.yaml Reference](docs/machines_yaml.md) | Hardware override fields for the machine registry |
 
 ---
 
@@ -558,17 +567,18 @@ The UI provides:
 
 ## Compute Benchmarks
 
-Compute mode counts primes ≤ N to measure raw CPU throughput per agent. The UI streams the first *K* primes for visual feedback, then switches to periodic progress updates to avoid flooding the output panel.
+Compute mode counts primes <= N to measure raw CPU throughput per agent. Three algorithms are available with different performance characteristics.
 
-**Recommended demo presets (2–30s runtimes on typical hardware):**
-- Segmented Sieve: `N = 50_000_000`
-- Simple Sieve: `N = 20_000_000`
-- Trial Division: `N = 2_000_000`
+**Recommended demo presets (2-30s runtimes on typical hardware):**
+- Segmented Sieve: `N = 50_000_000` (fastest, cache-friendly, default)
+- Simple Sieve: `N = 20_000_000` (classic Sieve of Eratosthenes)
+- Trial Division: `N = 2_000_000` (intentionally slow, educational baseline)
 
 **Streaming behavior:**
-- The first K primes (default 100) are emitted as `prime[1]=2`, `prime[2]=3`, ...
-- After K, the agent emits progress lines at the configured interval (default 1s).
+- The agent emits progress lines at the configured interval (default 1s).
 - A final summary reports the total primes, elapsed time, and primes/sec.
+
+For a detailed walkthrough of how each algorithm works, including complexity analysis and guidance on when to use each, see **[Prime Number Algorithms](docs/prime-algorithms.md)**.
 
 ---
 
