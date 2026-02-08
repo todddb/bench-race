@@ -158,10 +158,17 @@ def _prune_old_runs() -> None:
     if len(files) <= RUN_HISTORY_LIMIT:
         return
     for path in files[: len(files) - RUN_HISTORY_LIMIT]:
+        run_id = path.stem
         try:
             path.unlink()
         except OSError:
             log.warning("Failed to delete old run file %s", path)
+        images_dir = RUNS_DIR / run_id
+        if images_dir.exists():
+            try:
+                shutil.rmtree(images_dir)
+            except OSError:
+                log.warning("Failed to delete old run images %s", run_id)
 
 
 def _prompt_preview(prompt: str, limit: int = 120) -> str:
@@ -2265,6 +2272,40 @@ def api_delete_run(run_id: str):
     with RUN_LOCK:
         RUN_CACHE.pop(run_id, None)
     return jsonify({"ok": True})
+
+
+@app.post("/api/runs/bulk-delete")
+def api_bulk_delete_runs():
+    body = request.get_json(silent=True) or {}
+    run_ids = body.get("run_ids")
+    if not isinstance(run_ids, list) or not run_ids:
+        return jsonify({"error": "run_ids must be a non-empty list"}), 400
+    deleted = []
+    errors = []
+    for run_id in run_ids:
+        if not _valid_run_id(run_id):
+            errors.append({"run_id": run_id, "error": "Invalid run id"})
+            continue
+        path = _run_path(run_id)
+        if not path.exists():
+            errors.append({"run_id": run_id, "error": "Not found"})
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warning("Bulk delete: failed to delete run %s: %s", path, exc)
+            errors.append({"run_id": run_id, "error": "Failed to delete"})
+            continue
+        images_dir = RUNS_DIR / run_id
+        if images_dir.exists():
+            try:
+                shutil.rmtree(images_dir)
+            except OSError as exc:
+                log.warning("Bulk delete: failed to delete images %s: %s", run_id, exc)
+        with RUN_LOCK:
+            RUN_CACHE.pop(run_id, None)
+        deleted.append(run_id)
+    return jsonify({"deleted": deleted, "errors": errors})
 
 
 @app.get("/api/runs/<run_id>/export.json")

@@ -60,6 +60,8 @@ let viewingMode = "live";
 let viewingRunId = null;
 let liveRunId = null;
 let recentRuns = [];
+let selectMode = false;
+let selectedRunIds = new Set();
 let activeOverlay = null;
 let lastOverlayFocus = null;
 let checkpointCatalog = [];
@@ -514,8 +516,10 @@ const renderCheckpointValidation = (items) => {
     const dot = document.createElement("span");
     dot.className = `status-dot ${item.valid ? "ok" : "error"}`;
     const content = document.createElement("div");
-    const title = document.createElement("div");
-    // Display label with filename in secondary text
+    content.className = "checkpoint-validation-content";
+    const titleRow = document.createElement("div");
+    titleRow.className = "checkpoint-validation-title-row";
+    const title = document.createElement("span");
     title.textContent = item.label || item.name || item.url;
     if (item.label && item.filename && item.label !== item.filename) {
       const filenameSub = document.createElement("span");
@@ -524,19 +528,65 @@ const renderCheckpointValidation = (items) => {
       filenameSub.textContent = ` (${item.filename})`;
       title.appendChild(filenameSub);
     }
+    titleRow.appendChild(title);
     const meta = document.createElement("div");
     meta.className = "checkpoint-validation-meta";
     const statusText = item.valid ? "Valid" : item.error || "Invalid";
-    const resolved = item.resolved_url ? `Resolved: ${item.resolved_url}` : "";
-    const size = item.size_bytes != null ? `Size: ${formatBytes(item.size_bytes)}` : "Size: n/a";
-    const etag = item.etag ? `ETag: ${item.etag}` : "";
-    const modified = item.last_modified ? `Last-Modified: ${item.last_modified}` : "";
-    meta.textContent = [statusText, resolved, size, etag, modified].filter(Boolean).join(" · ");
-    content.appendChild(title);
+    const statusSpan = document.createElement("span");
+    statusSpan.className = `checkpoint-status ${item.valid ? "valid" : "invalid"}`;
+    statusSpan.textContent = statusText;
+    meta.appendChild(statusSpan);
+    if (item.size_bytes != null) {
+      const sizeSpan = document.createElement("span");
+      sizeSpan.textContent = ` · ${formatBytes(item.size_bytes)}`;
+      meta.appendChild(sizeSpan);
+    }
+    // Build tooltip details
+    const details = [];
+    if (item.resolved_url) details.push(`URL: ${item.resolved_url}`);
+    if (item.size_bytes != null) details.push(`Size: ${formatBytes(item.size_bytes)}`);
+    if (item.etag) details.push(`ETag: ${item.etag}`);
+    if (item.last_modified) details.push(`Last-Modified: ${item.last_modified}`);
+    if (item.error) details.push(`Error: ${item.error}`);
+    if (details.length) {
+      const infoBtn = document.createElement("button");
+      infoBtn.type = "button";
+      infoBtn.className = "checkpoint-info-btn";
+      infoBtn.textContent = "More Info";
+      infoBtn.setAttribute("aria-label", "Show checkpoint details");
+      const tooltip = document.createElement("div");
+      tooltip.className = "checkpoint-tooltip";
+      details.forEach((line) => {
+        const p = document.createElement("div");
+        p.className = "checkpoint-tooltip-line";
+        p.textContent = line;
+        tooltip.appendChild(p);
+      });
+      const wrapper = document.createElement("span");
+      wrapper.className = "checkpoint-info-wrapper";
+      wrapper.appendChild(infoBtn);
+      wrapper.appendChild(tooltip);
+      infoBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // Close any other open tooltips
+        document.querySelectorAll(".checkpoint-info-wrapper.open").forEach((el) => {
+          if (el !== wrapper) el.classList.remove("open");
+        });
+        wrapper.classList.toggle("open");
+      });
+      meta.appendChild(wrapper);
+    }
+    content.appendChild(titleRow);
     content.appendChild(meta);
     row.appendChild(dot);
     row.appendChild(content);
     list.appendChild(row);
+  });
+  // Close tooltips when clicking outside
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".checkpoint-info-wrapper")) {
+      document.querySelectorAll(".checkpoint-info-wrapper.open").forEach((el) => el.classList.remove("open"));
+    }
   });
 };
 
@@ -1115,6 +1165,95 @@ const deleteRun = async (runId) => {
   }
 };
 
+const toggleSelectMode = () => {
+  selectMode = !selectMode;
+  selectedRunIds.clear();
+  updateSelectModeUI();
+  renderRecentRuns();
+};
+
+const updateSelectModeUI = () => {
+  const toggleBtn = document.getElementById("toggle-select-mode");
+  const selectAllBtn = document.getElementById("select-all-runs");
+  const deleteSelectedBtn = document.getElementById("delete-selected-runs");
+  if (toggleBtn) toggleBtn.textContent = selectMode ? "Cancel" : "Select";
+  if (selectAllBtn) selectAllBtn.classList.toggle("hidden", !selectMode);
+  if (deleteSelectedBtn) {
+    deleteSelectedBtn.classList.toggle("hidden", !selectMode);
+    deleteSelectedBtn.textContent = `Delete Selected (${selectedRunIds.size})`;
+    deleteSelectedBtn.disabled = selectedRunIds.size === 0;
+  }
+};
+
+const toggleRunSelection = (runId) => {
+  if (selectedRunIds.has(runId)) {
+    selectedRunIds.delete(runId);
+  } else {
+    selectedRunIds.add(runId);
+  }
+  updateSelectModeUI();
+  const item = document.querySelector(`.recent-run-item[data-run-id="${runId}"]`);
+  if (item) {
+    item.classList.toggle("selected", selectedRunIds.has(runId));
+    const checkbox = item.querySelector(".run-select-checkbox");
+    if (checkbox) checkbox.checked = selectedRunIds.has(runId);
+  }
+};
+
+const selectAllRuns = () => {
+  const allSelected = selectedRunIds.size === recentRuns.length;
+  selectedRunIds.clear();
+  if (!allSelected) {
+    recentRuns.forEach((run) => selectedRunIds.add(run.run_id));
+  }
+  updateSelectModeUI();
+  document.querySelectorAll(".recent-run-item").forEach((item) => {
+    const runId = item.dataset.runId;
+    item.classList.toggle("selected", selectedRunIds.has(runId));
+    const checkbox = item.querySelector(".run-select-checkbox");
+    if (checkbox) checkbox.checked = selectedRunIds.has(runId);
+  });
+  const selectAllBtn = document.getElementById("select-all-runs");
+  if (selectAllBtn) selectAllBtn.textContent = allSelected ? "Select All" : "Deselect All";
+};
+
+const bulkDeleteRuns = async (runIds) => {
+  if (!runIds.length) return;
+  const confirmed = window.confirm(`Delete ${runIds.length} run(s) permanently? This cannot be undone.`);
+  if (!confirmed) return;
+  try {
+    const response = await fetch("/api/runs/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_ids: runIds }),
+    });
+    if (!response.ok) {
+      showToast("Failed to delete runs.", "error");
+      return;
+    }
+    const result = await response.json();
+    const deletedSet = new Set(result.deleted);
+    recentRuns = recentRuns.filter((run) => !deletedSet.has(run.run_id));
+    selectedRunIds.clear();
+    selectMode = false;
+    updateSelectModeUI();
+    renderRecentRuns();
+    updateHistoryBadge();
+    const msg = result.errors.length
+      ? `Deleted ${result.deleted.length} run(s). ${result.errors.length} failed.`
+      : `Deleted ${result.deleted.length} run(s).`;
+    showToast(msg, result.errors.length ? "error" : "success");
+  } catch (error) {
+    console.error("Failed to bulk delete runs", error);
+    showToast("Failed to delete runs.", "error");
+  }
+};
+
+const deleteAllRuns = async () => {
+  const ids = recentRuns.map((run) => run.run_id);
+  await bulkDeleteRuns(ids);
+};
+
 const renderRecentRuns = () => {
   const list = document.getElementById("recent-runs-list");
   if (!list) return;
@@ -1131,6 +1270,7 @@ const renderRecentRuns = () => {
   recentRuns.forEach((run) => {
     const item = document.createElement("div");
     item.className = "recent-run-item";
+    if (selectMode && selectedRunIds.has(run.run_id)) item.classList.add("selected");
     item.dataset.runId = run.run_id;
 
     const badges = [];
@@ -1142,8 +1282,13 @@ const renderRecentRuns = () => {
       badges.push('<span class="run-badge inference">Inference</span>');
     }
 
+    const checkboxHtml = selectMode
+      ? `<label class="run-select-label" title="Select run"><input type="checkbox" class="run-select-checkbox" ${selectedRunIds.has(run.run_id) ? "checked" : ""} /></label>`
+      : "";
+
     item.innerHTML = `
-      <button class="run-delete-button" type="button" aria-label="Delete run" title="Delete run">🗑️</button>
+      ${checkboxHtml}
+      <button class="run-delete-button${selectMode ? " hidden" : ""}" type="button" aria-label="Delete run" title="Delete run">🗑️</button>
       <div class="recent-run-header">
         <div>
           <div class="recent-run-title">${run.model ?? "n/a"}</div>
@@ -1158,28 +1303,40 @@ const renderRecentRuns = () => {
       </div>
     `;
 
-    const deleteButton = item.querySelector(".run-delete-button");
-    deleteButton?.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await deleteRun(run.run_id);
-    });
-
-    item.querySelectorAll("button").forEach((button) => {
-      if (button.classList.contains("run-delete-button")) return;
-      button.addEventListener("click", async (event) => {
+    if (selectMode) {
+      const checkbox = item.querySelector(".run-select-checkbox");
+      checkbox?.addEventListener("change", (event) => {
         event.stopPropagation();
-        const action = button.dataset.action;
-        if (action === "view") {
-          await loadRun(run.run_id);
-        } else if (action === "json") {
-          window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.json`;
-        }
+        toggleRunSelection(run.run_id);
       });
-    });
+      item.addEventListener("click", (event) => {
+        if (event.target.tagName === "INPUT" || event.target.tagName === "BUTTON") return;
+        toggleRunSelection(run.run_id);
+      });
+    } else {
+      const deleteButton = item.querySelector(".run-delete-button");
+      deleteButton?.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await deleteRun(run.run_id);
+      });
 
-    item.addEventListener("click", async () => {
-      await loadRun(run.run_id);
-    });
+      item.querySelectorAll("button").forEach((button) => {
+        if (button.classList.contains("run-delete-button")) return;
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const action = button.dataset.action;
+          if (action === "view") {
+            await loadRun(run.run_id);
+          } else if (action === "json") {
+            window.location.href = `/api/runs/${encodeURIComponent(run.run_id)}/export.json`;
+          }
+        });
+      });
+
+      item.addEventListener("click", async () => {
+        await loadRun(run.run_id);
+      });
+    }
 
     list.appendChild(item);
   });
@@ -1404,6 +1561,22 @@ settingsButton?.addEventListener("click", async () => {
 
 document.getElementById("refresh-runs")?.addEventListener("click", async () => {
   await fetchRecentRuns();
+});
+
+document.getElementById("toggle-select-mode")?.addEventListener("click", () => {
+  toggleSelectMode();
+});
+
+document.getElementById("select-all-runs")?.addEventListener("click", () => {
+  selectAllRuns();
+});
+
+document.getElementById("delete-selected-runs")?.addEventListener("click", async () => {
+  await bulkDeleteRuns([...selectedRunIds]);
+});
+
+document.getElementById("delete-all-runs")?.addEventListener("click", async () => {
+  await deleteAllRuns();
 });
 
 document.getElementById("recheck-checkpoints")?.addEventListener("click", async () => {
