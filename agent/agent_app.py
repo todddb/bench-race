@@ -2151,14 +2151,16 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     await _emit_image_error(full_error_msg, formatted)
                     return
 
-                # Define progress callback to track steps and broadcast events
+                # Define progress callback to track steps and broadcast events.
+                # This callback is invoked directly (as an async coroutine) by
+                # the ComfyUI websocket tracker, so updates stream live.
                 async def on_progress_async(progress: ProgressEvent):
                     nonlocal current_step, max_step_observed, first_step_logged, started_at, started_at_ms
                     current_step = progress.current_step
                     total_steps_ws = progress.total_steps
 
-                    # Mark started_at on first progress
-                    if started_at is None:
+                    # Refine started_at timing on first real progress tick
+                    if not first_step_logged and current_step >= 1:
                         started_at = time.perf_counter()
                         started_at_ms = time.time() * 1000.0
                         queue_latency_ms = (started_at - submit_time) * 1000.0
@@ -2168,19 +2170,6 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                             "started_at_ms": started_at_ms,
                             "first_progress_at_ms": started_at_ms,
                         })
-                        await _broadcast_event(
-                            Event(
-                                job_id=job_id,
-                                type="image_started",
-                                payload={
-                                    "run_id": req.run_id,
-                                    "queue_latency_ms": queue_latency_ms,
-                                    "started_at": started_at_ms / 1000.0,
-                                    "started_at_ms": started_at_ms,
-                                    "first_progress_at_ms": started_at_ms,
-                                },
-                            )
-                        )
 
                     # Track maximum step observed
                     if current_step > max_step_observed:
@@ -2255,17 +2244,34 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         except Exception as e:
                             log.debug(f"Preview processing error: {e}")
 
-                # Wrap sync callbacks for the async tracker
-                progress_events = []
-                preview_events = []
+                # Emit image_started immediately after prompt submission
+                # so the UI shows activity even for cached/instant runs.
+                started_at = time.perf_counter()
+                started_at_ms = time.time() * 1000.0
+                queue_latency_ms = (started_at - submit_time) * 1000.0
+                _update_job_status({
+                    "status": "running",
+                    "queue_latency_ms": queue_latency_ms,
+                    "started_at_ms": started_at_ms,
+                    "first_progress_at_ms": started_at_ms,
+                })
+                await _broadcast_event(
+                    Event(
+                        job_id=job_id,
+                        type="image_started",
+                        payload={
+                            "run_id": req.run_id,
+                            "queue_latency_ms": queue_latency_ms,
+                            "started_at": started_at_ms / 1000.0,
+                            "started_at_ms": started_at_ms,
+                            "first_progress_at_ms": started_at_ms,
+                        },
+                    )
+                )
 
-                def on_progress_sync(progress: ProgressEvent):
-                    progress_events.append(progress)
-
-                def on_preview_sync(image_bytes: bytes, step: int, total: int):
-                    preview_events.append((image_bytes, step, total))
-
-                # Wait for completion using proper websocket tracking with prompt_id filtering
+                # Wait for completion using proper websocket tracking with prompt_id filtering.
+                # Pass async callbacks directly so progress/preview events are
+                # broadcast to the UI in real time instead of being buffered.
                 slog.info(
                     "job_waiting_completion",
                     job_id=job_id,
@@ -2279,16 +2285,10 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     base_url=base_url,
                     http_client=client,
                     timeout_seconds=300.0,  # 5 minutes timeout
-                    on_progress=on_progress_sync,
-                    on_preview=on_preview_sync,
+                    on_progress=on_progress_async,
+                    on_preview=on_preview_async,
                     structured_logger=slog,
                 )
-
-                # Process any queued progress/preview events
-                for progress in progress_events:
-                    await on_progress_async(progress)
-                for preview_data in preview_events:
-                    await on_preview_async(*preview_data)
 
                 # Update max_step from tracker result
                 if ws_result.max_step > max_step_observed:
