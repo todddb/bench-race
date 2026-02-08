@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>bench-race admin</title>
-    <link rel="stylesheet" href="/static/css/app.css" />
+    <link rel="stylesheet" href="/static/css/app.css?v={{ build_id }}" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   </head>
   <body>
@@ -53,6 +53,6 @@
 
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/js/service-control.js"></script>
+    <script src="/static/js/service-control.js?v={{ build_id }}"></script>
   </body>
 </html>

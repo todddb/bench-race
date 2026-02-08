@@ -15,13 +15,17 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger("bench-agent.comfy_ws")
+
+# Type alias: callbacks may be sync or async
+ProgressCallback = Callable[["ProgressEvent"], Union[None, Awaitable[None]]]
+PreviewCallback = Callable[[bytes, int, int], Union[None, Awaitable[None]]]
 
 
 @dataclass
@@ -70,9 +74,9 @@ class ComfyWSTracker:
     timeout_seconds: float = 300.0  # 5 minutes default
     poll_interval: float = 0.75  # How often to poll /history (0.5-1.0s)
 
-    # Callbacks
-    on_progress: Optional[Callable[[ProgressEvent], None]] = None
-    on_preview: Optional[Callable[[bytes, int, int], None]] = None
+    # Callbacks – may be sync or async (coroutine) functions.
+    on_progress: Optional[ProgressCallback] = None
+    on_preview: Optional[PreviewCallback] = None
 
     # Internal state
     _completed: bool = field(default=False, init=False)
@@ -145,11 +149,13 @@ class ComfyWSTracker:
 
                 if self.on_progress:
                     try:
-                        self.on_progress(ProgressEvent(
+                        result = self.on_progress(ProgressEvent(
                             current_step=value,
                             total_steps=max_val,
                             node_id=node_id,
                         ))
+                        if asyncio.iscoroutine(result):
+                            await result
                     except Exception as e:
                         log.warning(f"Progress callback error: {e}")
             return False
@@ -267,7 +273,9 @@ class ComfyWSTracker:
                             # Binary message = preview image
                             if self._execution_started and self.on_preview:
                                 try:
-                                    self.on_preview(msg, self._max_step, self._total_steps)
+                                    result = self.on_preview(msg, self._max_step, self._total_steps)
+                                    if asyncio.iscoroutine(result):
+                                        await result
                                 except Exception as e:
                                     log.debug(f"Preview callback error: {e}")
                             continue
@@ -413,8 +421,8 @@ async def wait_for_prompt(
     base_url: str,
     http_client: httpx.AsyncClient,
     timeout_seconds: float = 300.0,
-    on_progress: Optional[Callable[[ProgressEvent], None]] = None,
-    on_preview: Optional[Callable[[bytes, int, int], None]] = None,
+    on_progress: Optional[ProgressCallback] = None,
+    on_preview: Optional[PreviewCallback] = None,
     structured_logger: Any = None,
 ) -> ComfyWSResult:
     """

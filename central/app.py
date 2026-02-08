@@ -102,6 +102,30 @@ def _current_git_sha() -> str:
         return "unknown"
 
 
+def _generate_build_id() -> str:
+    """Generate a short build identifier for cache-busting static assets.
+
+    Uses the short git commit hash when available, otherwise falls back
+    to a timestamp-based identifier.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT_DIR), "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        short_sha = result.stdout.strip()
+        if short_sha:
+            return short_sha
+    except Exception:
+        pass
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+BUILD_ID: str = _generate_build_id()
+
+
 def _new_run_id(ts: datetime) -> str:
     return f"{ts.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
@@ -1803,6 +1827,23 @@ def stop_ws_connectors():
 
 
 # -----------------------------------------------------------------------------
+# Template helpers
+# -----------------------------------------------------------------------------
+@app.context_processor
+def inject_build_id():
+    """Make build_id available in every Jinja template for cache-busting."""
+    return {"build_id": BUILD_ID}
+
+
+@app.after_request
+def add_cache_headers(response):
+    """Set Cache-Control on HTML pages so the browser always revalidates."""
+    if response.content_type and "text/html" in response.content_type:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
 @app.get("/")
@@ -1833,6 +1874,15 @@ def image():
 @app.get("/admin")
 def admin():
     return render_template("admin.html")
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify({
+        "version": BUILD_ID,
+        "build_id": BUILD_ID,
+        "git_sha": _current_git_sha(),
+    })
 
 
 @app.get("/api/machines")

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>bench-race · image</title>
-    <link rel="stylesheet" href="/static/css/app.css" />
+    <link rel="stylesheet" href="/static/css/app.css?v={{ build_id }}" />
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   </head>
   <body data-mode="image">
@@ -345,7 +345,7 @@
       </aside>
     </div>
 
-    <script src="/static/js/image_sparkline_utils.js"></script>
-    <script src="/static/js/image.js"></script>
+    <script src="/static/js/image_sparkline_utils.js?v={{ build_id }}"></script>
+    <script src="/static/js/image.js?v={{ build_id }}"></script>
   </body>
 </html>
