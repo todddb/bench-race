@@ -266,15 +266,23 @@ def _save_image_to_disk(image_bytes: bytes, run_id: str, filename: str) -> str:
     return image_id
 
 
-def _cleanup_old_images(max_runs: int = 10):
+def _cleanup_old_images(max_runs: int = 10, current_run_id: Optional[str] = None):
     """
     Clean up old image runs, keeping only the most recent max_runs.
 
     Args:
-        max_runs: Maximum number of run directories to keep
+        max_runs: Maximum number of run directories to keep (overridden by BENCH_IMAGE_RETENTION_RUNS env var)
+        current_run_id: Current run_id to protect from deletion
     """
     if not OUTPUT_IMAGES_DIR.exists():
         return
+
+    # Read retention configuration from environment
+    max_runs = int(os.environ.get("BENCH_IMAGE_RETENTION_RUNS", max_runs))
+    retention_minutes = int(os.environ.get("BENCH_IMAGE_RETENTION_MINUTES", 15))
+
+    current_time = time.time()
+    protection_threshold = current_time - (retention_minutes * 60)
 
     # Get all run directories sorted by modification time (newest first)
     run_dirs = sorted(
@@ -283,13 +291,60 @@ def _cleanup_old_images(max_runs: int = 10):
         reverse=True
     )
 
-    # Remove old runs beyond max_runs
-    for old_dir in run_dirs[max_runs:]:
+    # Track what we're keeping vs removing
+    kept_count = 0
+    removed_count = 0
+
+    # Remove old runs beyond max_runs, with safety protections
+    for old_dir in run_dirs:
+        run_id = old_dir.name
+        mtime = old_dir.stat().st_mtime
+
+        # Safety checks: never delete active or recently modified runs
+        is_current = current_run_id is not None and run_id == current_run_id
+        is_recent = mtime >= protection_threshold
+        should_keep_by_limit = kept_count < max_runs
+
+        if is_current:
+            slog.debug("image_cleanup_skip", run_id=run_id, reason="current_run")
+            kept_count += 1
+            continue
+
+        if is_recent:
+            minutes_ago = (current_time - mtime) / 60
+            slog.debug("image_cleanup_skip", run_id=run_id, reason="recently_modified", minutes_ago=f"{minutes_ago:.1f}")
+            kept_count += 1
+            continue
+
+        if should_keep_by_limit:
+            kept_count += 1
+            continue
+
+        # Safe to delete
         try:
+            # Get directory size for logging
+            total_size = sum(f.stat().st_size for f in old_dir.rglob('*') if f.is_file())
             shutil.rmtree(old_dir)
-            slog.info("image_cleanup", removed_run=old_dir.name, reason="retention_policy")
+            removed_count += 1
+            slog.info(
+                "image_cleanup",
+                run_id=run_id,
+                path=str(old_dir),
+                size_bytes=total_size,
+                reason="retention_limit"
+            )
         except Exception as e:
-            slog.warning("image_cleanup_failed", run=old_dir.name, error=str(e))
+            slog.warning("image_cleanup_failed", run_id=run_id, error=str(e))
+
+    if removed_count > 0:
+        slog.info(
+            "image_cleanup_summary",
+            removed=removed_count,
+            kept=kept_count,
+            total=len(run_dirs),
+            max_runs=max_runs,
+            retention_minutes=retention_minutes
+        )
 
 
 def _format_count(value: int) -> str:
@@ -1691,7 +1746,8 @@ async def comfy_txt2img(req: ComfyTxt2ImgRequest):
     job_id = str(uuid.uuid4())
 
     # Clean up old images to maintain retention policy
-    _cleanup_old_images(max_runs=10)
+    # Protect current run_id from deletion
+    _cleanup_old_images(max_runs=10, current_run_id=req.run_id)
 
     # Log job received
     slog.info(

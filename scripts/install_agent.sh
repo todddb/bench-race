@@ -489,15 +489,73 @@ ensure_prereqs() {
         exit 1
     fi
 
-    # Check for Python venv module
-    if ! python3 -m venv --help &>/dev/null; then
-        log_error "Python venv module not available"
-        if [[ "$OS_TYPE" == "linux" ]]; then
-            log_info "Install with: sudo apt-get install python3-venv"
+    # Check for Python venv module with preflight test
+    log_info "Verifying Python venv capability..."
+
+    # Detect Python version
+    local python_version
+    python_version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "")
+    if [[ -z "$python_version" ]]; then
+        log_error "Unable to detect Python version"
+        exit 1
+    fi
+    log_info "Detected Python ${python_version}"
+
+    # Test venv creation in a temporary directory
+    local test_venv_dir
+    test_venv_dir=$(mktemp -d)
+    local venv_ok=false
+
+    if python3 -m venv "$test_venv_dir/test_venv" &>/dev/null; then
+        venv_ok=true
+        rm -rf "$test_venv_dir"
+    else
+        rm -rf "$test_venv_dir"
+
+        # Venv creation failed - attempt auto-fix on Debian/Ubuntu
+        if [[ "$OS_TYPE" == "linux" ]] && command -v apt-get &>/dev/null; then
+            log_warning "Python venv creation failed - attempting to install required packages"
+
+            # Determine exact Python venv package name
+            local venv_pkg="python${python_version}-venv"
+            local dev_pkg="python${python_version}-dev"
+
+            log_info "Installing: ${venv_pkg}, python3-pip, ${dev_pkg}, build-essential"
+
+            if run_privileged apt-get update && \
+               run_privileged apt-get install -y "${venv_pkg}" python3-pip "${dev_pkg}" build-essential; then
+                log_info "Packages installed successfully - retrying venv test"
+
+                # Retry venv creation
+                test_venv_dir=$(mktemp -d)
+                if python3 -m venv "$test_venv_dir/test_venv" &>/dev/null; then
+                    venv_ok=true
+                    rm -rf "$test_venv_dir"
+                else
+                    rm -rf "$test_venv_dir"
+                fi
+            fi
         fi
+    fi
+
+    if [[ "$venv_ok" != true ]]; then
+        log_error "Python venv module not available or not functioning"
+        log_error "Unable to create Python virtual environments"
+
+        if [[ "$OS_TYPE" == "linux" ]]; then
+            if command -v apt-get &>/dev/null; then
+                log_info "On Debian/Ubuntu, try: sudo apt-get install python${python_version}-venv python3-pip python${python_version}-dev build-essential"
+            else
+                log_info "On RHEL/CentOS, try: sudo dnf install python3-venv python3-pip python3-devel gcc"
+            fi
+        elif [[ "$OS_TYPE" == "macos" ]]; then
+            log_info "Python venv should be available by default. Try reinstalling Python."
+        fi
+
         exit 1
     fi
 
+    log_success "Python venv verified and working"
     log_success "All prerequisites satisfied"
 }
 
@@ -620,10 +678,16 @@ install_or_update_comfyui() {
         fi
     fi
 
-    # Create venv if not present
+    # Create venv if not present (with error handling)
     if [[ ! -d "$COMFY_DIR/.venv" ]]; then
         log_info "Creating Python venv for ComfyUI..."
-        run_command python3 -m venv "$COMFY_DIR/.venv"
+        (
+            set -euo pipefail
+            python3 -m venv "$COMFY_DIR/.venv"
+        ) || {
+            log_error "Failed to create ComfyUI venv"
+            return 1
+        }
     fi
 
     local VENV_PY="$COMFY_DIR/.venv/bin/python"
@@ -634,8 +698,14 @@ install_or_update_comfyui() {
         return 0
     fi
 
-    # Upgrade pip
-    "$VENV_PIP" install --quiet --upgrade pip
+    # Upgrade pip (with error handling)
+    (
+        set -euo pipefail
+        "$VENV_PY" -m pip install --quiet --upgrade pip
+    ) || {
+        log_error "Failed to upgrade pip in ComfyUI venv"
+        return 1
+    }
 
     if [[ "$OS_TYPE" == "macos" ]]; then
         # macOS installation (simpler - use default PyTorch)
@@ -773,7 +843,13 @@ install_or_update_agent_venv() {
 
     if [[ ! -d "$AGENT_DIR/.venv" ]]; then
         log_info "Creating Python venv for agent..."
-        run_command python3 -m venv "$AGENT_DIR/.venv"
+        (
+            set -euo pipefail
+            python3 -m venv "$AGENT_DIR/.venv"
+        ) || {
+            log_error "Failed to create agent venv"
+            return 1
+        }
     else
         log_info "Agent venv already exists"
     fi
@@ -783,17 +859,19 @@ install_or_update_agent_venv() {
         return 0
     fi
 
-    # shellcheck disable=SC1091
-    source "$AGENT_DIR/.venv/bin/activate"
+    local VENV_PY="$AGENT_DIR/.venv/bin/python"
 
+    # Use venv Python directly with -m pip (no activation needed)
+    # This is more reliable than activating and using 'pip' from PATH
     log_info "Installing/updating Python dependencies..."
-    pip install --quiet --upgrade pip
-    pip install --quiet -r "$AGENT_DIR/requirements.txt" || {
+    (
+        set -euo pipefail
+        "$VENV_PY" -m pip install --quiet --upgrade pip
+        "$VENV_PY" -m pip install --quiet -r "$AGENT_DIR/requirements.txt"
+    ) || {
         log_error "Failed to install Python dependencies"
         return 1
     }
-
-    deactivate
 
     log_success "Agent Python environment ready"
 }
