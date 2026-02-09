@@ -1,8 +1,18 @@
 (() => {
   const DEFAULT_SAMPLER_INTERVAL_S = 1.0;
 
+  const asScalarOrLast = (value) => {
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i -= 1) {
+        if (value[i] != null) return value[i];
+      }
+      return value.length ? value[value.length - 1] : null;
+    }
+    return value;
+  };
+
   const resolveSamplerIntervalS = (samplerIntervalS) => {
-    const resolved = Number(samplerIntervalS);
+    const resolved = Number(asScalarOrLast(samplerIntervalS));
     if (Number.isFinite(resolved) && resolved > 0) return resolved;
     return DEFAULT_SAMPLER_INTERVAL_S;
   };

@@ -364,7 +364,9 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .recent-run-item.selected:hover { background: #dbeafe; }
 
 /* Drawer overlays */
-.overlay { position: fixed; inset: 0; z-index: 2000; }
+.overlay { position: fixed; inset: 0; z-index: 4000; pointer-events: none; }
+.overlay.open { pointer-events: auto; }
+.overlay.hidden { pointer-events: none; }
 .overlay-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.35); }
 .drawer { position: fixed; top: 0; right: 0; width: 340px; max-width: 90vw; height: 100vh; background: #fff; box-shadow: -8px 0 20px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 200ms ease; }
 .overlay.open .drawer { transform: translateX(0); }

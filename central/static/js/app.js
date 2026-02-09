@@ -811,8 +811,26 @@ const renderSparkline = (svg, series, options = {}) => {
   if (options.title) svg.setAttribute("title", options.title);
 };
 
+const asScalarOrLast = (value) => {
+  if (Array.isArray(value)) {
+    for (let i = value.length - 1; i >= 0; i -= 1) {
+      const entry = value[i];
+      if (entry != null && !Number.isNaN(entry)) {
+        return entry;
+      }
+    }
+    return value.length ? value[value.length - 1] : null;
+  }
+  return value;
+};
+
 const getLastNumeric = (values) => {
-  if (!Array.isArray(values)) return null;
+  if (!Array.isArray(values)) {
+    if (values != null && !Number.isNaN(values)) {
+      return values;
+    }
+    return null;
+  }
   for (let i = values.length - 1; i >= 0; i -= 1) {
     const value = values[i];
     if (value != null && !Number.isNaN(value)) {
@@ -836,12 +854,12 @@ const extractSeries = (samples, key) => {
 
 const recordRunSample = (machineId, metrics) => {
   if (!runTrackingActive || runDone.has(machineId) || !metrics) return;
-  const cpu = getLastNumeric(metrics.cpu_pct || []);
-  const gpu = getLastNumeric(metrics.gpu_pct || []);
-  const vramUsed = getLastNumeric(metrics.vram_used_mib || []);
-  const vramTotal = getLastNumeric(metrics.vram_total_mib || []);
-  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes || []);
-  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib || []);
+  const cpu = getLastNumeric(metrics.cpu_pct ?? []);
+  const gpu = getLastNumeric(metrics.gpu_pct ?? []);
+  const vramUsed = getLastNumeric(metrics.vram_used_mib ?? []);
+  const vramTotal = getLastNumeric(metrics.vram_total_mib ?? []);
+  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes ?? []);
+  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib ?? []);
   const machine = statusCache.get(machineId);
   const totalRamBytes = machine?.capabilities?.total_system_ram_bytes;
 
@@ -896,9 +914,7 @@ const renderRunSparklines = (machineId, metrics = null) => {
   const { values: memValues, times: memTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "mem"));
   const startTime = runStartTs ?? samples[0]?.t ?? performance.now();
   const endTime = runEndTs ?? performance.now();
-  const gpuAvailability = Array.isArray(resolvedMetrics?.gpu_metrics_available)
-    ? resolvedMetrics.gpu_metrics_available.some(Boolean)
-    : resolvedMetrics?.gpu_metrics_available === true;
+  const gpuAvailability = asScalarOrLast(resolvedMetrics?.gpu_metrics_available);
 
   const hasGpuUtil = gpuValues.length > 0;
   const hasCpuUtil = cpuValues.length > 0;
@@ -1014,9 +1030,7 @@ const openSparklineModal = (machineId, type) => {
   const vramTotal = metrics?.vram_total_mib || [];
   const systemMem = metrics?.system_mem_used_mib || [];
   const ramUsedBytes = metrics?.ram_used_bytes || [];
-  const gpuAvailability = Array.isArray(metrics?.gpu_metrics_available)
-    ? metrics.gpu_metrics_available.some(Boolean)
-    : metrics?.gpu_metrics_available === true;
+  const gpuAvailability = asScalarOrLast(metrics?.gpu_metrics_available);
 
   if (type === "util") {
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Utilization`;
