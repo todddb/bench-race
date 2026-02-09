@@ -440,6 +440,23 @@ const showInitFailure = (error) => {
   showToast(message, "error", error ? () => console.error("Image init error:", error) : null);
 };
 
+let imageUiReady = false;
+let initFailureShown = false;
+
+const reportInitFailure = (error) => {
+  if (initFailureShown || imageUiReady) return;
+  initFailureShown = true;
+  showInitFailure(error);
+};
+
+window.addEventListener("error", (event) => {
+  reportInitFailure(event.error || event.message);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  reportInitFailure(event.reason);
+});
+
 const formatTimestamp = (isoString) => {
   if (!isoString) return "";
   const date = new Date(isoString);
@@ -2433,6 +2450,7 @@ const bootImageUi = () => {
   const hiddenOverlays = document.querySelectorAll('.overlay[aria-hidden="true"], .overlay.hidden, .backdrop.hidden');
   hiddenOverlays.forEach(o => { o.style.pointerEvents = 'none'; });
 
+  imageUiReady = true;
   debugLog('bootImageUi() complete');
 };
 
@@ -2440,5 +2458,5 @@ try {
   bootImageUi();
 } catch (error) {
   console.error("Image UI failed to initialize.", error);
-  showInitFailure(error);
+  reportInitFailure(error);
 }
