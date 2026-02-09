@@ -150,6 +150,7 @@
             {% for m in machines %}
             <div class="pane card image-pane {% if m.excluded %}pane-excluded{% endif %}" id="pane-{{ m.machine_id }}" data-excluded="{{ m.excluded|lower }}" data-vendor="{{ m.vendor|default('other') }}">
               <div class="pane-header">
+                <div class="drag-handle" aria-label="Drag to reorder" title="Drag to reorder" role="button" tabindex="0"><svg viewBox="0 0 16 16" fill="currentColor"><circle cx="5" cy="3" r="1.5"/><circle cx="11" cy="3" r="1.5"/><circle cx="5" cy="8" r="1.5"/><circle cx="11" cy="8" r="1.5"/><circle cx="5" cy="13" r="1.5"/><circle cx="11" cy="13" r="1.5"/></svg></div>
                 <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.png" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
                 <div class="pane-title">{{ m.label }}</div>
                 <div class="pane-status">
@@ -351,5 +352,7 @@
 
     <script src="/static/js/image_sparkline_utils.js?v={{ build_id }}"></script>
     <script src="/static/js/image.js?v={{ build_id }}"></script>
+    <script src="/static/vendor/Sortable.min.js"></script>
+    <script src="/static/js/card-order.js?v={{ build_id }}"></script>
   </body>
 </html>
