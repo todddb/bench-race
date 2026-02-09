@@ -1893,17 +1893,55 @@ const computeMetricMemPct = (metrics, index) => {
   return null;
 };
 
-const buildWindowedMetricSamples = (metrics, runEntry) => {
+const asScalarOrLast = (value) => {
+  if (Array.isArray(value)) {
+    for (let i = value.length - 1; i >= 0; i -= 1) {
+      const entry = value[i];
+      if (entry != null && !Number.isNaN(entry)) return entry;
+    }
+    return value.length ? value[value.length - 1] : null;
+  }
+  return value;
+};
+
+const asArray = (value, length, fill = null) => {
+  if (Array.isArray(value)) return value;
+  if (!Number.isFinite(length) || length <= 0) return [];
+  const resolved = value ?? fill;
+  return Array.from({ length }, () => resolved);
+};
+
+const normalizeRuntimeMetrics = (metrics) => {
   if (!metrics) return null;
-  const timestamps = metrics.timestamps || [];
-  if (!Array.isArray(timestamps) || timestamps.length === 0) return null;
+  const timestamps = Array.isArray(metrics.timestamps) ? metrics.timestamps : [];
+  if (timestamps.length === 0) return null;
+  const count = timestamps.length;
+  return {
+    ...metrics,
+    timestamps,
+    cpu_pct: asArray(metrics.cpu_pct, count),
+    gpu_pct: asArray(metrics.gpu_pct, count),
+    vram_used_mib: asArray(metrics.vram_used_mib, count),
+    vram_total_mib: asArray(metrics.vram_total_mib, count),
+    system_mem_used_mib: asArray(metrics.system_mem_used_mib, count),
+    system_mem_total_mib: asArray(metrics.system_mem_total_mib, count),
+    ram_used_bytes: asArray(metrics.ram_used_bytes, count),
+    ram_total_bytes: asArray(metrics.ram_total_bytes, count),
+  };
+};
+
+const buildWindowedMetricSamples = (metrics, runEntry) => {
+  const normalized = normalizeRuntimeMetrics(metrics);
+  if (!normalized) return null;
+  const { timestamps } = normalized;
 
   const window = deriveImageRunWindowMs(runEntry);
+  const samplerIntervalS = asScalarOrLast(metrics?.sampler_interval_s);
   const indices = selectWindowedSampleIndices
     ? selectWindowedSampleIndices(
       timestamps,
       window,
-      metrics.sampler_interval_s,
+      samplerIntervalS,
       SPARKLINE_FALLBACK_POINTS,
     )
     : [];
@@ -1912,9 +1950,9 @@ const buildWindowedMetricSamples = (metrics, runEntry) => {
 
   let samples = indices.map((index) => ({
     t: timestamps[index],
-    cpu: metrics.cpu_pct?.[index],
-    gpu: metrics.gpu_pct?.[index],
-    mem: computeMetricMemPct(metrics, index),
+    cpu: normalized.cpu_pct?.[index],
+    gpu: normalized.gpu_pct?.[index],
+    mem: computeMetricMemPct(normalized, index),
   }));
 
   if (samples.length === 1) {
@@ -1928,7 +1966,10 @@ const buildWindowedMetricSamples = (metrics, runEntry) => {
 };
 
 const getLastNumeric = (values) => {
-  if (!Array.isArray(values)) return null;
+  if (!Array.isArray(values)) {
+    if (values != null && !Number.isNaN(values)) return values;
+    return null;
+  }
   for (let i = values.length - 1; i >= 0; i -= 1) {
     const value = values[i];
     if (value != null && !Number.isNaN(value)) return value;
@@ -1938,14 +1979,14 @@ const getLastNumeric = (values) => {
 
 const recordRunSample = (machineId, metrics) => {
   if (!imageRunTrackingActive || imageRunDone.has(machineId) || !metrics) return;
-  const cpu = getLastNumeric(metrics.cpu_pct || []);
-  const gpu = getLastNumeric(metrics.gpu_pct || []);
-  const vramUsed = getLastNumeric(metrics.vram_used_mib || []);
-  const vramTotal = getLastNumeric(metrics.vram_total_mib || []);
-  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes || []);
-  const ramTotalBytes = getLastNumeric(metrics.ram_total_bytes || []);
-  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib || []);
-  const systemMemTotalMib = getLastNumeric(metrics.system_mem_total_mib || []);
+  const cpu = getLastNumeric(metrics.cpu_pct ?? []);
+  const gpu = getLastNumeric(metrics.gpu_pct ?? []);
+  const vramUsed = getLastNumeric(metrics.vram_used_mib ?? []);
+  const vramTotal = getLastNumeric(metrics.vram_total_mib ?? []);
+  const ramUsedBytes = getLastNumeric(metrics.ram_used_bytes ?? []);
+  const ramTotalBytes = getLastNumeric(metrics.ram_total_bytes ?? []);
+  const systemMemMib = getLastNumeric(metrics.system_mem_used_mib ?? []);
+  const systemMemTotalMib = getLastNumeric(metrics.system_mem_total_mib ?? []);
   const machine = statusCache.get(machineId);
   const totalRamBytes = ramTotalBytes || machine?.capabilities?.total_system_ram_bytes || machine?.total_system_ram_bytes;
 
@@ -2029,8 +2070,9 @@ const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
   const { values: cpuValues, times: cpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "cpu"));
   const { values: gpuValues, times: gpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "gpu"));
   const { values: memValues, times: memTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "mem"));
+  const gpuAvailability = asScalarOrLast(resolvedMetrics?.gpu_metrics_available);
 
-  const hasGpuUtil = gpuValues.length > 0;
+  const hasGpuUtil = gpuValues.length > 0 && gpuAvailability !== false;
   const hasCpuUtil = cpuValues.length > 0;
   const hasUtil = hasGpuUtil || hasCpuUtil;
 
