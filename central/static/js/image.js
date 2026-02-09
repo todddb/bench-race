@@ -2219,17 +2219,23 @@ socket.on("agent_event", (event) => {
   if (event.type === "image_preview") {
     if (state && getStatusRank(state.status) >= getStatusRank("complete")) return;
     // Apply throttling to preview updates to reduce CPU/GPU load
-    if (payload.image_b64 && canUpdatePreview(machineId)) {
-      setPreviewImage(machineId, `data:image/jpeg;base64,${payload.image_b64}`, false, runId);
+    // Support both legacy image_b64 and new preview_b64 fields
+    const previewData = payload.image_b64 || payload.preview_b64;
+    if (previewData && canUpdatePreview(machineId)) {
+      setPreviewImage(machineId, `data:image/jpeg;base64,${previewData}`, false, runId);
     }
   }
   if (event.type === "image_complete") {
     if (state) state.status = "complete";
     markImageMachineDone(machineId);
     const images = payload.images || [];
-    if (images.length > 0 && images[0].image_b64) {
+    // Support both legacy image_b64 and new preview_b64 fields
+    const finalImageData = images.length > 0 ? (images[0].image_b64 || images[0].preview_b64) : null;
+    if (finalImageData) {
       // Force show final image even if live preview is disabled
-      setPreviewImage(machineId, `data:image/png;base64,${images[0].image_b64}`, true, runId);
+      const contentType = images[0].content_type || "image/png";
+      const mimeType = contentType === "image/jpeg" ? "image/jpeg" : "image/png";
+      setPreviewImage(machineId, `data:${mimeType};base64,${finalImageData}`, true, runId);
     } else {
       const cached = getCachedFinalImage(runId, machineId);
       if (cached) {

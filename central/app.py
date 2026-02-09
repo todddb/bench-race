@@ -973,6 +973,57 @@ def _save_image_payload(run_id: str, machine_id: str, filename: str, b64_data: s
     return str(path.relative_to(images_root))
 
 
+def _fetch_and_save_image_by_id(run_id: str, machine_id: str, filename: str, image_id: str) -> Optional[str]:
+    """
+    Fetch image from agent HTTP endpoint by image_id and save locally.
+
+    Args:
+        run_id: Run identifier
+        machine_id: Machine identifier
+        filename: Filename to save as locally
+        image_id: UUID of the image on the agent
+
+    Returns:
+        Relative path to saved image, or None if failed
+    """
+    if not image_id:
+        return None
+
+    # Find the machine's agent_base_url
+    machine = next((m for m in MACHINES if m.get("id") == machine_id), None)
+    if not machine:
+        log.warning("Machine not found for image fetch: %s", machine_id)
+        return None
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        log.warning("No agent_base_url for machine: %s", machine_id)
+        return None
+
+    # Fetch image from agent
+    try:
+        image_url = f"{agent_base_url}/api/image/result/{image_id}"
+        response = requests.get(image_url, timeout=10)
+        response.raise_for_status()
+        image_bytes = response.content
+    except Exception as e:
+        log.warning("Failed to fetch image from agent: %s, error: %s", image_url, e)
+        return None
+
+    # Save image locally
+    base_dir = _run_images_dir(run_id) / machine_id
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / filename
+    try:
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+    except OSError:
+        return None
+
+    images_root = _run_images_dir(run_id)
+    return str(path.relative_to(images_root))
+
+
 def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Optional[Dict[str, Any]]:
     try:
         r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
@@ -1282,9 +1333,20 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                     }
                 )
             elif event_type == "image_preview":
-                image_b64 = payload.get("image_b64")
                 filename = payload.get("filename") or "preview.jpg"
-                saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+                saved_path = None
+
+                # Prefer new image_id approach, fallback to legacy image_b64
+                image_id = payload.get("image_id")
+                if image_id:
+                    # Fetch image from agent HTTP endpoint
+                    saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
+                else:
+                    # Legacy: decode base64 from WS payload
+                    image_b64 = payload.get("image_b64") or payload.get("preview_b64")
+                    if image_b64:
+                        saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+
                 if saved_path:
                     machine_entry["preview_path"] = saved_path
                 machine_entry.update(
@@ -1302,8 +1364,20 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                 stored_images = []
                 for idx, image in enumerate(images_payload):
                     filename = _image_filename(image, idx)
-                    image_b64 = image.get("image_b64", "") if isinstance(image, dict) else ""
-                    saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+                    saved_path = None
+
+                    # Prefer new image_id approach, fallback to legacy image_b64
+                    if isinstance(image, dict):
+                        image_id = image.get("image_id")
+                        if image_id:
+                            # Fetch image from agent HTTP endpoint
+                            saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
+                        else:
+                            # Legacy: decode base64 from WS payload
+                            image_b64 = image.get("image_b64") or image.get("preview_b64", "")
+                            if image_b64:
+                                saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+
                     if saved_path:
                         stored_images.append(saved_path)
                 dispatch_at_ms = _normalize_epoch_ms(machine_entry.get("dispatch_at_ms"))
@@ -1764,7 +1838,9 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
     while not _stop_event.is_set():
         try:
             log.info("WS connect: machine=%s url=%s", machine_id, ws_uri)
-            async with websockets.connect(ws_uri) as ws:
+            # Set max_size=None to handle large messages (e.g., image data)
+            # This prevents 1009 "message too big" disconnects
+            async with websockets.connect(ws_uri, max_size=None) as ws:
                 log.info("WS connected: machine=%s url=%s", machine_id, ws_uri)
                 backoff = 1.0
                 async for raw in ws:

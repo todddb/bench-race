@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -21,7 +22,7 @@ import subprocess
 import signal
 from PIL import Image
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 
 # ---------------------------
@@ -30,6 +31,7 @@ from pydantic import BaseModel, Field
 AGENT_DIR = Path(__file__).resolve().parent            # .../bench-race/agent
 ROOT_DIR = AGENT_DIR.parent                            # .../bench-race
 CONFIG_PATH = AGENT_DIR / "config" / "agent.yaml"
+OUTPUT_IMAGES_DIR = AGENT_DIR / "output_images"        # Image storage for HTTP serving
 
 # Make repo root importable so `shared` works
 if str(ROOT_DIR) not in sys.path:
@@ -221,6 +223,73 @@ async def _broadcast_payload(payload: Dict[str, Any]):
             to_remove.append(cid)
     for cid in to_remove:
         WS_CLIENTS.pop(cid, None)
+
+
+# ---------------------------
+# Image Storage Helpers
+# ---------------------------
+def _ensure_output_images_dir():
+    """Ensure output_images directory exists."""
+    OUTPUT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_image_to_disk(image_bytes: bytes, run_id: str, filename: str) -> str:
+    """
+    Save image bytes to disk and return image_id.
+
+    Args:
+        image_bytes: Raw image bytes
+        run_id: Run identifier
+        filename: Original filename (e.g., "preview_1.jpg" or "output_001.png")
+
+    Returns:
+        image_id: Unique identifier for fetching the image via HTTP
+    """
+    _ensure_output_images_dir()
+
+    # Create run-specific directory
+    run_dir = OUTPUT_IMAGES_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique image_id (uuid)
+    image_id = str(uuid.uuid4())
+
+    # Determine file extension from filename
+    ext = Path(filename).suffix or ".png"
+
+    # Save to disk with image_id as filename
+    image_path = run_dir / f"{image_id}{ext}"
+    with open(image_path, "wb") as f:
+        f.write(image_bytes)
+
+    slog.debug("image_saved_to_disk", image_id=image_id, path=str(image_path), size_bytes=len(image_bytes))
+    return image_id
+
+
+def _cleanup_old_images(max_runs: int = 10):
+    """
+    Clean up old image runs, keeping only the most recent max_runs.
+
+    Args:
+        max_runs: Maximum number of run directories to keep
+    """
+    if not OUTPUT_IMAGES_DIR.exists():
+        return
+
+    # Get all run directories sorted by modification time (newest first)
+    run_dirs = sorted(
+        [d for d in OUTPUT_IMAGES_DIR.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True
+    )
+
+    # Remove old runs beyond max_runs
+    for old_dir in run_dirs[max_runs:]:
+        try:
+            shutil.rmtree(old_dir)
+            slog.info("image_cleanup", removed_run=old_dir.name, reason="retention_policy")
+        except Exception as e:
+            slog.warning("image_cleanup_failed", run=old_dir.name, error=str(e))
 
 
 def _format_count(value: int) -> str:
@@ -1621,6 +1690,9 @@ async def debug_logging():
 async def comfy_txt2img(req: ComfyTxt2ImgRequest):
     job_id = str(uuid.uuid4())
 
+    # Clean up old images to maintain retention policy
+    _cleanup_old_images(max_runs=10)
+
     # Log job received
     slog.info(
         "job_received",
@@ -1711,6 +1783,66 @@ async def image_jobs(active: bool = False):
             continue
         jobs.append({"job_id": jid, **status})
     return JSONResponse({"jobs": jobs})
+
+
+@app.get("/api/image/result/{image_id}")
+async def get_image_result(image_id: str):
+    """
+    Serve image bytes by image_id.
+
+    Args:
+        image_id: UUID of the image to fetch
+
+    Returns:
+        FileResponse with image bytes and appropriate Content-Type
+
+    Raises:
+        HTTPException: 404 if image not found, 400 if invalid image_id
+    """
+    # Validate image_id is a valid UUID to prevent path traversal
+    try:
+        uuid.UUID(image_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid image_id format")
+
+    # Search for the image in all run directories
+    if not OUTPUT_IMAGES_DIR.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Find the image file
+    image_path = None
+    for run_dir in OUTPUT_IMAGES_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        # Check for image with any extension
+        for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            potential_path = run_dir / f"{image_id}{ext}"
+            if potential_path.exists():
+                image_path = potential_path
+                break
+        if image_path:
+            break
+
+    if not image_path or not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Determine content type from extension
+    ext = image_path.suffix.lower()
+    content_type_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+    content_type = content_type_map.get(ext, "image/png")
+
+    return FileResponse(
+        path=str(image_path),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+        }
+    )
 
 
 @app.post("/api/comfy/sync")
@@ -2224,21 +2356,40 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                     if step % 4 == 0 and step != last_preview_step:
                         last_preview_step = step
                         try:
+                            # Convert to JPEG for preview
                             image = Image.open(io.BytesIO(image_bytes))
                             buf = io.BytesIO()
                             image.convert("RGB").save(buf, format="JPEG", quality=80)
-                            preview_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                            preview_bytes = buf.getvalue()
+
+                            # Save image to disk and get image_id
+                            filename = f"preview_{repeat_index + 1}.jpg"
+                            image_id = _save_image_to_disk(preview_bytes, req.run_id, filename)
+
+                            # Only include preview_b64 if small enough (< 150KB)
+                            preview_b64 = None
+                            MAX_PREVIEW_SIZE = 150 * 1024  # 150KB
+                            if len(preview_bytes) < MAX_PREVIEW_SIZE:
+                                preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
+
+                            # Prepare payload with image_id (and optional small preview_b64)
+                            payload = {
+                                "run_id": req.run_id,
+                                "step": step,
+                                "total_steps": total or req.steps,
+                                "filename": filename,
+                                "image_id": image_id,
+                                "content_type": "image/jpeg",
+                                "size_bytes": len(preview_bytes),
+                            }
+                            if preview_b64:
+                                payload["preview_b64"] = preview_b64
+
                             await _broadcast_event(
                                 Event(
                                     job_id=job_id,
                                     type="image_preview",
-                                    payload={
-                                        "run_id": req.run_id,
-                                        "step": step,
-                                        "total_steps": total or req.steps,
-                                        "filename": f"preview_{repeat_index + 1}.jpg",
-                                        "image_b64": preview_b64,
-                                    },
+                                    payload=payload,
                                 )
                             )
                         except Exception as e:
@@ -2458,7 +2609,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         })
                         return
 
-                    # Download each image
+                    # Download each image and save to disk with image_id
                     images = []
                     for img_info in image_infos:
                         filename = img_info["filename"]
@@ -2472,13 +2623,34 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         if not image_bytes:
                             log.warning(f"Failed to fetch image: {filename}")
                             continue
-                        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                        images.append(
-                            {
-                                "filename": filename,
-                                "image_b64": image_b64,
-                            }
-                        )
+
+                        # Save image to disk and get image_id
+                        image_id = _save_image_to_disk(image_bytes, req.run_id, filename)
+
+                        # Determine content type from filename
+                        ext = Path(filename).suffix.lower()
+                        content_type_map = {
+                            ".png": "image/png",
+                            ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg",
+                            ".webp": "image/webp",
+                        }
+                        content_type = content_type_map.get(ext, "image/png")
+
+                        # Build image info with image_id (no full image_b64)
+                        img_data = {
+                            "filename": filename,
+                            "image_id": image_id,
+                            "content_type": content_type,
+                            "size_bytes": len(image_bytes),
+                        }
+
+                        # Optional: Include small preview_b64 if image is tiny (< 150KB)
+                        MAX_INLINE_SIZE = 150 * 1024  # 150KB
+                        if len(image_bytes) < MAX_INLINE_SIZE:
+                            img_data["preview_b64"] = base64.b64encode(image_bytes).decode("utf-8")
+
+                        images.append(img_data)
                     total_images.extend(images)
 
                     slog.info(
