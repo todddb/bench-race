@@ -179,25 +179,30 @@ const loadComputeSettings = () => {
     const saved = localStorage.getItem(COMPUTE_SETTINGS_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      computeSettings = {
-        ...DEFAULT_COMPUTE_SETTINGS,
-        ...parsed,
-        autoN: { ...DEFAULT_COMPUTE_SETTINGS.autoN, ...(parsed.autoN || {}) },
-      };
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        computeSettings = {
+          ...DEFAULT_COMPUTE_SETTINGS,
+          ...parsed,
+          autoN: { ...DEFAULT_COMPUTE_SETTINGS.autoN, ...(parsed.autoN || {}) },
+        };
+      } else {
+        console.warn("Compute settings value is not an object, using defaults");
+      }
     }
+    computeSettings.progressIntervalS = clampNumber(
+      Number(computeSettings.progressIntervalS) || DEFAULT_COMPUTE_SETTINGS.progressIntervalS,
+      0.1,
+      60,
+    );
+    computeSettings.autoN = {
+      segmented_sieve: Math.max(10, Number(computeSettings.autoN?.segmented_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.segmented_sieve),
+      simple_sieve: Math.max(10, Number(computeSettings.autoN?.simple_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.simple_sieve),
+      trial_division: Math.max(10, Number(computeSettings.autoN?.trial_division) || DEFAULT_COMPUTE_SETTINGS.autoN.trial_division),
+    };
   } catch (e) {
-    console.warn("Failed to load compute settings:", e);
+    console.warn("Failed to load compute settings, using defaults:", e);
+    computeSettings = { ...DEFAULT_COMPUTE_SETTINGS, autoN: { ...DEFAULT_COMPUTE_SETTINGS.autoN } };
   }
-  computeSettings.progressIntervalS = clampNumber(
-    Number(computeSettings.progressIntervalS) || DEFAULT_COMPUTE_SETTINGS.progressIntervalS,
-    0.1,
-    60,
-  );
-  computeSettings.autoN = {
-    segmented_sieve: Math.max(10, Number(computeSettings.autoN?.segmented_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.segmented_sieve),
-    simple_sieve: Math.max(10, Number(computeSettings.autoN?.simple_sieve) || DEFAULT_COMPUTE_SETTINGS.autoN.simple_sieve),
-    trial_division: Math.max(10, Number(computeSettings.autoN?.trial_division) || DEFAULT_COMPUTE_SETTINGS.autoN.trial_division),
-  };
 };
 
 const saveComputeSettings = () => {
