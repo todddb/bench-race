@@ -1793,6 +1793,12 @@ document.querySelectorAll(".btn-sync").forEach((button) => {
 const SPARKLINE_WIDTH = 120;
 const SPARKLINE_HEIGHT = 24;
 const SPARKLINE_FALLBACK_POINTS = 12;
+
+const { ensureSeriesMinimumPoints: ensureSparklineSeriesMinimumPoints, resolveEmptySparklineMessage } =
+  window.SparklineUtils || {};
+const ensureSeriesMinimumPoints = ensureSparklineSeriesMinimumPoints ||
+  (({ values, times }) => ({ values: values || [], times: times || [] }));
+const resolveEmptyMessage = resolveEmptySparklineMessage || (() => "Metrics unavailable");
 const { selectWindowedSampleIndices } = window.ImageSparklineUtils || {};
 
 const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
@@ -1975,13 +1981,6 @@ const extractSeries = (samples, key) => {
   return { values, times };
 };
 
-const ensureSeriesMinimumPoints = ({ values, times }) => {
-  if (values.length === 1) {
-    return { values: [values[0], values[0]], times: [times[0], times[0]] };
-  }
-  return { values, times };
-};
-
 const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
   const utilSvg = document.getElementById(`sparkline-util-${machineId}`);
   const memSvg = document.getElementById(`sparkline-mem-${machineId}`);
@@ -2010,7 +2009,16 @@ const renderImageSparklines = (machineId, metrics = null, runEntry = null) => {
     samples = [samples[0], samples[0]];
   }
 
-  if (!resolvedMetrics && samples.length === 0) {
+  if (samples.length === 0) {
+    const emptyMessage = resolveEmptyMessage(samples.length);
+    if (utilPlaceholder) {
+      utilPlaceholder.textContent = emptyMessage;
+      utilPlaceholder.title = emptyMessage;
+    }
+    if (memPlaceholder) {
+      memPlaceholder.textContent = emptyMessage;
+      memPlaceholder.title = emptyMessage;
+    }
     utilPlaceholder?.classList.remove("hidden");
     memPlaceholder?.classList.remove("hidden");
     utilBlock?.classList.add("is-empty");
