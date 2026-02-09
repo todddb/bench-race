@@ -1838,9 +1838,10 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
     while not _stop_event.is_set():
         try:
             log.info("WS connect: machine=%s url=%s", machine_id, ws_uri)
-            # Set max_size=None to handle large messages (e.g., image data)
-            # This prevents 1009 "message too big" disconnects
-            async with websockets.connect(ws_uri, max_size=None) as ws:
+            # Set max_size to 8 MB - images are now served via HTTP,
+            # so WS payloads should be small. This bounded limit prevents
+            # regressions and ensures graceful handling of oversized messages.
+            async with websockets.connect(ws_uri, max_size=8 * 1024 * 1024) as ws:
                 log.info("WS connected: machine=%s url=%s", machine_id, ws_uri)
                 backoff = 1.0
                 async for raw in ws:
@@ -1851,6 +1852,18 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
                     except Exception:
                         log.warning("Bad JSON from %s: %r", machine_id, raw[:200] if isinstance(raw, str) else raw)
                         continue
+
+                    # Defensive check: warn if WS payload contains large image data
+                    # Images should now be served via HTTP endpoints
+                    payload = evt.get("payload") or {}
+                    for key in ("image_b64", "preview_b64"):
+                        if key in payload:
+                            size = len(payload[key])
+                            if size > 256 * 1024:  # 256 KB threshold
+                                log.warning(
+                                    "Oversized WS payload detected: machine=%s run_id=%s key=%s size=%d bytes",
+                                    machine_id, evt.get("run_id", "unknown"), key, size
+                                )
 
                     # attach machine_id and forward to all browsers
                     evt["machine_id"] = machine_id
