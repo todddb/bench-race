@@ -2409,26 +2409,24 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                 # Define preview callback for step images
                 async def on_preview_async(image_bytes: bytes, step: int, total: int):
                     nonlocal last_preview_step
+                    # Guardrail: Only send every 4th step to avoid overwhelming WS/UI with large base64 payloads
                     if step % 4 == 0 and step != last_preview_step:
                         last_preview_step = step
                         try:
-                            # Convert to JPEG for preview
+                            # Guardrail: Convert to JPEG with quality=80 to reduce payload size
                             image = Image.open(io.BytesIO(image_bytes))
                             buf = io.BytesIO()
                             image.convert("RGB").save(buf, format="JPEG", quality=80)
                             preview_bytes = buf.getvalue()
 
-                            # Save image to disk and get image_id
+                            # Save image to disk (optional, for local debugging)
                             filename = f"preview_{repeat_index + 1}.jpg"
                             image_id = _save_image_to_disk(preview_bytes, req.run_id, filename)
 
-                            # Only include preview_b64 if small enough (< 150KB)
-                            preview_b64 = None
-                            MAX_PREVIEW_SIZE = 150 * 1024  # 150KB
-                            if len(preview_bytes) < MAX_PREVIEW_SIZE:
-                                preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
+                            # Always include preview_b64 for WS delivery (NAT agents cannot serve HTTP)
+                            preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
 
-                            # Prepare payload with image_id (and optional small preview_b64)
+                            # Prepare payload with preview_b64 (image_id kept for compatibility)
                             payload = {
                                 "run_id": req.run_id,
                                 "step": step,
@@ -2437,9 +2435,8 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                                 "image_id": image_id,
                                 "content_type": "image/jpeg",
                                 "size_bytes": len(preview_bytes),
+                                "preview_b64": preview_b64,
                             }
-                            if preview_b64:
-                                payload["preview_b64"] = preview_b64
 
                             await _broadcast_event(
                                 Event(
@@ -2680,7 +2677,7 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                             log.warning(f"Failed to fetch image: {filename}")
                             continue
 
-                        # Save image to disk and get image_id
+                        # Save image to disk (optional, for local debugging)
                         image_id = _save_image_to_disk(image_bytes, req.run_id, filename)
 
                         # Determine content type from filename
@@ -2693,18 +2690,17 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
                         }
                         content_type = content_type_map.get(ext, "image/png")
 
-                        # Build image info with image_id (no full image_b64)
+                        # Always include image_b64 for WS delivery (NAT agents cannot serve HTTP)
+                        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+                        # Build image info with image_b64 (image_id kept for compatibility)
                         img_data = {
                             "filename": filename,
                             "image_id": image_id,
                             "content_type": content_type,
                             "size_bytes": len(image_bytes),
+                            "image_b64": image_b64,
                         }
-
-                        # Optional: Include small preview_b64 if image is tiny (< 150KB)
-                        MAX_INLINE_SIZE = 150 * 1024  # 150KB
-                        if len(image_bytes) < MAX_INLINE_SIZE:
-                            img_data["preview_b64"] = base64.b64encode(image_bytes).decode("utf-8")
 
                         images.append(img_data)
                     total_images.extend(images)

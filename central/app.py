@@ -63,7 +63,12 @@ log = logging.getLogger("bench-central")
 # -----------------------------------------------------------------------------
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["SECRET_KEY"] = "dev"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="threading",
+    max_http_buffer_size=100 * 1024 * 1024  # 100MB to handle large base64 images
+)
 
 # -----------------------------------------------------------------------------
 # Run persistence
@@ -1336,16 +1341,15 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                 filename = payload.get("filename") or "preview.jpg"
                 saved_path = None
 
-                # Prefer new image_id approach, fallback to legacy image_b64
-                image_id = payload.get("image_id")
-                if image_id:
-                    # Fetch image from agent HTTP endpoint
-                    saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
+                # Prefer base64 from WS payload (works for NAT'ed agents)
+                image_b64 = payload.get("image_b64") or payload.get("preview_b64")
+                if image_b64:
+                    saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
                 else:
-                    # Legacy: decode base64 from WS payload
-                    image_b64 = payload.get("image_b64") or payload.get("preview_b64")
-                    if image_b64:
-                        saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+                    # Fallback: fetch via HTTP if no base64 (for backward compatibility)
+                    image_id = payload.get("image_id")
+                    if image_id:
+                        saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
 
                 if saved_path:
                     machine_entry["preview_path"] = saved_path
@@ -1366,17 +1370,16 @@ def _update_run_from_event(event: Dict[str, Any]) -> None:
                     filename = _image_filename(image, idx)
                     saved_path = None
 
-                    # Prefer new image_id approach, fallback to legacy image_b64
+                    # Prefer base64 from WS payload (works for NAT'ed agents)
                     if isinstance(image, dict):
-                        image_id = image.get("image_id")
-                        if image_id:
-                            # Fetch image from agent HTTP endpoint
-                            saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
+                        image_b64 = image.get("image_b64") or image.get("preview_b64", "")
+                        if image_b64:
+                            saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
                         else:
-                            # Legacy: decode base64 from WS payload
-                            image_b64 = image.get("image_b64") or image.get("preview_b64", "")
-                            if image_b64:
-                                saved_path = _save_image_payload(run_id, machine_id, filename, image_b64)
+                            # Fallback: fetch via HTTP if no base64 (for backward compatibility)
+                            image_id = image.get("image_id")
+                            if image_id:
+                                saved_path = _fetch_and_save_image_by_id(run_id, machine_id, filename, image_id)
 
                     if saved_path:
                         stored_images.append(saved_path)
@@ -1838,10 +1841,15 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
     while not _stop_event.is_set():
         try:
             log.info("WS connect: machine=%s url=%s", machine_id, ws_uri)
-            # Set max_size to 8 MB - images are now served via HTTP,
-            # so WS payloads should be small. This bounded limit prevents
-            # regressions and ensures graceful handling of oversized messages.
-            async with websockets.connect(ws_uri, max_size=8 * 1024 * 1024) as ws:
+            # Raise limits to support large base64 image payloads for NAT'ed agents
+            # max_size=None removes message size limit
+            # read_limit/write_limit set to 100MB to handle large images
+            async with websockets.connect(
+                ws_uri,
+                max_size=None,
+                read_limit=100 * 1024 * 1024,
+                write_limit=100 * 1024 * 1024
+            ) as ws:
                 log.info("WS connected: machine=%s url=%s", machine_id, ws_uri)
                 backoff = 1.0
                 async for raw in ws:
@@ -1852,18 +1860,6 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
                     except Exception:
                         log.warning("Bad JSON from %s: %r", machine_id, raw[:200] if isinstance(raw, str) else raw)
                         continue
-
-                    # Defensive check: warn if WS payload contains large image data
-                    # Images should now be served via HTTP endpoints
-                    payload = evt.get("payload") or {}
-                    for key in ("image_b64", "preview_b64"):
-                        if key in payload:
-                            size = len(payload[key])
-                            if size > 256 * 1024:  # 256 KB threshold
-                                log.warning(
-                                    "Oversized WS payload detected: machine=%s run_id=%s key=%s size=%d bytes",
-                                    machine_id, evt.get("run_id", "unknown"), key, size
-                                )
 
                     # attach machine_id and forward to all browsers
                     evt["machine_id"] = machine_id
