@@ -756,6 +756,12 @@ function updateModelFit(machine) {
 const SPARKLINE_WIDTH = 120;
 const SPARKLINE_HEIGHT = 24;
 
+const { ensureSeriesMinimumPoints: ensureSparklineSeriesMinimumPoints, resolveEmptySparklineMessage } =
+  window.SparklineUtils || {};
+const ensureSeriesMinimumPoints = ensureSparklineSeriesMinimumPoints ||
+  (({ values, times }) => ({ values: values || [], times: times || [] }));
+const resolveEmptyMessage = resolveEmptySparklineMessage || (() => "Metrics unavailable");
+
 const buildSparklinePath = (values, width, height, maxValue, times = null, startTime = null, endTime = null) => {
   if (!values || values.length === 0) return "";
   const filteredValues = values.filter((v) => v != null && !Number.isNaN(v));
@@ -864,7 +870,20 @@ const renderRunSparklines = (machineId, metrics = null) => {
   const memBlock = memSvg?.closest(".sparkline-block");
   const resolvedMetrics = metrics || runtimeMetrics.get(machineId) || statusCache.get(machineId)?.runtime_metrics;
 
-  if (!resolvedMetrics && !runSamples.get(machineId)?.length) {
+  let samples = runSamples.get(machineId) || [];
+  if (samples.length === 1) {
+    samples = [samples[0], samples[0]];
+  }
+  if (samples.length === 0) {
+    const emptyMessage = resolveEmptyMessage(samples.length);
+    if (utilPlaceholder) {
+      utilPlaceholder.textContent = emptyMessage;
+      utilPlaceholder.title = emptyMessage;
+    }
+    if (memPlaceholder) {
+      memPlaceholder.textContent = emptyMessage;
+      memPlaceholder.title = emptyMessage;
+    }
     utilPlaceholder?.classList.remove("hidden");
     memPlaceholder?.classList.remove("hidden");
     utilBlock?.classList.add("is-empty");
@@ -872,12 +891,14 @@ const renderRunSparklines = (machineId, metrics = null) => {
     return;
   }
 
-  const samples = runSamples.get(machineId) || [];
-  const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
-  const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
-  const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+  const { values: cpuValues, times: cpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "cpu"));
+  const { values: gpuValues, times: gpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "gpu"));
+  const { values: memValues, times: memTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "mem"));
   const startTime = runStartTs ?? samples[0]?.t ?? performance.now();
   const endTime = runEndTs ?? performance.now();
+  const gpuAvailability = Array.isArray(resolvedMetrics?.gpu_metrics_available)
+    ? resolvedMetrics.gpu_metrics_available.some(Boolean)
+    : resolvedMetrics?.gpu_metrics_available === true;
 
   const hasGpuUtil = gpuValues.length > 0;
   const hasCpuUtil = cpuValues.length > 0;
@@ -898,7 +919,7 @@ const renderRunSparklines = (machineId, metrics = null) => {
     utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
     utilTitle = "CPU utilization (%)";
     const lastCpu = cpuValues.slice(-1)[0];
-    utilMeta = `CPU ${lastCpu ?? "n/a"}%`;
+    utilMeta = gpuAvailability === false ? `CPU ${lastCpu ?? "n/a"}% (GPU unavailable)` : `CPU ${lastCpu ?? "n/a"}%`;
   } else {
     utilTitle = "Metrics unavailable";
     utilMeta = "Metrics unavailable";
@@ -978,7 +999,10 @@ const updateRuntimeMetrics = (machineId, metrics) => {
 
 const openSparklineModal = (machineId, type) => {
   const metrics = runtimeMetrics.get(machineId) || statusCache.get(machineId)?.runtime_metrics;
-  const samples = runSamples.get(machineId) || [];
+  let samples = runSamples.get(machineId) || [];
+  if (samples.length === 1) {
+    samples = [samples[0], samples[0]];
+  }
   if (!metrics && samples.length === 0) return;
   const modalLabel = document.getElementById("sparkline-modal-label");
   const modalMeta = document.getElementById("sparkline-modal-meta");
@@ -990,13 +1014,16 @@ const openSparklineModal = (machineId, type) => {
   const vramTotal = metrics?.vram_total_mib || [];
   const systemMem = metrics?.system_mem_used_mib || [];
   const ramUsedBytes = metrics?.ram_used_bytes || [];
+  const gpuAvailability = Array.isArray(metrics?.gpu_metrics_available)
+    ? metrics.gpu_metrics_available.some(Boolean)
+    : metrics?.gpu_metrics_available === true;
 
   if (type === "util") {
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Utilization`;
 
     if (samples.length > 0) {
-      const { values: cpuValues, times: cpuTimes } = extractSeries(samples, "cpu");
-      const { values: gpuValues, times: gpuTimes } = extractSeries(samples, "gpu");
+      const { values: cpuValues, times: cpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "cpu"));
+      const { values: gpuValues, times: gpuTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "gpu"));
       const hasGpuUtil = gpuValues.length > 0;
       const hasCpuUtil = cpuValues.length > 0;
       const utilSeries = [];
@@ -1008,7 +1035,10 @@ const openSparklineModal = (machineId, type) => {
         }
       } else if (hasCpuUtil) {
         utilSeries.push({ values: cpuValues, times: cpuTimes, className: "cpu-line", maxValue: 100 });
-        if (modalMeta) modalMeta.textContent = `CPU ${cpuValues.slice(-1)[0] ?? "n/a"}% (GPU unavailable)`;
+        if (modalMeta) {
+          const suffix = gpuAvailability === false ? " (GPU unavailable)" : "";
+          modalMeta.textContent = `CPU ${cpuValues.slice(-1)[0] ?? "n/a"}%${suffix}`;
+        }
       } else if (modalMeta) {
         modalMeta.textContent = "Metrics unavailable";
       }
@@ -1024,19 +1054,24 @@ const openSparklineModal = (machineId, type) => {
     } else {
       const cpuMax = 100;
       const gpuMax = 100;
-      const hasGpuUtil = gpu.some((v) => v != null && !Number.isNaN(v));
-      const hasCpuUtil = cpu.some((v) => v != null && !Number.isNaN(v));
+      const { values: cpuValues } = ensureSeriesMinimumPoints({ values: cpu, times: [] });
+      const { values: gpuValues } = ensureSeriesMinimumPoints({ values: gpu, times: [] });
+      const hasGpuUtil = gpuValues.some((v) => v != null && !Number.isNaN(v));
+      const hasCpuUtil = cpuValues.some((v) => v != null && !Number.isNaN(v));
       const lastCpu = cpu.filter((v) => v != null).slice(-1)[0];
       const lastGpu = gpu.filter((v) => v != null).slice(-1)[0];
 
       const utilSeries = [];
       if (hasGpuUtil) {
-        utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-        utilSeries.push({ values: gpu, className: "gpu-line", maxValue: gpuMax });
+        utilSeries.push({ values: cpuValues, className: "cpu-line", maxValue: cpuMax });
+        utilSeries.push({ values: gpuValues, className: "gpu-line", maxValue: gpuMax });
         if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% | GPU ${lastGpu ?? "n/a"}%`;
       } else if (hasCpuUtil) {
-        utilSeries.push({ values: cpu, className: "cpu-line", maxValue: cpuMax });
-        if (modalMeta) modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}% (GPU unavailable)`;
+        utilSeries.push({ values: cpuValues, className: "cpu-line", maxValue: cpuMax });
+        if (modalMeta) {
+          const suffix = gpuAvailability === false ? " (GPU unavailable)" : "";
+          modalMeta.textContent = `CPU ${lastCpu ?? "n/a"}%${suffix}`;
+        }
       } else if (modalMeta) {
         modalMeta.textContent = "Metrics unavailable";
       }
@@ -1049,7 +1084,7 @@ const openSparklineModal = (machineId, type) => {
     if (modalLabel) modalLabel.textContent = `${machineLabel} • Memory`;
 
     if (samples.length > 0) {
-      const { values: memValues, times: memTimes } = extractSeries(samples, "mem");
+      const { values: memValues, times: memTimes } = ensureSeriesMinimumPoints(extractSeries(samples, "mem"));
       if (memValues.length > 0) {
         const lastPct = memValues.slice(-1)[0];
         if (modalMeta) modalMeta.textContent = lastPct != null ? `MEM ${lastPct.toFixed(1)}%` : "MEM n/a";
@@ -1071,10 +1106,13 @@ const openSparklineModal = (machineId, type) => {
 
       if (hasVram) {
         // Convert VRAM to percentage
-        const memValues = vramUsed.map((used, i) => {
-          const total = vramTotal[i];
-          if (used == null || total == null || total === 0) return null;
-          return (used / total) * 100;
+        const { values: memValues } = ensureSeriesMinimumPoints({
+          values: vramUsed.map((used, i) => {
+            const total = vramTotal[i];
+            if (used == null || total == null || total === 0) return null;
+            return (used / total) * 100;
+          }),
+          times: [],
         });
         const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
         if (modalMeta) modalMeta.textContent = lastPct != null ? `VRAM ${lastPct.toFixed(1)}%` : "VRAM n/a";
@@ -1100,9 +1138,10 @@ const openSparklineModal = (machineId, type) => {
               return (used / totalRamMib) * 100;
             });
           }
-          const lastPct = memValues.filter((v) => v != null).slice(-1)[0];
+          const { values: adjustedMemValues } = ensureSeriesMinimumPoints({ values: memValues, times: [] });
+          const lastPct = adjustedMemValues.filter((v) => v != null).slice(-1)[0];
           if (modalMeta) modalMeta.textContent = lastPct != null ? `RAM ${lastPct.toFixed(1)}%` : "RAM n/a";
-          renderSparkline(modalChart, [{ values: memValues, className: "mem-line", maxValue: 100 }], {
+          renderSparkline(modalChart, [{ values: adjustedMemValues, className: "mem-line", maxValue: 100 }], {
             width: 480,
             height: 120,
           });

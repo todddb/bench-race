@@ -49,6 +49,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from central.services import controller as service_controller
 from central.fit_util import compute_model_fit_score, get_model_size_bytes
+from central.runtime_metrics import normalize_runtime_metrics, normalize_runtime_metrics_map
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -1779,7 +1780,7 @@ async def _agent_ws_loop(machine_id: str, ws_uri: str):
                     evt["machine_id"] = machine_id
                     if evt.get("type") == "runtime_metrics_update":
                         payload = evt.get("payload") or {}
-                        RUNTIME_METRICS[machine_id] = payload
+                        RUNTIME_METRICS[machine_id] = normalize_runtime_metrics(payload)
                     try:
                         _update_run_from_event(evt)
                     except Exception:
@@ -2143,7 +2144,7 @@ def api_status():
 
 @app.get("/api/runtime_metrics")
 def api_runtime_metrics():
-    return jsonify(RUNTIME_METRICS)
+    return jsonify(normalize_runtime_metrics_map(RUNTIME_METRICS))
 
 
 @app.get("/api/image/status")
