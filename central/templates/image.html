@@ -45,7 +45,7 @@
 
                   <div class="run-row">
                     <div class="run-actions-left">
-                      <button id="run" class="btn btn-primary">Run</button>
+                      <button id="run" data-action="run" class="btn btn-primary">Run</button>
                       <button id="refresh-caps" class="btn btn-secondary" title="Refresh checkpoints">Refresh</button>
                     </div>
                   </div>
@@ -349,6 +349,9 @@
         </footer>
       </aside>
     </div>
+
+    <!-- Version tag for demo/troubleshooting -->
+    <div class="app-version" aria-hidden="false">Version: {{ build_id }}</div>
 
     <script src="/static/js/image_sparkline_utils.js?v={{ build_id }}"></script>
     <script src="/static/js/image.js?v={{ build_id }}"></script>
