@@ -1,3 +1,9 @@
+const debugLog = (...args) => {
+  if (window && window.console && window.console.debug) {
+    console.debug('[image.js]', ...args);
+  }
+};
+
 const socket = io();
 const paneMap = new Map();
 const statusCache = new Map();
@@ -1480,9 +1486,29 @@ seedModeSelect?.addEventListener("change", () => {
   }
 });
 
-runButton?.addEventListener("click", async () => {
-  await startRun();
-});
+// Robust Run button wiring: direct selector + delegated fallback
+if (runButton) {
+  runButton.removeEventListener('click', window._benchRaceRunHandler);
+  window._benchRaceRunHandler = async (ev) => {
+    debugLog('Run button clicked — handler running');
+    ev.preventDefault();
+    await startRun();
+  };
+  runButton.addEventListener('click', window._benchRaceRunHandler);
+  debugLog('Attached run button handler to', runButton);
+} else {
+  // Fallback: delegated click (works even if button inserted later)
+  document.removeEventListener('click', window._benchRaceDelegatedHandler);
+  window._benchRaceDelegatedHandler = async (ev) => {
+    const el = ev.target.closest && ev.target.closest('[data-action="run"], button#run, button.run');
+    if (!el) return;
+    debugLog('Delegated Run click detected on', el);
+    ev.preventDefault();
+    await startRun();
+  };
+  document.addEventListener('click', window._benchRaceDelegatedHandler, { passive: false });
+  debugLog('Attached delegated click handler for Run');
+}
 
 refreshButton?.addEventListener("click", async () => {
   await fetchStatus();
@@ -2380,6 +2406,8 @@ if (checkpointSelect) {
 }
 
 const bootImageUi = () => {
+  debugLog('bootImageUi() start');
+
   // Call initialization
   initToggleButtons();
   initResetButtons();
@@ -2400,6 +2428,12 @@ const bootImageUi = () => {
   if (runId) {
     loadRun(runId);
   }
+
+  // Guard: ensure hidden overlays don't intercept clicks
+  const hiddenOverlays = document.querySelectorAll('.overlay[aria-hidden="true"], .overlay.hidden, .backdrop.hidden');
+  hiddenOverlays.forEach(o => { o.style.pointerEvents = 'none'; });
+
+  debugLog('bootImageUi() complete');
 };
 
 try {
