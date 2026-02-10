@@ -149,6 +149,14 @@
                   >
                     Reset
                   </button>
+                  <button
+                    class="btn btn-unload"
+                    id="unload-{{ m.machine_id }}"
+                    data-machine-id="{{ m.machine_id }}"
+                    title="Unload selected model from Ollama (keep_alive=0)"
+                  >
+                    Unload Memory
+                  </button>
                   <label class="toggle-switch" title="{% if m.excluded %}Click to enable{% else %}Click to disable{% endif %}">
                     <input
                       type="checkbox"

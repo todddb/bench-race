@@ -98,6 +98,47 @@ const savePollingSettings = () => {
 
 const clampNumber = (value, min, max) => Math.min(Math.max(value, min), max);
 
+/**
+ * formatMsHuman(ms)
+ * Convert milliseconds (number) to human-readable string.
+ * Examples:
+ *  117922.5 -> "1 min, 58 sec"
+ *  500      -> "500 ms"
+ *  1500     -> "1.5 sec"
+ */
+function formatMsHuman(ms) {
+  if (ms === null || ms === undefined || isNaN(ms)) return "";
+  // support string input such as "117922.5" or numbers
+  const m = Number(ms);
+  if (!isFinite(m)) return "";
+
+  const abs = Math.abs(m);
+  const sign = m < 0 ? "-" : "";
+
+  const msPerSec = 1000;
+  const msPerMin = 60 * msPerSec;
+  const msPerHour = 60 * msPerMin;
+
+  if (abs >= msPerHour) {
+    const h = Math.floor(abs / msPerHour);
+    const rem = abs % msPerHour;
+    const min = Math.floor(rem / msPerMin);
+    const sec = Math.floor((rem % msPerMin) / msPerSec);
+    return `${sign}${h} hr${h !== 1 ? "s" : ""}, ${min} min, ${sec} sec`;
+  } else if (abs >= msPerMin) {
+    const min = Math.floor(abs / msPerMin);
+    const sec = Math.floor((abs % msPerMin) / msPerSec);
+    return `${sign}${min} min${min !== 1 ? "s" : ""}, ${sec} sec`;
+  } else if (abs >= msPerSec) {
+    // show one decimal place for seconds (e.g., 1.5 sec)
+    const secFloat = Math.round((abs / msPerSec) * 10) / 10;
+    return `${sign}${secFloat} sec`;
+  } else {
+    const rounded = Math.round(abs);
+    return `${sign}${rounded} ms`;
+  }
+}
+
 const loadComputeSettings = () => {
   try {
     const saved = localStorage.getItem(COMPUTE_SETTINGS_KEY);
@@ -525,13 +566,15 @@ const buildMetricsHtml = (metrics, baselineMetrics) => {
   const tokSDelta = formatDelta(metrics.tok_s, baselineMetrics?.tok_s, true, " tok/s");
   const totalDelta = formatDelta(metrics.total_ms, baselineMetrics?.total_ms, false, " ms");
   const engine = renderEngineBadge(metrics.engine, metrics.fallback_reason);
+  const totalHuman = formatMsHuman(metrics.total_ms);
+  const totalWithHuman = totalHuman ? `${total} <span class="total-human">(${totalHuman})</span>` : total;
   return `
     <div><strong>Model:</strong> ${metrics.model ?? "n/a"}</div>
     <div><strong>Engine:</strong> ${engine}</div>
     <div><strong>TTFT:</strong> ${ttft} ${ttftDelta}</div>
     <div><strong>Gen tokens:</strong> ${tokens}</div>
     <div><strong>Tokens/s:</strong> ${tokS} ${tokSDelta}</div>
-    <div><strong>Total:</strong> ${total} ${totalDelta}</div>
+    <div><strong>Total:</strong> ${totalWithHuman} ${totalDelta}</div>
   `;
 };
 
@@ -555,12 +598,17 @@ const buildProgressBar = (percent) => {
 
 const buildComputeMetricsHtml = (metrics) => {
   if (!metrics) return `<span class="muted">No data</span>`;
+  const elapsedMs = metrics.elapsed_ms;
+  const elapsedHuman = formatMsHuman(elapsedMs);
+  const elapsedDisplay = elapsedMs != null && !isNaN(elapsedMs)
+    ? `${formatMetric(elapsedMs, " ms")}${elapsedHuman ? ` <span class="total-human">(${elapsedHuman})</span>` : ""}`
+    : "n/a";
   return `
     <div><strong>Algorithm:</strong> ${metrics.algorithm ?? "n/a"}</div>
     <div><strong>N:</strong> ${formatCount(metrics.n)}</div>
     <div><strong>Primes:</strong> ${formatCount(metrics.primes_found)}</div>
     <div><strong>Rate:</strong> ${formatMetric(metrics.primes_per_sec, " primes/s", 1)}</div>
-    <div><strong>Elapsed:</strong> ${formatSeconds(metrics.elapsed_ms)}</div>
+    <div><strong>Elapsed:</strong> ${elapsedDisplay}</div>
   `;
 };
 
@@ -697,6 +745,7 @@ function updateMachineStatus(machine) {
 
   // Update reset button state based on agent reachability
   updateResetButtonState(machine.machine_id, agentReachable);
+  updateUnloadButtonState(machine.machine_id, agentReachable);
 }
 
 function updateModelFit(machine) {
@@ -2618,9 +2667,89 @@ function updateResetButtonState(machineId, reachable) {
   }
 }
 
+// Unload Ollama model from memory
+async function unloadOllamaModel(machineId) {
+  const btn = document.getElementById(`unload-${machineId}`);
+  if (!btn) return;
+
+  // Get selected model
+  const modelSelect = document.getElementById("model");
+  const model = modelSelect?.value;
+  if (!model) {
+    showToast("Please select a model first", "error");
+    return;
+  }
+
+  // Check if agent is online
+  const machine = statusCache.get(machineId);
+  if (!machine || !machine.reachable) {
+    showToast("Cannot unload: agent is offline", "error");
+    return;
+  }
+
+  // Disable button and show loading state
+  btn.disabled = true;
+  btn.classList.add("loading");
+  const originalText = btn.textContent;
+  btn.textContent = "Unloading...";
+
+  try {
+    const response = await fetch(`/api/agents/${encodeURIComponent(machineId)}/ollama/unload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model })
+    });
+
+    const result = await response.json();
+
+    if (response.ok && result.ok) {
+      const machineName = machine.label || machineId;
+      showToast(`Unloaded ${model} on ${machineName}`, "success");
+      // Refresh status after unload to update RAM/VRAM display
+      await fetchStatus();
+    } else {
+      const machineName = machine.label || machineId;
+      const errorMsg = result.error || "Unload failed";
+      showToast(`Unload failed on ${machineName} — ${errorMsg}`, "error");
+      console.error("Unload failed:", result);
+    }
+  } catch (error) {
+    showToast(`Unload error: ${error.message}`, "error");
+    console.error(`Failed to unload model on ${machineId}:`, error);
+  } finally {
+    // Restore button state
+    btn.disabled = false;
+    btn.classList.remove("loading");
+    btn.textContent = originalText;
+  }
+}
+
+// Initialize unload buttons for all machines
+function initUnloadButtons() {
+  const unloadButtons = document.querySelectorAll(".btn-unload");
+  unloadButtons.forEach((btn) => {
+    const machineId = btn.getAttribute("data-machine-id");
+    if (machineId) {
+      btn.addEventListener("click", () => unloadOllamaModel(machineId));
+    }
+  });
+}
+
+// Update unload button disabled state based on agent status
+function updateUnloadButtonState(machineId, reachable) {
+  const btn = document.getElementById(`unload-${machineId}`);
+  if (btn) {
+    btn.disabled = !reachable;
+    btn.title = reachable
+      ? "Unload selected model from Ollama (keep_alive=0)"
+      : "Agent offline";
+  }
+}
+
 // Call initialization after DOM is ready
 initToggleButtons();
 initResetButtons();
+initUnloadButtons();
 
 // Refresh status button
 document.getElementById("refresh-caps")?.addEventListener("click", async () => {

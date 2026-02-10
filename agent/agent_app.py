@@ -1619,6 +1619,112 @@ async def reset_agent():
     return result
 
 
+@app.post("/api/ollama/unload")
+async def unload_ollama_model(request: dict):
+    """
+    Unload a model from Ollama memory using keep_alive=0.
+
+    Request JSON:
+    {
+      "model": "llama3.2:latest"
+    }
+
+    Returns:
+    {
+      "ok": true,
+      "model": "...",
+      "notes": ["requested unload via keep_alive=0"],
+      "duration_ms": 123
+    }
+
+    Or on error:
+    {
+      "ok": false,
+      "error": "model required" | "ollama unreachable",
+      "details": "..."
+    }
+    """
+    t_start = time.time()
+
+    # Validate model parameter
+    model = request.get("model", "").strip()
+    if not model:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "model required"}
+        )
+
+    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    url = base_url.rstrip("/") + "/api/generate"
+
+    # Prepare minimal request with keep_alive=0 to unload the model
+    payload = {
+        "model": model,
+        "prompt": "",
+        "stream": False,
+        "keep_alive": 0
+    }
+
+    try:
+        slog.info("ollama_unload_start", model=model, base_url=base_url)
+
+        # Make the request with a reasonable timeout
+        timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+
+        duration_ms = int((time.time() - t_start) * 1000)
+        slog.info("ollama_unload_success", model=model, duration_ms=duration_ms)
+
+        return {
+            "ok": True,
+            "model": model,
+            "notes": ["requested unload via keep_alive=0"],
+            "duration_ms": duration_ms
+        }
+
+    except httpx.HTTPStatusError as exc:
+        duration_ms = int((time.time() - t_start) * 1000)
+        error_detail = f"HTTP {exc.response.status_code}"
+        slog.warning("ollama_unload_http_error", model=model, status=exc.response.status_code, duration_ms=duration_ms)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "ok": False,
+                "error": "ollama unreachable",
+                "details": error_detail,
+                "duration_ms": duration_ms
+            }
+        )
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        duration_ms = int((time.time() - t_start) * 1000)
+        error_detail = str(exc)
+        slog.warning("ollama_unload_connection_error", model=model, error=error_detail, duration_ms=duration_ms)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "ok": False,
+                "error": "ollama unreachable",
+                "details": error_detail,
+                "duration_ms": duration_ms
+            }
+        )
+    except Exception as exc:
+        duration_ms = int((time.time() - t_start) * 1000)
+        error_detail = str(exc)
+        slog.error("ollama_unload_unexpected_error", model=model, error=error_detail, duration_ms=duration_ms)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "ok": False,
+                "error": "ollama unreachable",
+                "details": error_detail,
+                "duration_ms": duration_ms
+            }
+        )
+
+
 @app.get("/capabilities")
 async def capabilities():
     base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")

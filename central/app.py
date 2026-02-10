@@ -2118,6 +2118,107 @@ def api_reset_agent(machine_id: str):
         }), 500
 
 
+@app.post("/api/agents/<machine_id>/ollama/unload")
+def api_unload_ollama_model(machine_id: str):
+    """
+    Proxy endpoint to unload a model from Ollama memory on a specific agent.
+    Forwards the request to the agent's /api/ollama/unload endpoint.
+
+    Request JSON:
+    {
+      "model": "llama3.2:latest"
+    }
+
+    Returns:
+        - HTTP 200 with agent's response: {"ok": true, "model": "...", ...}
+        - HTTP 400 if model parameter missing or invalid
+        - HTTP 404 if machine_id not found
+        - HTTP 502 if agent unreachable or Ollama error
+    """
+    import time
+    from flask import request
+    t_start = time.time()
+
+    # Validate request body
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body required", "ok": False}), 400
+
+        model = data.get("model", "").strip()
+        if not model:
+            return jsonify({"error": "model parameter required", "ok": False}), 400
+    except Exception as e:
+        log.error(f"Failed to parse request body: {e}")
+        return jsonify({"error": f"Invalid JSON: {str(e)}", "ok": False}), 400
+
+    # Find the machine
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        log.warning(f"Unload requested for unknown machine_id: {machine_id}")
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        log.error(f"No agent_base_url configured for {machine_id}")
+        return jsonify({"error": f"No agent_base_url configured for {machine_id}", "ok": False}), 500
+
+    log.info(f"central: ollama unload requested for {machine_id} model={model}")
+
+    try:
+        # Forward to agent's unload endpoint with short timeout (10-20s as specified)
+        response = requests.post(
+            f"{agent_base_url}/api/ollama/unload",
+            json={"model": model},
+            timeout=20
+        )
+
+        result = response.json()
+        duration_ms = int((time.time() - t_start) * 1000)
+
+        log.info(f"central: ollama unload completed for {machine_id} in {duration_ms}ms: ok={result.get('ok')}")
+
+        # Forward agent's response exactly as-is
+        return jsonify(result), response.status_code
+
+    except requests.exceptions.ConnectionError as e:
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: ollama unload failed for {machine_id} - agent unreachable: {e}")
+        return jsonify({
+            "error": "agent unreachable",
+            "details": str(e),
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 502
+
+    except requests.exceptions.Timeout:
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: ollama unload timed out for {machine_id} after {duration_ms}ms")
+        return jsonify({
+            "error": "Unload operation timed out",
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 504
+
+    except requests.exceptions.RequestException as e:
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: ollama unload failed for {machine_id}: {e}")
+        return jsonify({
+            "error": f"Failed to unload model: {str(e)}",
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 502
+
+    except Exception as e:
+        duration_ms = int((time.time() - t_start) * 1000)
+        log.error(f"central: ollama unload unexpected error for {machine_id}: {e}")
+        return jsonify({
+            "error": f"Unexpected error: {str(e)}",
+            "ok": False,
+            "duration_ms": duration_ms
+        }), 500
+
+
 @app.get("/api/capabilities")
 def api_capabilities():
     caps = []

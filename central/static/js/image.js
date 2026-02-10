@@ -474,6 +474,47 @@ const formatDurationSeconds = (ms, decimals = 2) => {
   return (ms / 1000).toFixed(decimals);
 };
 
+/**
+ * formatMsHuman(ms)
+ * Convert milliseconds (number) to human-readable string.
+ * Examples:
+ *  117922.5 -> "1 min, 58 sec"
+ *  500      -> "500 ms"
+ *  1500     -> "1.5 sec"
+ */
+function formatMsHuman(ms) {
+  if (ms === null || ms === undefined || isNaN(ms)) return "";
+  // support string input such as "117922.5" or numbers
+  const m = Number(ms);
+  if (!isFinite(m)) return "";
+
+  const abs = Math.abs(m);
+  const sign = m < 0 ? "-" : "";
+
+  const msPerSec = 1000;
+  const msPerMin = 60 * msPerSec;
+  const msPerHour = 60 * msPerMin;
+
+  if (abs >= msPerHour) {
+    const h = Math.floor(abs / msPerHour);
+    const rem = abs % msPerHour;
+    const min = Math.floor(rem / msPerMin);
+    const sec = Math.floor((rem % msPerMin) / msPerSec);
+    return `${sign}${h} hr${h !== 1 ? "s" : ""}, ${min} min, ${sec} sec`;
+  } else if (abs >= msPerMin) {
+    const min = Math.floor(abs / msPerMin);
+    const sec = Math.floor((abs % msPerMin) / msPerSec);
+    return `${sign}${min} min${min !== 1 ? "s" : ""}, ${sec} sec`;
+  } else if (abs >= msPerSec) {
+    // show one decimal place for seconds (e.g., 1.5 sec)
+    const secFloat = Math.round((abs / msPerSec) * 10) / 10;
+    return `${sign}${secFloat} sec`;
+  } else {
+    const rounded = Math.round(abs);
+    return `${sign}${rounded} ms`;
+  }
+}
+
 const formatImageSettings = (resolution, steps, seed) => {
   const safeResolution = resolution || "n/a";
   const stepsText = steps != null ? `${steps} steps` : "n/a steps";
@@ -485,10 +526,13 @@ const buildImageTimingLine = (queueMs, genMs, totalMs) => {
   const parts = [];
   const queue = formatDurationSeconds(queueMs);
   const gen = formatDurationSeconds(genMs);
-  const total = formatDurationSeconds(totalMs);
   if (queue != null) parts.push(`Queue ${queue}s`);
   if (gen != null) parts.push(`Gen ${gen}s`);
-  if (total != null) parts.push(`Total ${total}s`);
+  if (totalMs != null && !isNaN(totalMs)) {
+    const totalHuman = formatMsHuman(totalMs);
+    const totalDisplay = totalHuman ? `${formatMetric(totalMs, " ms")} <span class="total-human">(${totalHuman})</span>` : `${formatMetric(totalMs, " ms")}`;
+    parts.push(`Total ${totalDisplay}`);
+  }
   if (!parts.length) return "";
   return `<div><strong>Timing:</strong> ${parts.join(" • ")}</div>`;
 };
