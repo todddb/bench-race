@@ -2143,6 +2143,12 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
     return result
 
 
+def _log_backend_selection(job_id: str, backend: str, reason: str) -> None:
+    """Emit standardized structured logs for backend selection."""
+    slog.info("job_backend_selected", job_id=job_id, backend=backend, reason=reason)
+    slog.info("job_started", job_id=job_id, backend=backend)
+
+
 async def _try_vllm_backend(job_id: str, model: str, prompt: str, max_tokens: int,
                             temperature: float, num_ctx: int) -> Optional[dict]:
     """
@@ -2156,16 +2162,15 @@ async def _try_vllm_backend(job_id: str, model: str, prompt: str, max_tokens: in
     vllm_base_url = vllm_cfg.get("base_url", "http://127.0.0.1:8000")
     available = await check_vllm_available(vllm_base_url)
     if not available:
-        slog.info("vllm_unavailable", job_id=job_id, reason="unreachable")
+        slog.warning("backend_unavailable", job_id=job_id, backend="vllm", reason="unreachable")
         return None
 
     vllm_models = await get_vllm_models(vllm_base_url)
     if model not in vllm_models:
-        slog.info("vllm_model_missing", job_id=job_id, model=model, available_models=vllm_models)
+        slog.warning("backend_model_missing", job_id=job_id, backend="vllm", model=model, available_models=vllm_models)
         return None
 
-    slog.info("job_backend_selected", job_id=job_id, backend="vllm", reason="model_available")
-    slog.info("job_started", job_id=job_id, backend="vllm")
+    _log_backend_selection(job_id, "vllm", "model_available")
 
     async def _on_token(text: str, timestamp_s: float) -> None:
         ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
@@ -2192,16 +2197,15 @@ async def _try_ollama_backend(job_id: str, model: str, prompt: str, max_tokens: 
     """
     available = await check_ollama_available(base_url)
     if not available:
-        slog.info("ollama_unavailable", job_id=job_id, reason="unreachable")
+        slog.warning("backend_unavailable", job_id=job_id, backend="ollama", reason="unreachable")
         return None
 
     ollama_models = await get_ollama_models(base_url)
     if model not in ollama_models:
-        slog.info("ollama_model_missing", job_id=job_id, model=model, available_models=ollama_models)
+        slog.warning("backend_model_missing", job_id=job_id, backend="ollama", model=model, available_models=ollama_models)
         return None
 
-    slog.info("job_backend_selected", job_id=job_id, backend="ollama", reason="model_available")
-    slog.info("job_started", job_id=job_id, backend="ollama")
+    _log_backend_selection(job_id, "ollama", "model_available")
 
     async def _on_token(text: str, timestamp_s: float) -> None:
         ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
@@ -2224,7 +2228,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     """
     Background runner for llm_generate jobs.
     Supports backend selection: explicit via req.backend, or auto-select.
-    Order for auto-select: requested backend > ollama > vllm > mock.
+    Order for auto-select: ollama > vllm > mock.
     Emits events while running and a final 'job_done' event with metrics.
     """
     model = req.model
@@ -2234,7 +2238,6 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     num_ctx = req.num_ctx
     requested_backend = req.backend  # "ollama", "vllm", or None
 
-    # Log job accepted
     slog.info(
         "job_accepted",
         job_id=job_id,
@@ -2246,70 +2249,67 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
         prompt_length=len(prompt),
         requested_backend=requested_backend,
     )
-
     log.info("Starting job %s model=%s backend=%s", job_id, model, requested_backend or "auto")
-    ollama_base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
 
+    ollama_base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    backend_selected = None
     result = None
+
+    async def try_backend(name: str) -> Optional[dict]:
+        if name == "ollama":
+            return await _try_ollama_backend(job_id, model, prompt, max_tokens, temperature, num_ctx, ollama_base_url)
+        if name == "vllm":
+            return await _try_vllm_backend(job_id, model, prompt, max_tokens, temperature, num_ctx)
+        return None
+
     try:
-        if requested_backend == "vllm":
-            # Explicitly requested vLLM
-            result = await _try_vllm_backend(job_id, model, prompt, max_tokens, temperature, num_ctx)
-            if result is None:
-                slog.warning("requested_backend_unavailable", job_id=job_id, backend="vllm")
-                log.warning("vLLM explicitly requested but unavailable for job %s; falling back to mock", job_id)
-        elif requested_backend == "ollama":
-            # Explicitly requested Ollama
-            result = await _try_ollama_backend(job_id, model, prompt, max_tokens, temperature, num_ctx, ollama_base_url)
-            if result is None:
-                slog.warning("requested_backend_unavailable", job_id=job_id, backend="ollama")
-                log.warning("Ollama explicitly requested but unavailable for job %s; falling back to mock", job_id)
+        if requested_backend:
+            # Explicit backend selection — try only the requested backend
+            result = await try_backend(requested_backend)
+            if result:
+                backend_selected = requested_backend
+            else:
+                slog.warning("requested_backend_unavailable", job_id=job_id, backend=requested_backend)
+                log.warning("%s explicitly requested but unavailable for job %s", requested_backend, job_id)
         else:
-            # Auto-select: try Ollama first, then vLLM
-            result = await _try_ollama_backend(job_id, model, prompt, max_tokens, temperature, num_ctx, ollama_base_url)
-            if result is None:
-                result = await _try_vllm_backend(job_id, model, prompt, max_tokens, temperature, num_ctx)
+            # Auto-select: Ollama first, then vLLM
+            for name in ("ollama", "vllm"):
+                result = await try_backend(name)
+                if result:
+                    backend_selected = name
+                    break
 
         # Fall back to mock if no backend succeeded
         if result is None:
-            fallback_reason = "backend_unavailable"
-            if requested_backend:
-                fallback_reason = f"{requested_backend}_unavailable"
-            slog.info(
-                "job_backend_selected",
-                job_id=job_id,
-                backend="mock",
-                reason=fallback_reason,
-            )
+            backend_selected = "mock"
+            fallback_reason = f"{requested_backend}_unavailable" if requested_backend else "backend_unavailable"
+            slog.info("job_backend_selected", job_id=job_id, backend="mock", reason=fallback_reason)
             log.warning("No backend available for job %s; using mock stream", job_id)
             slog.info("job_started", job_id=job_id, backend="mock")
             result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason=fallback_reason)
 
     except Exception as e:
-        slog.info(
-            "job_backend_selected",
-            job_id=job_id,
-            backend="mock",
-            reason="stream_error",
-            error=str(e),
-        )
+        backend_selected = "mock"
+        slog.warning("job_backend_error", job_id=job_id, backend="mock", reason="stream_error", error=str(e))
         log.warning("Backend stream failed (%s); falling back to mock stream", e)
         slog.info("job_started", job_id=job_id, backend="mock")
         result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")
 
-    # Log job completion
+    # Ensure backend_selected is always included in the result
+    result["backend_selected"] = backend_selected
+
     slog.info(
         "job_completed",
         job_id=job_id,
         job_type="llm",
-        tokens_generated=result.get("tokens_generated", 0),
+        backend=backend_selected,
+        tokens_generated=result.get("gen_tokens", 0),
         duration_ms=result.get("total_ms", 0),
     )
 
-    # Emit final metrics event
     ev = Event(job_id=job_id, type="job_done", payload=result)
     await _broadcast_event(ev)
-    log.info("Job %s done. result=%s", job_id, result)
+    log.info("Job %s done. backend=%s result=%s", job_id, backend_selected, result)
 
 
 async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
