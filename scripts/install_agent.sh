@@ -23,6 +23,7 @@ AGENT_ID=""
 LABEL=""
 CENTRAL_URL="http://127.0.0.1:8080"
 VLLM_PORT="8000"
+VLLM_INSTALL_VERSION="${VLLM_INSTALL_VERSION:-}"
 
 INVOKER_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 INVOKER_UID="$(id -u "${INVOKER_USER}" 2>/dev/null || id -u)"
@@ -244,6 +245,104 @@ ensure_vllm_venv(){
   fi
 }
 
+# --- Begin vllm setuptools compatibility helpers ---
+# $VENV_PATH must be set to the venv path in the installer context
+PIP_BIN="${VENV_PATH}/bin/pip"
+PY_BIN="${VENV_PATH}/bin/python"
+
+# Try to install vllm, detect setuptools-related pip errors, and retry with pinned setuptools if needed.
+# Usage: try_install_vllm [<vllm_spec>]
+# <vllm_spec> is optional, e.g. "vllm==0.14.1" or "vllm" (latest)
+try_install_vllm() {
+  local vllm_spec="${1:-vllm}"
+  local tmpfile
+
+  PIP_BIN="${VENV_PATH}/bin/pip"
+  PY_BIN="${VENV_PATH}/bin/python"
+  tmpfile="$(mktemp -t vllm_pip_log.XXXXXX)" || tmpfile="/tmp/vllm_pip_log.$$"
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    log_info "[DRY-RUN] Would attempt vLLM install via try_install_vllm (${vllm_spec})"
+    rm -f "$tmpfile"
+    return 0
+  fi
+
+  echo "[INFO] Attempting to install ${vllm_spec} into ${VENV_PATH}"
+  # First try: normal install (isolation on)
+  if run_as_invoker "$PIP_BIN" install --upgrade pip setuptools >/dev/null 2>&1; then
+    :
+  fi
+  if run_as_invoker "$PIP_BIN" install "${vllm_spec}" >"$tmpfile" 2>&1; then
+    echo "[INFO] Installed ${vllm_spec} successfully."
+    rm -f "$tmpfile"
+    return 0
+  fi
+
+  # Install failed: inspect log for setuptools requirement/restriction
+  local logcat
+  logcat="$(cat "$tmpfile")"
+  echo "[WARN] vllm install failed; inspecting pip output..."
+
+  # Common pip wording examples we want to detect:
+  #   vllm 0.14.1 requires setuptools==77.0.3
+  #   vllm requires setuptools<81.0.0,>=77.0.3
+  #   Could not find a version that satisfies the requirement torch==2.6.0 (skip)
+  # We'll attempt to extract a setuptools exact version or lower-than constraint.
+  local setuptools_pin=""
+  # exact equals e.g. "requires setuptools==77.0.3"
+  setuptools_pin="$(printf "%s\n" "$logcat" | grep -oE "setuptools==[0-9]+\.[0-9]+\.[0-9]+" | head -n1 || true)"
+  if [ -z "$setuptools_pin" ]; then
+    # range e.g. "requires setuptools<81.0.0,>=77.0.3" -> pick lower-bound if present
+    setuptools_pin="$(printf "%s\n" "$logcat" | grep -oE "setuptools[^[:space:]]*" | sed -n '1p' || true)"
+    # fallback: look for 'setuptools<81' style
+    if [ -n "$setuptools_pin" ]; then
+      # Try to extract a lower bound, e.g. ">=77.0.3"
+      local lb
+      lb="$(printf "%s\n" "$setuptools_pin" | grep -oE ">=([0-9]+(\.[0-9]+){1,2})" | sed -e 's/>=//' | head -n1 || true)"
+      if [ -n "$lb" ]; then
+        setuptools_pin="setuptools==${lb}"
+      else
+        setuptools_pin=""
+      fi
+    fi
+  fi
+
+  if [ -n "$setuptools_pin" ]; then
+    echo "[INFO] Pip output indicates vllm needs specific setuptools: ${setuptools_pin}. Will pin and retry."
+    # Attempt pin, then reinstall vllm with no-build-isolation fallback
+    if run_as_invoker "$PIP_BIN" install --force-reinstall "${setuptools_pin}"; then
+      echo "[INFO] Pinned ${setuptools_pin} in venv"
+      if run_as_invoker "$PIP_BIN" install --force-reinstall --no-build-isolation "${vllm_spec}" >"$tmpfile" 2>&1; then
+        echo "[INFO] Installed ${vllm_spec} successfully after pinning setuptools."
+        rm -f "$tmpfile"
+        return 0
+      else
+        echo "[ERROR] Retry install after pinning setuptools still failed. See ${tmpfile} for details."
+        cat "$tmpfile" >&2
+        return 2
+      fi
+    else
+      echo "[ERROR] Failed to pin setuptools to ${setuptools_pin}. See ${tmpfile} for details."
+      cat "$tmpfile" >&2
+      return 3
+    fi
+  fi
+
+  # Generic fallback: try again with --no-build-isolation (may work if dependency resolution was build-time only)
+  echo "[INFO] No setuptools pin detected. Retrying with --no-build-isolation..."
+  if run_as_invoker "$PIP_BIN" install --force-reinstall --no-build-isolation "${vllm_spec}" >"$tmpfile" 2>&1; then
+    echo "[INFO] Installed ${vllm_spec} successfully with --no-build-isolation."
+    rm -f "$tmpfile"
+    return 0
+  fi
+
+  # Give up and print logs for debugging
+  echo "[ERROR] vllm install ultimately failed. See $tmpfile for pip output."
+  cat "$tmpfile" >&2
+  return 4
+}
+# --- End vllm setuptools compatibility helpers ---
+
 install_vllm_packages(){
   local pip="${VENV_PATH}/bin/pip"
   local py="${VENV_PATH}/bin/python"
@@ -281,12 +380,38 @@ install_vllm_packages(){
 
   if ! "$py" -c "import vllm" >/dev/null 2>&1; then
     log_step "Installing vLLM"
-    if ! run_as_invoker "$pip" install vllm uvicorn; then
-      log_warn "vLLM install failed; retrying --no-build-isolation"
-      run_as_invoker "$pip" install --no-build-isolation vllm uvicorn
+    local vllm_install_spec
+    if [[ -n "${VLLM_INSTALL_VERSION}" ]]; then
+      vllm_install_spec="vllm==${VLLM_INSTALL_VERSION}"
+    else
+      vllm_install_spec="vllm"
     fi
+
+    if ! try_install_vllm "${vllm_install_spec}"; then
+      echo "[ERROR] vLLM install failed. Aborting installer."
+      exit 1
+    fi
+    run_as_invoker "$pip" install uvicorn
   else
     log_info "vLLM already installed in ${VENV_PATH}"
+  fi
+
+  # Post-install verification
+  echo "[STEP] Verifying installed vLLM and dependencies..."
+  if [[ "${DRY_RUN}" == true ]]; then
+    log_info "[DRY-RUN] Skipping pip check/import verification"
+    return 0
+  fi
+  run_as_invoker "$VENV_PATH/bin/pip" check || {
+    echo "[ERROR] pip check failed - dependency conflicts detected. Printing 'pip check' output above."
+    run_as_invoker "$VENV_PATH/bin/python" -c "import pkgutil; print('installed pkg list sample:', [m.name for m in pkgutil.iter_modules()][:20])" || true
+    exit 1
+  }
+
+  # Quick import test
+  if ! run_as_invoker "$VENV_PATH/bin/python" -c "import vllm, torch; print('vllm', getattr(vllm,'__version__','n/a'), 'torch', getattr(torch,'__version__','n/a'))"; then
+    echo "[ERROR] Python import check for vllm/torch failed in venv at ${VENV_PATH}"
+    exit 1
   fi
 }
 

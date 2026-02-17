@@ -101,6 +101,11 @@ run_test "venv exists at $VENV_PATH" test -d "$VENV_PATH"
 run_test "Python executable works" "$PYTHON" -c "import sys; print(f'Python {sys.version}')" 2>/dev/null
 
 # ------------------------------------------------------------------
+# Test 3: pip dependency consistency
+# ------------------------------------------------------------------
+run_test "pip check" "$PYTHON" -m pip check 2>/dev/null
+
+# ------------------------------------------------------------------
 # Test 3: torch imports
 # ------------------------------------------------------------------
 run_test "torch imports" "$PYTHON" -c "import torch; print(f'torch {torch.__version__}')" 2>/dev/null
