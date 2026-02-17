@@ -11,6 +11,13 @@ class MachineInfo(BaseModel):
     notes: Optional[str] = None
 
 
+class BackendStatus(BaseModel):
+    """Status of a single inference backend on an agent."""
+    available: bool = False
+    models: List[str] = Field(default_factory=list)
+    base_url: Optional[str] = None
+
+
 class Capabilities(BaseModel):
     machine_id: str
     label: str
@@ -34,6 +41,11 @@ class Capabilities(BaseModel):
     agent_reachable: Optional[bool] = None  # Set by central when aggregating
     comfyui_gpu_ok: Optional[bool] = None
     comfyui_cpu_ok: Optional[bool] = None
+    # vLLM backend status
+    vllm_reachable: Optional[bool] = None
+    vllm_models: List[str] = Field(default_factory=list)
+    # Structured backends map (new; coexists with flat fields for backward compat)
+    backends: Dict[str, BackendStatus] = Field(default_factory=dict)
 
 
 # ----- Job Requests -----
@@ -46,6 +58,7 @@ class LLMRequest(BaseModel):
     num_ctx: int = 4096
     repeat: int = 1
     stream: bool = True
+    backend: Optional[str] = None  # "ollama", "vllm", or None (auto-select)
 
 
 class WhisperRequest(BaseModel):

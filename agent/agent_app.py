@@ -40,6 +40,7 @@ if str(ROOT_DIR) not in sys.path:
 # now import shared pydantic schemas
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
 from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
+from backends.vllm_backend import check_vllm_available, stream_vllm_generate, get_vllm_models
 
 # Import agent-specific modules
 from agent.logging_utils import init_logging, get_logger, HOSTNAME
@@ -1728,12 +1729,40 @@ async def unload_ollama_model(request: dict):
 @app.get("/capabilities")
 async def capabilities():
     base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    vllm_base_url = CFG.get("vllm_base_url", "http://127.0.0.1:8000")
 
     # Check Ollama reachability and get available models
     ollama_reachable = await check_ollama_available(base_url)
     ollama_models = []
     if ollama_reachable:
         ollama_models = await get_ollama_models(base_url)
+
+    # Check vLLM reachability and get available models
+    vllm_cfg = CFG.get("vllm", {})
+    vllm_enabled = vllm_cfg.get("enabled", False) if vllm_cfg else False
+    vllm_reachable = False
+    vllm_models = []
+    if vllm_enabled:
+        vllm_base_url = vllm_cfg.get("base_url", vllm_base_url)
+        vllm_reachable = await check_vllm_available(vllm_base_url)
+        if vllm_reachable:
+            vllm_models = await get_vllm_models(vllm_base_url)
+
+    # Build structured backends map
+    from shared.schemas import BackendStatus
+    backends = {
+        "ollama": BackendStatus(
+            available=ollama_reachable,
+            models=ollama_models,
+            base_url=base_url,
+        ),
+    }
+    if vllm_enabled:
+        backends["vllm"] = BackendStatus(
+            available=vllm_reachable,
+            models=vllm_models,
+            base_url=vllm_base_url,
+        )
 
     cap = Capabilities(
         machine_id=CFG.get("machine_id"),
@@ -1765,6 +1794,9 @@ async def capabilities():
         total_system_ram_bytes=HARDWARE_INFO.get("total_system_ram_bytes"),
         ollama_reachable=ollama_reachable,
         ollama_models=ollama_models,
+        vllm_reachable=vllm_reachable,
+        vllm_models=vllm_models,
+        backends={k: v.model_dump() for k, v in backends.items()},
         comfyui_gpu_ok=COMFYUI_PREFLIGHT.get("comfyui_gpu_ok"),
         comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
@@ -2111,10 +2143,88 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
     return result
 
 
+async def _try_vllm_backend(job_id: str, model: str, prompt: str, max_tokens: int,
+                            temperature: float, num_ctx: int) -> Optional[dict]:
+    """
+    Attempt to run a job on the vLLM backend. Returns result dict on success,
+    or None if vLLM is not configured, not reachable, or does not serve the model.
+    """
+    vllm_cfg = CFG.get("vllm", {})
+    if not vllm_cfg or not vllm_cfg.get("enabled", False):
+        return None
+
+    vllm_base_url = vllm_cfg.get("base_url", "http://127.0.0.1:8000")
+    available = await check_vllm_available(vllm_base_url)
+    if not available:
+        slog.info("vllm_unavailable", job_id=job_id, reason="unreachable")
+        return None
+
+    vllm_models = await get_vllm_models(vllm_base_url)
+    if model not in vllm_models:
+        slog.info("vllm_model_missing", job_id=job_id, model=model, available_models=vllm_models)
+        return None
+
+    slog.info("job_backend_selected", job_id=job_id, backend="vllm", reason="model_available")
+    slog.info("job_started", job_id=job_id, backend="vllm")
+
+    async def _on_token(text: str, timestamp_s: float) -> None:
+        ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
+        await _broadcast_event(ev)
+
+    result = await stream_vllm_generate(
+        job_id=job_id,
+        model=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        base_url=vllm_base_url,
+        on_token=_on_token,
+    )
+    return result
+
+
+async def _try_ollama_backend(job_id: str, model: str, prompt: str, max_tokens: int,
+                              temperature: float, num_ctx: int, base_url: str) -> Optional[dict]:
+    """
+    Attempt to run a job on the Ollama backend. Returns result dict on success,
+    or None if Ollama is not reachable or does not serve the model.
+    """
+    available = await check_ollama_available(base_url)
+    if not available:
+        slog.info("ollama_unavailable", job_id=job_id, reason="unreachable")
+        return None
+
+    ollama_models = await get_ollama_models(base_url)
+    if model not in ollama_models:
+        slog.info("ollama_model_missing", job_id=job_id, model=model, available_models=ollama_models)
+        return None
+
+    slog.info("job_backend_selected", job_id=job_id, backend="ollama", reason="model_available")
+    slog.info("job_started", job_id=job_id, backend="ollama")
+
+    async def _on_token(text: str, timestamp_s: float) -> None:
+        ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
+        await _broadcast_event(ev)
+
+    result = await stream_ollama_generate(
+        job_id=job_id,
+        model=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        base_url=base_url,
+        on_token=_on_token,
+    )
+    return result
+
+
 async def _job_runner_llm(job_id: str, req: LLMRequest):
     """
     Background runner for llm_generate jobs.
-    Tries Ollama streaming first; falls back to mock streaming on failure.
+    Supports backend selection: explicit via req.backend, or auto-select.
+    Order for auto-select: requested backend > ollama > vllm > mock.
     Emits events while running and a final 'job_done' event with metrics.
     """
     model = req.model
@@ -2122,8 +2232,8 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     max_tokens = req.max_tokens
     temperature = req.temperature
     num_ctx = req.num_ctx
+    requested_backend = req.backend  # "ollama", "vllm", or None
 
-    # Log job received (already logged in POST /jobs)
     # Log job accepted
     slog.info(
         "job_accepted",
@@ -2134,80 +2244,57 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
         temperature=temperature,
         num_ctx=num_ctx,
         prompt_length=len(prompt),
+        requested_backend=requested_backend,
     )
 
-    log.info("Starting job %s model=%s", job_id, model)
-    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    log.info("Starting job %s model=%s backend=%s", job_id, model, requested_backend or "auto")
+    ollama_base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
 
-    backend_selected = None
+    result = None
     try:
-        available = await check_ollama_available(base_url)
-        if not available:
-            backend_selected = "mock"
+        if requested_backend == "vllm":
+            # Explicitly requested vLLM
+            result = await _try_vllm_backend(job_id, model, prompt, max_tokens, temperature, num_ctx)
+            if result is None:
+                slog.warning("requested_backend_unavailable", job_id=job_id, backend="vllm")
+                log.warning("vLLM explicitly requested but unavailable for job %s; falling back to mock", job_id)
+        elif requested_backend == "ollama":
+            # Explicitly requested Ollama
+            result = await _try_ollama_backend(job_id, model, prompt, max_tokens, temperature, num_ctx, ollama_base_url)
+            if result is None:
+                slog.warning("requested_backend_unavailable", job_id=job_id, backend="ollama")
+                log.warning("Ollama explicitly requested but unavailable for job %s; falling back to mock", job_id)
+        else:
+            # Auto-select: try Ollama first, then vLLM
+            result = await _try_ollama_backend(job_id, model, prompt, max_tokens, temperature, num_ctx, ollama_base_url)
+            if result is None:
+                result = await _try_vllm_backend(job_id, model, prompt, max_tokens, temperature, num_ctx)
+
+        # Fall back to mock if no backend succeeded
+        if result is None:
+            fallback_reason = "backend_unavailable"
+            if requested_backend:
+                fallback_reason = f"{requested_backend}_unavailable"
             slog.info(
                 "job_backend_selected",
                 job_id=job_id,
-                backend=backend_selected,
-                reason="ollama_unreachable",
+                backend="mock",
+                reason=fallback_reason,
             )
-            log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
+            log.warning("No backend available for job %s; using mock stream", job_id)
+            slog.info("job_started", job_id=job_id, backend="mock")
+            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason=fallback_reason)
 
-            slog.info("job_started", job_id=job_id, backend=backend_selected)
-            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
-        else:
-            # Check if model is available on Ollama
-            ollama_models = await get_ollama_models(base_url)
-            if model not in ollama_models:
-                backend_selected = "mock"
-                slog.info(
-                    "job_backend_selected",
-                    job_id=job_id,
-                    backend=backend_selected,
-                    reason="missing_model",
-                    available_models=ollama_models,
-                )
-                log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
-
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
-                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
-            else:
-                backend_selected = "ollama"
-                slog.info(
-                    "job_backend_selected",
-                    job_id=job_id,
-                    backend=backend_selected,
-                    reason="model_available",
-                )
-                log.info("Using Ollama backend for job %s", job_id)
-
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
-
-                async def _on_token(text: str, timestamp_s: float) -> None:
-                    ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
-                    await _broadcast_event(ev)
-
-                result = await stream_ollama_generate(
-                    job_id=job_id,
-                    model=model,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    num_ctx=num_ctx,
-                    base_url=base_url,
-                    on_token=_on_token,
-                )
     except Exception as e:
-        backend_selected = "mock"
         slog.info(
             "job_backend_selected",
             job_id=job_id,
-            backend=backend_selected,
+            backend="mock",
             reason="stream_error",
             error=str(e),
         )
-        log.warning("Ollama stream failed (%s); falling back to mock stream", e)
-
-        slog.info("job_started", job_id=job_id, backend=backend_selected)
+        log.warning("Backend stream failed (%s); falling back to mock stream", e)
+        slog.info("job_started", job_id=job_id, backend="mock")
         result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")
 
     # Log job completion

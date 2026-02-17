@@ -55,6 +55,20 @@ ollama:
   # start_command: ["ollama", "serve"]
 
 ########################################
+# vLLM configuration
+########################################
+
+vllm:
+  # Set to true to enable the vLLM inference backend
+  enabled: false
+
+  # Base URL where vLLM listens (OpenAI-compatible API)
+  base_url: "http://127.0.0.1:8000"
+
+  # Health endpoint used to verify readiness
+  # health_endpoint: "/health"
+
+########################################
 # ComfyUI configuration
 ########################################
 

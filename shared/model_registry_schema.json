@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bench-race Unified Model Registry",
+  "description": "Single source of truth mapping logical model IDs to per-backend artifacts. Supports Ollama and vLLM backends.",
+  "type": "object",
+  "required": ["version", "models"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version",
+      "const": "1"
+    },
+    "models": {
+      "type": "array",
+      "description": "List of registered models",
+      "items": {
+        "$ref": "#/$defs/ModelEntry"
+      }
+    }
+  },
+  "$defs": {
+    "ModelEntry": {
+      "type": "object",
+      "required": ["model_id"],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "description": "Logical model identifier (e.g., 'meta-llama-3.1-8b-instruct')"
+        },
+        "display_name": {
+          "type": ["string", "null"],
+          "description": "Human-readable display name"
+        },
+        "family": {
+          "type": ["string", "null"],
+          "description": "Model family (e.g., 'llama', 'mistral', 'qwen')"
+        },
+        "parameter_count": {
+          "type": ["string", "null"],
+          "description": "Parameter count (e.g., '8B', '70B')"
+        },
+        "license": {
+          "type": ["string", "null"],
+          "description": "License identifier (e.g., 'llama3.1', 'apache-2.0')"
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Per-backend artifact definitions",
+          "items": {
+            "$ref": "#/$defs/BackendArtifact"
+          }
+        }
+      }
+    },
+    "BackendArtifact": {
+      "type": "object",
+      "required": ["backend", "artifact_id"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["ollama", "vllm"],
+          "description": "Backend this artifact belongs to"
+        },
+        "artifact_id": {
+          "type": "string",
+          "description": "Backend-specific model name or path"
+        },
+        "quantization": {
+          "type": ["string", "null"],
+          "description": "Quantization method (e.g., 'q8_0', 'q4_K_M', 'fp16', 'awq')"
+        },
+        "format": {
+          "type": ["string", "null"],
+          "description": "Model file format (e.g., 'gguf', 'safetensors', 'gptq')"
+        },
+        "size_bytes": {
+          "type": ["integer", "null"],
+          "description": "Size of model artifact in bytes"
+        },
+        "checksum": {
+          "type": ["string", "null"],
+          "description": "Checksum for integrity verification (e.g., 'sha256:abc123...')"
+        },
+        "source_url": {
+          "type": ["string", "null"],
+          "description": "URL to download the artifact (e.g., HuggingFace repo)"
+        },
+        "provisioning_status": {
+          "type": ["string", "null"],
+          "enum": ["available", "downloading", "missing", "error", null],
+          "description": "Current provisioning state of this artifact"
+        },
+        "license": {
+          "type": ["string", "null"],
+          "description": "License for this specific artifact (overrides model-level license)"
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "description": "Free-form notes about this artifact"
+        }
+      }
+    }
+  }
+}

@@ -1746,9 +1746,14 @@ def _missing_models_for_policy(models: List[str]) -> Dict[str, List[str]]:
 
 
 def _available_llm_models(cap: Dict[str, Any]) -> List[str]:
+    models = set()
     if cap.get("ollama_models"):
-        return list(cap.get("ollama_models") or [])
-    return list(cap.get("llm_models") or [])
+        models.update(cap["ollama_models"])
+    if cap.get("vllm_models"):
+        models.update(cap["vllm_models"])
+    if not models and cap.get("llm_models"):
+        models.update(cap["llm_models"])
+    return sorted(models)
 
 
 def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
@@ -2237,6 +2242,9 @@ def api_capabilities():
                     "agent_reachable": False,
                     "ollama_reachable": None,
                     "ollama_models": [],
+                    "vllm_reachable": None,
+                    "vllm_models": [],
+                    "backends": {},
                     "llm_models": [],
                     "error": str(e),
                 }
@@ -2292,6 +2300,9 @@ def api_status():
                         "comfyui_cpu_ok": cap.get("comfyui_cpu_ok"),
                         "total_system_ram_bytes": cap.get("total_system_ram_bytes"),
                         "system_memory_gb": cap.get("system_memory_gb"),
+                        "ollama_reachable": cap.get("ollama_reachable"),
+                        "vllm_reachable": cap.get("vllm_reachable"),
+                        "backends": cap.get("backends", {}),
                     },
                     "model_fit": {
                         **fit,
@@ -2792,6 +2803,7 @@ def api_start_llm():
     temperature = float(payload.get("temperature", 0.2))
     num_ctx = int(payload.get("num_ctx", 4096))
     repeat = int(payload.get("repeat", 1))
+    backend = payload.get("backend")  # "ollama", "vllm", or None (auto-select)
 
     # Optional: only run on specific machines (for preflight filtering)
     machine_ids = payload.get("machine_ids")  # None means all machines
@@ -2813,6 +2825,7 @@ def api_start_llm():
             "num_ctx": num_ctx,
             "repeat": repeat,
             "machine_ids": machine_ids,
+            "backend": backend,
         },
         "central_git_sha": _current_git_sha(),
         "machines": [],
@@ -2856,9 +2869,7 @@ def api_start_llm():
 
         try:
             model_fit = _machine_model_fit(m, model, num_ctx)
-            r = requests.post(
-                f"{m['agent_base_url'].rstrip('/')}/jobs",
-                json={
+            job_payload = {
                     "test_type": "llm_generate",
                     "model": model,
                     "prompt": prompt,
@@ -2867,7 +2878,12 @@ def api_start_llm():
                     "num_ctx": num_ctx,
                     "repeat": repeat,
                     "stream": True,
-                },
+                }
+            if backend:
+                job_payload["backend"] = backend
+            r = requests.post(
+                f"{m['agent_base_url'].rstrip('/')}/jobs",
+                json=job_payload,
                 timeout=5,
             )
             r.raise_for_status()

@@ -63,6 +63,16 @@
                     <div class="helper">Which model to run on each machine.</div>
                   </div>
 
+                  <div class="model-row control-field">
+                    <label for="backend" class="control-label">Backend</label>
+                    <select id="backend">
+                      <option value="auto">Auto (default)</option>
+                      <option value="ollama">Ollama</option>
+                      <option value="vllm">vLLM</option>
+                    </select>
+                    <div class="helper">Inference backend. Auto selects the best available.</div>
+                  </div>
+
                   <button class="options-header options-toggle" id="options-toggle" type="button">
                     <span class="control-label">Options</span>
                     <span class="options-caret">▶</span>
