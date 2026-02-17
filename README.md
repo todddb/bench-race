@@ -107,46 +107,45 @@ The installers are **idempotent** - you can safely re-run them to update your in
 
 ### Agent Installation
 
-The agent installer (`scripts/install_agent.sh`) sets up everything needed on agent machines:
-- Platform detection (macOS/Linux, architecture, GPU support)
-- Ollama installation and configuration
-- ComfyUI with GPU-aware PyTorch selection
-- Python environment and dependencies
-- Agent configuration with automatic hardware detection
+The unified agent installer (`scripts/install_agent.sh`) now handles both agent setup and optional vLLM setup in one idempotent flow:
+- User-owned vLLM virtualenv by default (`~/bench-race/vllm-venv`)
+- Platform-aware PyTorch install strategy (Linux/macOS, Blackwell/GB10 nightly suggestion)
+- Optional service install (systemd/launchd)
+- Safe reruns and safe vLLM uninstall mode
 
-**Options:**
+**Installer CLI:**
 ```bash
 ./scripts/install_agent.sh [OPTIONS]
 
 Options:
-  --agent-id ID         Agent identifier (default: hostname)
-  --label "Label"       Human-readable label for UI
-  --central-url URL     Central server URL (default: http://127.0.0.1:8080)
-  --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
-  --yes                 Non-interactive mode (use defaults)
-  --no-service          Skip systemd/launchctl service installation
-  --update              Update existing installation
-  --skip-ollama         Skip Ollama installation
-  --skip-comfyui        Skip ComfyUI installation
+  -y, --yes
+  --dry-run
+  --no-vllm
+  --force-recreate-venv
+  --skip-service
+  --uninstall-vllm
+  --venv-path PATH
+  --model-dir PATH
+  --system
+  --platform PLATFORM
 ```
 
 **Examples:**
 ```bash
-# Interactive installation (prompts for configuration)
-./scripts/install_agent.sh
+# Standard user install
+./scripts/install_agent.sh --yes
 
-# Non-interactive with all options
-./scripts/install_agent.sh \
-  --agent-id "gpu-server-1" \
-  --label "GPU Server 1 (RTX 4090, 64GB)" \
-  --central-url http://192.168.1.100:8080 \
-  --yes
+# System-level vLLM service + /opt venv
+sudo ./scripts/install_agent.sh --yes --system
 
-# Update existing installation
-./scripts/install_agent.sh --update
+# Agent-only update (no vLLM actions)
+./scripts/install_agent.sh --yes --no-vllm
 
-# Install without Ollama or ComfyUI (minimal agent only)
-./scripts/install_agent.sh --skip-ollama --skip-comfyui
+# Dry-run planned changes
+./scripts/install_agent.sh --dry-run
+
+# Remove managed vLLM venv/service only
+./scripts/install_agent.sh --uninstall-vllm --yes
 ```
 
 ### Central Installation

@@ -13,6 +13,8 @@ OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
 OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
 COMFYUI_PIDFILE="${RUN_DIR}/comfyui.pid"
 COMFYUI_LOGFILE="${LOG_DIR}/comfyui.log"
+VLLM_PIDFILE="${RUN_DIR}/bench-race-vllm.pid"
+VLLM_LOGFILE="${LOG_DIR}/bench-race-vllm.log"
 
 AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
 AGENT_PORT="${AGENT_PORT:-9001}"
@@ -24,6 +26,9 @@ OLLAMA_URL="http://${OLLAMA_HOST}:${OLLAMA_PORT}"
 COMFYUI_DIR="${COMFYUI_DIR:-${REPO_ROOT}/agent/third_party/comfyui}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 COMFYUI_HOST="${COMFYUI_HOST:-0.0.0.0}"
+VLLM_VENV="${VLLM_VENV:-$HOME/bench-race/vllm-venv}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+VLLM_MODEL_DIR="${VLLM_MODEL_DIR:-$HOME/bench-race/models/vllm}"
 
 # Try to read ComfyUI config from agent.yaml
 if [[ -f "${REPO_ROOT}/agent/config/agent.yaml" ]]; then
@@ -59,6 +64,50 @@ EOF
 is_listening() {
   local port="$1"
   lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+systemctl_is_installed() {
+  local unit="$1"
+  command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^${unit}\.service"
+}
+
+start_vllm() {
+  if systemctl_is_installed bench-race-vllm; then
+    log "Starting systemd unit bench-race-vllm"
+    sudo systemctl start bench-race-vllm
+    return $?
+  fi
+  if [[ -x "$VLLM_VENV/bin/vllm" ]]; then
+    log "Starting vLLM from venv: $VLLM_VENV"
+    nohup "$VLLM_VENV/bin/vllm" serve --host 127.0.0.1 --port "$VLLM_PORT" --download-dir "$VLLM_MODEL_DIR" > "$VLLM_LOGFILE" 2>&1 &
+    echo $! > "$VLLM_PIDFILE"
+    for i in $(seq 1 30); do
+      if curl -sf "http://127.0.0.1:${VLLM_PORT}/health" >/dev/null 2>&1; then
+        log "vLLM healthy"
+        return 0
+      fi
+      sleep 1
+    done
+    log "WARN: vLLM did not become healthy within 30s"
+    return 1
+  else
+    log "WARN: vLLM binary not found at $VLLM_VENV/bin/vllm"
+    return 2
+  fi
+}
+
+stop_vllm() {
+  if systemctl_is_installed bench-race-vllm; then
+    log "Stopping systemd unit bench-race-vllm"
+    sudo systemctl stop bench-race-vllm
+    return $?
+  fi
+  if [[ -f "$VLLM_PIDFILE" ]]; then
+    kill "$(cat "$VLLM_PIDFILE")" 2>/dev/null || true
+    rm -f "$VLLM_PIDFILE"
+  else
+    pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
+  fi
 }
 
 ensure_ollama() {
@@ -288,6 +337,8 @@ start_agent() {
     return 1
   fi
 
+  start_vllm || true
+
   activate_venv "agent"
 
   log "Starting agent on ${AGENT_HOST}:${AGENT_PORT} ..."
@@ -328,6 +379,7 @@ stop_agent() {
   rm -f "${PIDFILE}" || true
 
   # Also stop ComfyUI if we started it
+  stop_vllm
   stop_comfyui
 
   log "Agent stopped."
@@ -387,6 +439,12 @@ status_agent() {
   log "Agent log: ${LOGFILE}"
   log "Ollama log: ${OLLAMA_LOGFILE}"
   log "ComfyUI log: ${COMFYUI_LOGFILE}"
+  if curl -sf "http://127.0.0.1:${VLLM_PORT}/health" >/dev/null 2>&1; then
+    log "vLLM: healthy (http://127.0.0.1:${VLLM_PORT})"
+  else
+    log "vLLM: not running / not healthy"
+  fi
+  log "vLLM log: ${VLLM_LOGFILE}"
 }
 
 tail_logs() {
@@ -403,4 +461,3 @@ case "${CMD}" in
   ""|help|-h|--help) usage; exit 0 ;;
   *) log "Unknown command: ${CMD}"; usage; exit 2 ;;
 esac
-
