@@ -4,14 +4,20 @@
     "0.14.1": {
       "setuptools": "77.0.3",
       "torch": "2.9.1",
-      "torch_cuda_tag": "cu128",
-      "notes": "stable for macOS arm64 and many linux CUDA builds"
+      "torch_index_url": null,
+      "torch_tag": "cpu",
+      "notes": "CPU-safe baseline; works on macOS arm64 and CPU-only Linux"
     },
     "0.15.1": {
-      "setuptools": "70.2.0",
-      "torch": "2.9.1",
-      "torch_cuda_tag": "cpu-or-cu128",
-      "notes": "example mapping; adjust when vLLM publishes new pins"
+      "setuptools": "77.0.3",
+      "torch": "2.9.1+cu128",
+      "torch_index_url": "https://download.pytorch.org/whl/cu128",
+      "torch_tag": "cu128",
+      "notes": "Requires CUDA 12.8 driver; use nightly index on GB10/Blackwell (CUDA >= 13)"
+    },
+    "auto": {
+      "strategy": "prefer-vllm-pins",
+      "notes": "Let vllm pull in its preferred torch; only pre-pin setuptools if needed"
     }
   },
   "defaults": {
