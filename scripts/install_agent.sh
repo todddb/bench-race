@@ -68,6 +68,7 @@ Core options:
   --uninstall-vllm            Remove managed vLLM venv + managed service
   --venv-path PATH            vLLM venv path
   --model-dir PATH            vLLM model dir
+  --vllm-version VERSION      Pin vLLM version (e.g. 0.14.1)
   --system                    System-level service defaults (/opt venv)
   --platform PLATFORM         Override detected platform
 
@@ -75,6 +76,9 @@ Compatibility options:
   --agent-id ID               agent/config machine id
   --label LABEL               agent label
   --central-url URL           central URL in agent config
+
+Environment variables:
+  VLLM_INSTALL_VERSION        Same as --vllm-version (CLI flag takes priority)
 USAGE
 }
 
@@ -88,11 +92,13 @@ while [[ $# -gt 0 ]]; do
     --uninstall-vllm) UNINSTALL_VLLM=true; shift ;;
     --venv-path) VENV_PATH="$2"; shift 2 ;;
     --model-dir) MODEL_DIR="$2"; shift 2 ;;
+    --vllm-version) VLLM_INSTALL_VERSION="$2"; shift 2 ;;
     --system) SYSTEM_INSTALL=true; shift ;;
     --platform) PLATFORM_OVERRIDE="$2"; shift 2 ;;
     --agent-id) AGENT_ID="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
     --central-url) CENTRAL_URL="$2"; shift 2 ;;
+    --skip-ollama|--skip-comfyui) shift ;;  # accepted for compat; no-op in this script
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -204,18 +210,18 @@ ensure_vllm_venv(){
     local owner
     owner="$(path_owner_uid "${VENV_PATH}")"
     if [[ "${owner}" != "${INVOKER_UID}" ]]; then
-      log_warn "Existing venv owner uid=${owner}, invoker uid=${INVOKER_UID}"
-      if [[ "${FORCE_RECREATE_VENV}" == true ]]; then
-        recreate=true
-      elif [[ "${SYSTEM_INSTALL}" == false ]]; then
-        local fallback="${INVOKER_HOME}/bench-race/vllm-venv"
-        log_warn "Switching to user-owned venv path: ${fallback}"
-        VENV_PATH="${fallback}"
-      elif [[ "${YES_MODE}" == true ]]; then
+      log_warn "Existing venv at ${VENV_PATH} owned by uid=${owner}, invoker uid=${INVOKER_UID}"
+      if [[ "${FORCE_RECREATE_VENV}" == true || "${YES_MODE}" == true ]]; then
         recreate=true
       else
-        read -r -p "Recreate venv at ${VENV_PATH} as ${INVOKER_USER}? [y/N] " ans
-        [[ "${ans}" =~ ^[Yy]$ ]] && recreate=true
+        read -r -p "venv owned by another user — recreate as ${INVOKER_USER}? [y/N] " ans
+        if [[ "${ans}" =~ ^[Yy]$ ]]; then
+          recreate=true
+        elif [[ "${SYSTEM_INSTALL}" == false ]]; then
+          local fallback="${INVOKER_HOME}/bench-race/vllm-venv"
+          log_warn "Switching to user-owned venv path: ${fallback}"
+          VENV_PATH="${fallback}"
+        fi
       fi
     elif [[ "${FORCE_RECREATE_VENV}" == true ]]; then
       recreate=true
@@ -245,172 +251,222 @@ ensure_vllm_venv(){
   fi
 }
 
-# --- Begin vllm setuptools compatibility helpers ---
-# $VENV_PATH must be set to the venv path in the installer context
-PIP_BIN="${VENV_PATH}/bin/pip"
-PY_BIN="${VENV_PATH}/bin/python"
+# --- Begin vllm compatibility and deterministic install helpers ---
+# Requires: VENV_PATH set, INVOKER_USER/INVOKER_UID set, MODEL_DIR set.
+# Optional: VLLM_INSTALL_VERSION set to '0.14.1' etc.
 
-# Try to install vllm, detect setuptools-related pip errors, and retry with pinned setuptools if needed.
-# Usage: try_install_vllm [<vllm_spec>]
-# <vllm_spec> is optional, e.g. "vllm==0.14.1" or "vllm" (latest)
-try_install_vllm() {
-  local vllm_spec="${1:-vllm}"
-  local tmpfile
+# Lookup compatibility mapping for a given vLLM version.
+# Returns JSON object for version if available (jq required).
+# Falls back gracefully if jq is missing or file not found.
+_vllm_compat_lookup() {
+  local version="${1:-}"
+  local compat_file="${REPO_ROOT}/scripts/vllm_compat.json"
+  if [[ -f "$compat_file" && -n "$version" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r --arg v "$version" '.mappings[$v] // empty' "$compat_file" || true
+      return 0
+    else
+      log_warn "jq not found; skipping vllm_compat.json lookup (install jq for deterministic pinning)"
+    fi
+  fi
+  return 1
+}
 
-  PIP_BIN="${VENV_PATH}/bin/pip"
-  PY_BIN="${VENV_PATH}/bin/python"
-  tmpfile="$(mktemp -t vllm_pip_log.XXXXXX)" || tmpfile="/tmp/vllm_pip_log.$$"
+# Deterministic vLLM install routine.
+# 1) Upgrades pip/wheel
+# 2) If compat mapping exists, pre-pins setuptools & torch
+# 3) Tries normal pip install
+# 4) Parses pip output for setuptools pins and retries
+# 5) Falls back to --no-build-isolation
+# 6) Fails with log output
+_try_install_vllm_deterministic() {
+  local v_spec="${1:-vllm}"
+  local pip_bin="${VENV_PATH}/bin/pip"
+  local py_bin="${VENV_PATH}/bin/python"
+  local logf
+  logf="$(mktemp -t vllm_install.XXXXXX)"
 
   if [[ "${DRY_RUN}" == true ]]; then
-    log_info "[DRY-RUN] Would attempt vLLM install via try_install_vllm (${vllm_spec})"
-    rm -f "$tmpfile"
+    log_info "[DRY-RUN] Would attempt deterministic vLLM install (${v_spec})"
+    rm -f "$logf"
     return 0
   fi
 
-  echo "[INFO] Attempting to install ${vllm_spec} into ${VENV_PATH}"
-  # First try: normal install (isolation on)
-  if run_as_invoker "$PIP_BIN" install --upgrade pip setuptools >/dev/null 2>&1; then
-    :
+  # 1) Ensure pip/setuptools/wheel up-to-date as first step
+  run_as_invoker "$pip_bin" install --upgrade pip wheel >/dev/null 2>&1 || true
+
+  # 2) If mapping exists for user-specified VLLM_INSTALL_VERSION, pre-pin setuptools & torch
+  if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
+    local compat_json
+    compat_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
+    if [[ -n "$compat_json" ]]; then
+      log_info "Using compatibility mapping for vLLM ${VLLM_INSTALL_VERSION}"
+      # extract pin values if present
+      local s_pin t_pin t_tag
+      s_pin="$(printf "%s\n" "$compat_json" | jq -r '.setuptools // empty' 2>/dev/null || true)"
+      t_pin="$(printf "%s\n" "$compat_json" | jq -r '.torch // empty' 2>/dev/null || true)"
+      t_tag="$(printf "%s\n" "$compat_json" | jq -r '.torch_cuda_tag // empty' 2>/dev/null || true)"
+      if [[ -n "$s_pin" ]]; then
+        log_info "Pinning setuptools==${s_pin} from compatibility mapping"
+        run_as_invoker "$pip_bin" install --force-reinstall "setuptools==${s_pin}"
+      fi
+      if [[ -n "$t_pin" ]]; then
+        # install torch first (choose index-url if cuda tag present)
+        if [[ "${t_tag}" =~ cu[0-9]+ ]]; then
+          local idx_url="https://download.pytorch.org/whl/${t_tag}"
+          # For Blackwell/GB10, prefer nightly index for cu128
+          if [[ "${IS_BLACKWELL}" == true && "${t_tag}" == "cu128" ]]; then
+            idx_url="https://download.pytorch.org/whl/nightly/cu128"
+            log_info "GB10/Blackwell detected: using nightly PyTorch index for cu128"
+            run_as_invoker "$pip_bin" install --force-reinstall --pre "torch==${t_pin}" --index-url "$idx_url" \
+              || run_as_invoker "$pip_bin" install --force-reinstall --pre torch --index-url "$idx_url"
+          else
+            log_info "Pinning torch==${t_pin}+${t_tag} from compatibility mapping"
+            run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}+${t_tag}" --index-url "$idx_url" \
+              || run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}" --index-url "$idx_url"
+          fi
+          # try matching torchvision/torchaudio if necessary (best-effort)
+          run_as_invoker "$pip_bin" install --force-reinstall "torchvision" --index-url "$idx_url" 2>/dev/null || true
+        else
+          log_info "Pinning torch==${t_pin} from compatibility mapping"
+          run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}"
+        fi
+      fi
+    fi
   fi
-  if run_as_invoker "$PIP_BIN" install "${vllm_spec}" >"$tmpfile" 2>&1; then
-    echo "[INFO] Installed ${vllm_spec} successfully."
-    rm -f "$tmpfile"
+
+  # 3) Normal attempt to install vllm
+  log_info "Attempting to install ${v_spec} into ${VENV_PATH}"
+  if run_as_invoker "$pip_bin" install "${v_spec}" >"$logf" 2>&1; then
+    log_ok "Installed ${v_spec} successfully"
+    rm -f "$logf"
     return 0
   fi
 
-  # Install failed: inspect log for setuptools requirement/restriction
+  # 4) Parse for setuptools/tensor pins and retry
+  log_warn "vLLM install failed; inspecting pip output for constraints..."
   local logcat
-  logcat="$(cat "$tmpfile")"
-  echo "[WARN] vllm install failed; inspecting pip output..."
-
-  # Common pip wording examples we want to detect:
-  #   vllm 0.14.1 requires setuptools==77.0.3
-  #   vllm requires setuptools<81.0.0,>=77.0.3
-  #   Could not find a version that satisfies the requirement torch==2.6.0 (skip)
-  # We'll attempt to extract a setuptools exact version or lower-than constraint.
-  local setuptools_pin=""
-  # exact equals e.g. "requires setuptools==77.0.3"
-  setuptools_pin="$(printf "%s\n" "$logcat" | grep -oE "setuptools==[0-9]+\.[0-9]+\.[0-9]+" | head -n1 || true)"
-  if [ -z "$setuptools_pin" ]; then
-    # range e.g. "requires setuptools<81.0.0,>=77.0.3" -> pick lower-bound if present
-    setuptools_pin="$(printf "%s\n" "$logcat" | grep -oE "setuptools[^[:space:]]*" | sed -n '1p' || true)"
-    # fallback: look for 'setuptools<81' style
-    if [ -n "$setuptools_pin" ]; then
-      # Try to extract a lower bound, e.g. ">=77.0.3"
-      local lb
-      lb="$(printf "%s\n" "$setuptools_pin" | grep -oE ">=([0-9]+(\.[0-9]+){1,2})" | sed -e 's/>=//' | head -n1 || true)"
-      if [ -n "$lb" ]; then
-        setuptools_pin="setuptools==${lb}"
-      else
-        setuptools_pin=""
-      fi
+  logcat="$(sed -n '1,200p' "$logf" || true)"
+  # detect exact setuptools pin
+  local s_exact
+  s_exact="$(printf "%s\n" "$logcat" | grep -oE 'setuptools==[0-9]+(\.[0-9]+){1,2}' | head -n1 || true)"
+  if [[ -n "$s_exact" ]]; then
+    log_info "Pip output requires ${s_exact}; pinning and retrying"
+    run_as_invoker "$pip_bin" install --force-reinstall "$s_exact"
+    # try again with no-build-isolation
+    if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+      log_ok "Installed ${v_spec} after pinning setuptools"
+      rm -f "$logf"
+      return 0
     fi
   fi
 
-  if [ -n "$setuptools_pin" ]; then
-    echo "[INFO] Pip output indicates vllm needs specific setuptools: ${setuptools_pin}. Will pin and retry."
-    # Attempt pin, then reinstall vllm with no-build-isolation fallback
-    if run_as_invoker "$PIP_BIN" install --force-reinstall "${setuptools_pin}"; then
-      echo "[INFO] Pinned ${setuptools_pin} in venv"
-      if run_as_invoker "$PIP_BIN" install --force-reinstall --no-build-isolation "${vllm_spec}" >"$tmpfile" 2>&1; then
-        echo "[INFO] Installed ${vllm_spec} successfully after pinning setuptools."
-        rm -f "$tmpfile"
-        return 0
-      else
-        echo "[ERROR] Retry install after pinning setuptools still failed. See ${tmpfile} for details."
-        cat "$tmpfile" >&2
-        return 2
-      fi
-    else
-      echo "[ERROR] Failed to pin setuptools to ${setuptools_pin}. See ${tmpfile} for details."
-      cat "$tmpfile" >&2
-      return 3
-    fi
-  fi
-
-  # Generic fallback: try again with --no-build-isolation (may work if dependency resolution was build-time only)
-  echo "[INFO] No setuptools pin detected. Retrying with --no-build-isolation..."
-  if run_as_invoker "$PIP_BIN" install --force-reinstall --no-build-isolation "${vllm_spec}" >"$tmpfile" 2>&1; then
-    echo "[INFO] Installed ${vllm_spec} successfully with --no-build-isolation."
-    rm -f "$tmpfile"
+  # 5) Generic fallback: try --no-build-isolation
+  log_info "Retrying with --no-build-isolation..."
+  if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+    log_ok "Installed ${v_spec} with --no-build-isolation"
+    rm -f "$logf"
     return 0
   fi
 
-  # Give up and print logs for debugging
-  echo "[ERROR] vllm install ultimately failed. See $tmpfile for pip output."
-  cat "$tmpfile" >&2
-  return 4
+  # 6) If still failing, show log and return non-zero
+  log_error "vLLM install ultimately failed. Pip output:"
+  cat "$logf" >&2
+  rm -f "$logf"
+  return 2
 }
-# --- End vllm setuptools compatibility helpers ---
+# --- End vllm compatibility and deterministic install helpers ---
 
 install_vllm_packages(){
   local pip="${VENV_PATH}/bin/pip"
   local py="${VENV_PATH}/bin/python"
-  run_as_invoker "$pip" install -U pip setuptools wheel
 
-  if "$py" -c "import torch" >/dev/null 2>&1; then
-    log_info "torch already present in venv; not forcing downgrade/replace"
+  local vllm_install_spec
+  if [[ -n "${VLLM_INSTALL_VERSION}" ]]; then
+    vllm_install_spec="vllm==${VLLM_INSTALL_VERSION}"
   else
-    if [[ "${PLATFORM}" == macos* ]]; then
-      log_step "Installing torch for macOS (${ARCH})"
-      run_as_invoker "$pip" install torch
-      log_warn "macOS vLLM support may be limited; CPU/MPS path selected"
-    elif [[ -n "${GPU_NAME}" ]]; then
-      if [[ "${IS_BLACKWELL}" == true ]]; then
-        log_warn "Detected GB10/Blackwell GPU (${GPU_NAME})"
-        if [[ "${YES_MODE}" == true ]]; then
-          run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
-        else
-          read -r -p "Install nightly torch (cu128) for Blackwell? [Y/n] " ans
-          if [[ -z "${ans}" || "${ans}" =~ ^[Yy]$ ]]; then
-            run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
-          else
-            run_as_invoker "$pip" install torch
-          fi
-        fi
-      else
-        log_step "Installing CUDA torch (stable cu121)"
-        run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cu121
-      fi
-    else
-      log_step "Installing CPU torch"
-      run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cpu
-    fi
+    vllm_install_spec="vllm"
   fi
 
-  if ! "$py" -c "import vllm" >/dev/null 2>&1; then
-    log_step "Installing vLLM"
-    local vllm_install_spec
-    if [[ -n "${VLLM_INSTALL_VERSION}" ]]; then
-      vllm_install_spec="vllm==${VLLM_INSTALL_VERSION}"
-    else
-      vllm_install_spec="vllm"
-    fi
+  # Check whether the compatibility mapping covers this version.
+  # If so, _try_install_vllm_deterministic handles torch+setuptools+vllm.
+  local has_compat=false
+  if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
+    local compat_json
+    compat_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
+    [[ -n "$compat_json" ]] && has_compat=true
+  fi
 
-    if ! try_install_vllm "${vllm_install_spec}"; then
-      echo "[ERROR] vLLM install failed. Aborting installer."
+  if [[ "${has_compat}" == true ]]; then
+    log_step "Installing vLLM ${VLLM_INSTALL_VERSION} via compatibility mapping"
+    if ! _try_install_vllm_deterministic "${vllm_install_spec}"; then
+      log_error "vLLM install failed via compatibility mapping. Aborting."
       exit 1
     fi
-    run_as_invoker "$pip" install uvicorn
+    run_as_invoker "$pip" install uvicorn 2>/dev/null || true
   else
-    log_info "vLLM already installed in ${VENV_PATH}"
+    # No compat mapping: install torch first based on platform/GPU, then vllm.
+    run_as_invoker "$pip" install -U pip setuptools wheel
+
+    if [[ "${DRY_RUN}" != true ]] && "$py" -c "import torch" >/dev/null 2>&1; then
+      log_info "torch already present in venv; not forcing downgrade/replace"
+    else
+      if [[ "${PLATFORM}" == macos* ]]; then
+        log_step "Installing torch for macOS (${ARCH})"
+        run_as_invoker "$pip" install torch
+        log_warn "macOS vLLM support may be limited; CPU/MPS path selected"
+      elif [[ -n "${GPU_NAME}" ]]; then
+        if [[ "${IS_BLACKWELL}" == true ]]; then
+          log_warn "Detected GB10/Blackwell GPU (${GPU_NAME})"
+          log_info "Blackwell GPUs require nightly PyTorch (cu128) for full compatibility"
+          if [[ "${YES_MODE}" == true ]]; then
+            run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+          else
+            read -r -p "Install nightly torch (cu128) for Blackwell? [Y/n] " ans
+            if [[ -z "${ans}" || "${ans}" =~ ^[Yy]$ ]]; then
+              run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+            else
+              log_warn "Using default torch — GPU support may be limited on Blackwell"
+              run_as_invoker "$pip" install torch
+            fi
+          fi
+        else
+          log_step "Installing CUDA torch (stable cu121)"
+          run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cu121
+        fi
+      else
+        log_step "Installing CPU torch"
+        run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cpu
+      fi
+    fi
+
+    if [[ "${DRY_RUN}" != true ]] && "$py" -c "import vllm" >/dev/null 2>&1; then
+      log_info "vLLM already installed in ${VENV_PATH}"
+    else
+      log_step "Installing vLLM"
+      if ! _try_install_vllm_deterministic "${vllm_install_spec}"; then
+        log_error "vLLM install failed. Aborting installer."
+        exit 1
+      fi
+    fi
+    run_as_invoker "$pip" install uvicorn 2>/dev/null || true
   fi
 
   # Post-install verification
-  echo "[STEP] Verifying installed vLLM and dependencies..."
+  log_step "Verifying installed vLLM and dependencies..."
   if [[ "${DRY_RUN}" == true ]]; then
     log_info "[DRY-RUN] Skipping pip check/import verification"
     return 0
   fi
-  run_as_invoker "$VENV_PATH/bin/pip" check || {
-    echo "[ERROR] pip check failed - dependency conflicts detected. Printing 'pip check' output above."
-    run_as_invoker "$VENV_PATH/bin/python" -c "import pkgutil; print('installed pkg list sample:', [m.name for m in pkgutil.iter_modules()][:20])" || true
+  run_as_invoker "${VENV_PATH}/bin/pip" check || {
+    log_error "pip check failed — dependency conflicts detected"
+    run_as_invoker "${VENV_PATH}/bin/python" -c "import pkgutil; print('installed pkg list sample:', [m.name for m in pkgutil.iter_modules()][:20])" || true
     exit 1
   }
 
   # Quick import test
-  if ! run_as_invoker "$VENV_PATH/bin/python" -c "import vllm, torch; print('vllm', getattr(vllm,'__version__','n/a'), 'torch', getattr(torch,'__version__','n/a'))"; then
-    echo "[ERROR] Python import check for vllm/torch failed in venv at ${VENV_PATH}"
+  if ! run_as_invoker "${VENV_PATH}/bin/python" -c "import vllm, torch; print('vllm', getattr(vllm,'__version__','n/a'), 'torch', getattr(torch,'__version__','n/a'))"; then
+    log_error "Python import check for vllm/torch failed in venv at ${VENV_PATH}"
     exit 1
   fi
 }
@@ -525,10 +581,26 @@ uninstall_vllm(){
 
 smoke_checks(){
   [[ "${INSTALL_VLLM}" == false ]] && return 0
-  local py="${VENV_PATH}/bin/python"
   log_step "Running smoke checks"
-  run "$py" -c "import torch, vllm; print(torch.__version__, vllm.__version__)"
-  run "$py" -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    log_info "[DRY-RUN] Would run smoke checks on ${VENV_PATH}"
+    return 0
+  fi
+
+  # Use the full smoke-test script if available
+  local smoke_script="${SCRIPT_DIR}/smoke_test_vllm.sh"
+  if [[ -x "${smoke_script}" ]]; then
+    if ! "${smoke_script}" --venv-path "${VENV_PATH}" --skip-server --skip-generate; then
+      log_error "Smoke tests failed — see output above"
+      exit 1
+    fi
+  else
+    # Inline fallback
+    local py="${VENV_PATH}/bin/python"
+    run "$py" -c "import torch, vllm; print(torch.__version__, vllm.__version__)"
+    run "$py" -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+  fi
 }
 
 main(){
