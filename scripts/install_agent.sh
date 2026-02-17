@@ -24,6 +24,18 @@ LABEL=""
 CENTRAL_URL="http://127.0.0.1:8080"
 VLLM_PORT="8000"
 VLLM_INSTALL_VERSION="${VLLM_INSTALL_VERSION:-}"
+USE_CONDA=false
+
+# Resolved compatibility values (populated by resolve_vllm_compat())
+RESOLVED_VLLM_VER=""
+RESOLVED_TORCH_VER=""
+RESOLVED_TORCHVISION_VER=""
+RESOLVED_TORCHAUDIO_VER=""
+RESOLVED_SETUPTOOLS_VER=""
+RESOLVED_TORCH_INDEX_URL=""
+RESOLVED_TORCH_TAG=""
+RESOLVED_NIGHTLY="false"
+RESOLVED_CONDA_PREFERRED="false"
 
 INVOKER_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 INVOKER_UID="$(id -u "${INVOKER_USER}" 2>/dev/null || id -u)"
@@ -70,7 +82,9 @@ Core options:
   --model-dir PATH            vLLM model dir
   --vllm-version VERSION      Pin vLLM version (e.g. 0.14.1)
   --system                    System-level service defaults (/opt venv)
-  --platform PLATFORM         Override detected platform
+  --platform PLATFORM         Override detected arch-platform (e.g. linux-x86_64)
+  --use-conda                 Use conda/mamba env instead of venv for vLLM
+                              (preferred on aarch64+CUDA where pip wheels may be scarce)
 
 Compatibility options:
   --agent-id ID               agent/config machine id
@@ -79,6 +93,8 @@ Compatibility options:
 
 Environment variables:
   VLLM_INSTALL_VERSION        Same as --vllm-version (CLI flag takes priority)
+  BENCH_RACE_CUDA_VERSION     Override CUDA version detection (e.g. 12.8; useful for testing)
+  BENCH_RACE_ARCH_PLATFORM    Override arch-platform detection (e.g. linux-aarch64)
 USAGE
 }
 
@@ -95,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --vllm-version) VLLM_INSTALL_VERSION="$2"; shift 2 ;;
     --system) SYSTEM_INSTALL=true; shift ;;
     --platform) PLATFORM_OVERRIDE="$2"; shift 2 ;;
+    --use-conda) USE_CONDA=true; shift ;;
     --agent-id) AGENT_ID="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
     --central-url) CENTRAL_URL="$2"; shift 2 ;;
@@ -132,6 +149,24 @@ else
   esac
 fi
 
+# Canonical architecture-specific platform string (linux-x86_64, linux-aarch64, macos-arm64, …)
+# Used by the compat resolver.  Can be overridden via --platform or BENCH_RACE_ARCH_PLATFORM.
+ARCH_PLATFORM="${BENCH_RACE_ARCH_PLATFORM:-}"
+if [[ -z "${ARCH_PLATFORM}" ]]; then
+  if [[ -n "${PLATFORM_OVERRIDE}" ]]; then
+    ARCH_PLATFORM="${PLATFORM_OVERRIDE}"
+  else
+    case "${OS}-${ARCH}" in
+      linux-x86_64)  ARCH_PLATFORM="linux-x86_64" ;;
+      linux-aarch64) ARCH_PLATFORM="linux-aarch64" ;;
+      linux-arm64)   ARCH_PLATFORM="linux-aarch64" ;;
+      darwin-arm64)  ARCH_PLATFORM="macos-arm64" ;;
+      darwin-x86_64) ARCH_PLATFORM="macos-x86_64" ;;
+      *)             ARCH_PLATFORM="${OS}-${ARCH}" ;;
+    esac
+  fi
+fi
+
 GPU_NAME=""
 CUDA_VERSION=""
 CUDA_MAJOR=""
@@ -141,10 +176,16 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   # Parse CUDA toolkit version from nvidia-smi header output (e.g. "CUDA Version: 12.8")
   # Using the header is more reliable than --query-gpu=driver_version for CUDA toolkit ver.
   CUDA_VERSION="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | awk '{print $NF}' | head -n1 || true)"
+fi
+# Allow env var override for testability / headless installs
+if [[ -n "${BENCH_RACE_CUDA_VERSION:-}" ]]; then
+  CUDA_VERSION="${BENCH_RACE_CUDA_VERSION}"
+fi
+if [[ -n "${CUDA_VERSION}" ]]; then
   CUDA_MAJOR="${CUDA_VERSION%%.*}"
-  if echo "${GPU_NAME}" | tr '[:upper:]' '[:lower:]' | grep -Eq 'gb10|blackwell|b100|b200'; then
-    IS_BLACKWELL=true
-  fi
+fi
+if echo "${GPU_NAME}" | tr '[:upper:]' '[:lower:]' | grep -Eq 'gb10|blackwell|b100|b200'; then
+  IS_BLACKWELL=true
 fi
 
 create_or_update_agent_venv(){
@@ -256,6 +297,271 @@ ensure_vllm_venv(){
   fi
 }
 
+# ---------------------------------------------------------------------------
+# resolve_vllm_compat – platform-aware compat resolver
+# Calls scripts/_resolve_compat.py and populates RESOLVED_* globals.
+# Falls back gracefully when the resolver script is absent or fails.
+# ---------------------------------------------------------------------------
+resolve_vllm_compat() {
+  local resolver="${SCRIPT_DIR}/_resolve_compat.py"
+  if [[ ! -f "${resolver}" ]]; then
+    log_warn "Compat resolver not found (${resolver}); skipping platform resolution"
+    return 1
+  fi
+
+  local py
+  py="$("${SCRIPT_DIR}/_python_pick.sh" 2>/dev/null)" || py="python3"
+
+  local resolver_out
+  # Pass detection overrides via env vars so tests can simulate any platform
+  if ! resolver_out="$(BENCH_RACE_ARCH_PLATFORM="${ARCH_PLATFORM}" \
+      BENCH_RACE_CUDA_VERSION="${CUDA_VERSION}" \
+      "$py" "${resolver}" 2>/dev/null)"; then
+    log_warn "Compat resolver returned non-zero for platform=${ARCH_PLATFORM} cuda=${CUDA_VERSION}"
+    return 1
+  fi
+
+  if [[ -z "${resolver_out}" ]]; then
+    log_warn "Compat resolver produced no output for platform=${ARCH_PLATFORM}"
+    return 1
+  fi
+
+  # Parse key=value output into RESOLVED_* globals
+  local key val
+  while IFS='=' read -r key val; do
+    [[ -z "${key}" ]] && continue
+    case "${key}" in
+      vllm)            RESOLVED_VLLM_VER="${val}" ;;
+      torch)           RESOLVED_TORCH_VER="${val}" ;;
+      torchvision)     RESOLVED_TORCHVISION_VER="${val}" ;;
+      torchaudio)      RESOLVED_TORCHAUDIO_VER="${val}" ;;
+      setuptools)      RESOLVED_SETUPTOOLS_VER="${val}" ;;
+      torch_index_url) RESOLVED_TORCH_INDEX_URL="${val}" ;;
+      torch_tag)       RESOLVED_TORCH_TAG="${val}" ;;
+      nightly)         RESOLVED_NIGHTLY="${val}" ;;
+      conda_preferred) RESOLVED_CONDA_PREFERRED="${val}" ;;
+    esac
+  done <<< "${resolver_out}"
+
+  log_info "Resolved compat: vllm=${RESOLVED_VLLM_VER} torch=${RESOLVED_TORCH_VER} tag=${RESOLVED_TORCH_TAG} nightly=${RESOLVED_NIGHTLY}"
+  if [[ "${RESOLVED_CONDA_PREFERRED}" == "true" && "${USE_CONDA}" == false ]]; then
+    log_warn "Compat map recommends --use-conda for ${ARCH_PLATFORM}+CUDA ${CUDA_VERSION} (pip wheel availability may be limited)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _ensure_conda_env – create/reuse a conda env for USE_CONDA=true installs
+# Sets VENV_PATH to the conda env directory so downstream code (pip_bin, py_bin)
+# continues to work unchanged.
+# ---------------------------------------------------------------------------
+_ensure_conda_env() {
+  local env_name="bench-race-vllm"
+  local py_ver="3.11"
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    log_info "[DRY-RUN] Would create/reuse conda env '${env_name}'"
+    VENV_PATH="(conda-env:${env_name})"
+    return 0
+  fi
+
+  local conda_cmd=""
+  if command -v mamba >/dev/null 2>&1; then
+    conda_cmd="mamba"
+  elif command -v conda >/dev/null 2>&1; then
+    conda_cmd="conda"
+  else
+    log_error "--use-conda requested but neither conda nor mamba was found."
+    log_error "Install Miniconda first, for example:"
+    if [[ "${ARCH_PLATFORM}" == "linux-aarch64" ]]; then
+      log_error "  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh"
+      log_error "  bash Miniconda3-latest-Linux-aarch64.sh -b -p \${HOME}/miniconda3"
+    else
+      log_error "  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+      log_error "  bash Miniconda3-latest-Linux-x86_64.sh -b -p \${HOME}/miniconda3"
+    fi
+    log_error "  source \${HOME}/miniconda3/etc/profile.d/conda.sh"
+    log_error "Then re-run the installer with --use-conda."
+    return 1
+  fi
+
+  # Create env if it does not already exist
+  if ! run_as_invoker "${conda_cmd}" env list 2>/dev/null | grep -q "^${env_name}[[:space:]]"; then
+    log_step "Creating conda env '${env_name}' with Python ${py_ver}"
+    run_as_invoker "${conda_cmd}" create -n "${env_name}" "python=${py_ver}" -y
+  else
+    log_info "Conda env '${env_name}' already exists"
+  fi
+
+  # Resolve env path
+  local conda_env_path
+  conda_env_path="$(run_as_invoker "${conda_cmd}" info --envs 2>/dev/null \
+    | grep "^${env_name}[[:space:]]" | awk '{print $NF}' | head -n1 || true)"
+  if [[ -z "${conda_env_path}" ]]; then
+    log_error "Could not determine conda env path for '${env_name}'"
+    return 1
+  fi
+  VENV_PATH="${conda_env_path}"
+  log_ok "Conda env path: ${VENV_PATH}"
+
+  # Install PyTorch via conda for reliable CUDA wheel availability
+  log_step "Installing PyTorch via conda (CUDA ${CUDA_VERSION:-none})"
+  if [[ -n "${CUDA_MAJOR}" ]]; then
+    # Use a concrete cuda version conda package; for Blackwell / CUDA>=13 use 12.8 compat
+    local cuda_pkg
+    if [[ "${IS_BLACKWELL}" == true ]] || [[ "${CUDA_MAJOR}" -ge 13 ]]; then
+      cuda_pkg="pytorch-cuda=12.8"
+    else
+      cuda_pkg="pytorch-cuda=${CUDA_VERSION}"
+    fi
+    run_as_invoker "${conda_cmd}" install -n "${env_name}" \
+      pytorch torchvision torchaudio "${cuda_pkg}" \
+      -c pytorch -c nvidia -y
+  else
+    run_as_invoker "${conda_cmd}" install -n "${env_name}" \
+      pytorch torchvision torchaudio cpuonly \
+      -c pytorch -y
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# _install_torch_from_resolved – install torch/torchvision/torchaudio using
+# the RESOLVED_* globals set by resolve_vllm_compat().
+# ---------------------------------------------------------------------------
+_install_torch_from_resolved() {
+  local pip_bin="${VENV_PATH}/bin/pip"
+
+  if [[ -z "${RESOLVED_TORCH_VER}" ]]; then
+    log_warn "No resolved torch version available; skipping torch pre-install"
+    return 0
+  fi
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    log_info "[DRY-RUN] Would install torch=${RESOLVED_TORCH_VER} tag=${RESOLVED_TORCH_TAG} nightly=${RESOLVED_NIGHTLY}"
+    return 0
+  fi
+
+  local nightly_flag=""
+  [[ "${RESOLVED_NIGHTLY}" == "true" ]] && nightly_flag="--pre"
+
+  if [[ "${RESOLVED_NIGHTLY}" == "true" ]]; then
+    log_info "Installing nightly torch (${RESOLVED_TORCH_TAG}) for ${ARCH_PLATFORM}"
+    # Try exact version first; fall back to latest nightly
+    run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir ${nightly_flag} \
+      "torch==${RESOLVED_TORCH_VER}" \
+      --index-url "${RESOLVED_TORCH_INDEX_URL}" \
+      || run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir ${nightly_flag} torch \
+        --index-url "${RESOLVED_TORCH_INDEX_URL}"
+  elif [[ -n "${RESOLVED_TORCH_INDEX_URL}" ]]; then
+    log_info "Installing torch==${RESOLVED_TORCH_VER} (${RESOLVED_TORCH_TAG})"
+    run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir \
+      "torch==${RESOLVED_TORCH_VER}" \
+      --index-url "${RESOLVED_TORCH_INDEX_URL}" \
+      || run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir \
+        "torch==${RESOLVED_TORCH_VER%%+*}+${RESOLVED_TORCH_TAG}" \
+        --index-url "${RESOLVED_TORCH_INDEX_URL}" \
+      || true
+  else
+    log_info "Installing CPU torch==${RESOLVED_TORCH_VER}"
+    run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir \
+      "torch==${RESOLVED_TORCH_VER}" || true
+  fi
+
+  # torchvision – best effort
+  if [[ -n "${RESOLVED_TORCHVISION_VER}" ]]; then
+    if [[ -n "${RESOLVED_TORCH_INDEX_URL}" ]]; then
+      run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir ${nightly_flag} \
+        "torchvision==${RESOLVED_TORCHVISION_VER}" \
+        --index-url "${RESOLVED_TORCH_INDEX_URL}" 2>/dev/null || true
+    else
+      run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir \
+        "torchvision==${RESOLVED_TORCHVISION_VER}" 2>/dev/null || true
+    fi
+  fi
+
+  # torchaudio – best effort
+  if [[ -n "${RESOLVED_TORCHAUDIO_VER}" ]]; then
+    if [[ -n "${RESOLVED_TORCH_INDEX_URL}" ]]; then
+      run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir ${nightly_flag} \
+        "torchaudio==${RESOLVED_TORCHAUDIO_VER}" \
+        --index-url "${RESOLVED_TORCH_INDEX_URL}" 2>/dev/null || true
+    else
+      run_as_invoker "${pip_bin}" install --force-reinstall --no-cache-dir \
+        "torchaudio==${RESOLVED_TORCHAUDIO_VER}" 2>/dev/null || true
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# _pip_check_with_fixup – run pip check and attempt a setuptools repin when
+# the initial check fails.  Prints full diagnostics and exits on persistent
+# failure so the caller always gets a clear error message.
+# ---------------------------------------------------------------------------
+_pip_check_with_fixup() {
+  local pip_bin="${VENV_PATH}/bin/pip"
+  local py_bin="${VENV_PATH}/bin/python"
+
+  local check_out
+  if check_out="$(run_as_invoker "${pip_bin}" check 2>&1)"; then
+    log_ok "pip check passed"
+    echo "${check_out}"
+    return 0
+  fi
+
+  log_warn "pip check found conflicts:"
+  echo "${check_out}" | head -30 >&2
+
+  # Attempt 1: repin setuptools from resolved compat map
+  if [[ -n "${RESOLVED_SETUPTOOLS_VER}" ]]; then
+    log_info "Attempting fix: pinning setuptools==${RESOLVED_SETUPTOOLS_VER}"
+    run_as_invoker "${pip_bin}" install --force-reinstall \
+      "setuptools==${RESOLVED_SETUPTOOLS_VER}" >/dev/null 2>&1 || true
+    if check_out="$(run_as_invoker "${pip_bin}" check 2>&1)"; then
+      log_ok "pip check passed after setuptools repin to ${RESOLVED_SETUPTOOLS_VER}"
+      echo "${check_out}"
+      return 0
+    fi
+    log_warn "pip check still failing after setuptools repin"
+  fi
+
+  # Attempt 2: look for a setuptools pin in pip error output itself
+  local s_exact
+  s_exact="$(printf "%s\n" "${check_out}" | grep -oE 'setuptools==[0-9]+(\.[0-9]+){1,2}' | head -n1 || true)"
+  if [[ -n "${s_exact}" && "${s_exact}" != "setuptools==${RESOLVED_SETUPTOOLS_VER:-}" ]]; then
+    log_info "pip error suggests ${s_exact}; pinning and retrying"
+    run_as_invoker "${pip_bin}" install --force-reinstall "${s_exact}" >/dev/null 2>&1 || true
+    if check_out="$(run_as_invoker "${pip_bin}" check 2>&1)"; then
+      log_ok "pip check passed after pinning ${s_exact}"
+      echo "${check_out}"
+      return 0
+    fi
+  fi
+
+  # All fixup attempts failed — print full diagnostics
+  log_error "pip check failed — dependency conflicts persist after auto-fix attempts"
+  log_error ""
+  log_error "=== pip check output ==="
+  printf "%s\n" "${check_out}" >&2
+  log_error ""
+  log_error "=== pip list ==="
+  run_as_invoker "${pip_bin}" list --format=columns 2>/dev/null >&2 || true
+  log_error ""
+  log_error "=== package versions ==="
+  run_as_invoker "${py_bin}" -c "
+import torch
+print('torch:', torch.__version__,
+      'cuda:', getattr(torch.version, 'cuda', None),
+      'cuda_available:', torch.cuda.is_available())
+" 2>/dev/null >&2 || true
+  run_as_invoker "${py_bin}" -c "import vllm; print('vllm:', vllm.__version__)" 2>/dev/null >&2 || true
+  log_error ""
+  log_error "Manual fix options:"
+  log_error "  1. Re-run with a pinned vllm version:  --vllm-version <ver>"
+  log_error "  2. On aarch64 with CUDA: re-run with   --use-conda"
+  log_error "  3. Inspect the log at:                 ${VENV_PATH}/install_vllm.log"
+  return 1
+}
+
 # --- Begin vllm compatibility and deterministic install helpers ---
 # Requires: VENV_PATH set, INVOKER_USER/INVOKER_UID set, MODEL_DIR set.
 # Optional: VLLM_INSTALL_VERSION set to '0.14.1' etc.
@@ -288,16 +594,22 @@ _vllm_compat_lookup() {
 # 6) Fails with full pip log
 _try_install_vllm_deterministic() {
   local v_spec="${1:-vllm}"
+  # skip_torch: set to "true" to skip torch pre-install (already done by caller)
+  local skip_torch="${2:-false}"
   local pip_bin="${VENV_PATH}/bin/pip"
   local py_bin="${VENV_PATH}/bin/python"
-  local logf
-  logf="$(mktemp -t vllm_install.XXXXXX)"
+  # Write to a persistent log in the venv for later inspection
+  local logf="${VENV_PATH}/install_vllm.log"
 
   if [[ "${DRY_RUN}" == true ]]; then
     log_info "[DRY-RUN] Would attempt deterministic vLLM install (${v_spec})"
-    rm -f "$logf"
     return 0
   fi
+
+  mkdir -p "$(dirname "${logf}")"
+  # Append run header to persistent log
+  echo "=== vLLM install attempt: $(date) ===" >> "${logf}"
+  echo "spec=${v_spec} skip_torch=${skip_torch} platform=${ARCH_PLATFORM} cuda=${CUDA_VERSION}" >> "${logf}"
 
   # GB10/Blackwell + CUDA>=13 pre-flight check:
   # If the compat map targets cu128 (CUDA 12.8) and we're on CUDA >= 13, warn early.
@@ -322,7 +634,6 @@ _try_install_vllm_deterministic() {
           log_error "To proceed, re-run with --yes, or manually fix:"
           log_error "  ${VENV_PATH}/bin/pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128"
           log_error "  ${VENV_PATH}/bin/pip install --force-reinstall --no-build-isolation ${v_spec}"
-          rm -f "$logf"
           return 2
         fi
         # YES_MODE: step 2 below will use the nightly cu128 index automatically
@@ -335,7 +646,8 @@ _try_install_vllm_deterministic() {
   run_as_invoker "$pip_bin" install --upgrade pip wheel >/dev/null 2>&1 || true
 
   # 2) Pre-pin setuptools and torch from compat map when VLLM_INSTALL_VERSION is set
-  if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
+  #    (skipped if skip_torch=true, meaning caller already did torch install)
+  if [[ "${skip_torch}" != "true" ]] && [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
     local compat_json
     compat_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
     if [[ -n "$compat_json" ]]; then
@@ -368,8 +680,19 @@ _try_install_vllm_deterministic() {
             run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}" --index-url "$t_idx_url" \
               || run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}+${t_tag}" --index-url "$t_idx_url"
           fi
-          # Best-effort torchvision to match torch (non-fatal)
-          run_as_invoker "$pip_bin" install --force-reinstall "torchvision" --index-url "$t_idx_url" 2>/dev/null || true
+          # Best-effort torchvision/torchaudio to match torch (non-fatal)
+          # Prefer resolved version if available
+          local tv_pin tva_pin
+          tv_pin="${RESOLVED_TORCHVISION_VER:-}"
+          tva_pin="${RESOLVED_TORCHAUDIO_VER:-}"
+          if [[ -n "${tv_pin}" ]]; then
+            run_as_invoker "$pip_bin" install --force-reinstall "torchvision==${tv_pin}" --index-url "$t_idx_url" 2>/dev/null || true
+          else
+            run_as_invoker "$pip_bin" install --force-reinstall "torchvision" --index-url "$t_idx_url" 2>/dev/null || true
+          fi
+          if [[ -n "${tva_pin}" ]]; then
+            run_as_invoker "$pip_bin" install --force-reinstall "torchaudio==${tva_pin}" --index-url "$t_idx_url" 2>/dev/null || true
+          fi
         else
           # CPU torch (no CUDA index required)
           log_info "Pinning torch==${t_pin} (cpu) from compatibility mapping"
@@ -382,9 +705,8 @@ _try_install_vllm_deterministic() {
 
   # 3) Normal vllm install attempt
   log_info "Attempting to install ${v_spec} into ${VENV_PATH}"
-  if run_as_invoker "$pip_bin" install "${v_spec}" >"$logf" 2>&1; then
+  if run_as_invoker "$pip_bin" install "${v_spec}" >>"${logf}" 2>&1; then
     log_ok "Installed ${v_spec} successfully"
-    rm -f "$logf"
     return 0
   fi
 
@@ -399,9 +721,8 @@ _try_install_vllm_deterministic() {
   if [[ -n "$s_exact" ]]; then
     log_info "Pip requires ${s_exact}; pinning and retrying with --no-build-isolation"
     run_as_invoker "$pip_bin" install --force-reinstall "$s_exact"
-    if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+    if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"${logf}" 2>&1; then
       log_ok "Installed ${v_spec} after pinning ${s_exact}"
-      rm -f "$logf"
       return 0
     fi
   fi
@@ -440,9 +761,8 @@ _try_install_vllm_deterministic() {
       else
         run_as_invoker "$pip_bin" install --force-reinstall "torch==${torch_required}" || true
       fi
-      if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+      if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"${logf}" 2>&1; then
         log_ok "Installed ${v_spec} after resolving torch mismatch"
-        rm -f "$logf"
         return 0
       fi
     else
@@ -450,23 +770,20 @@ _try_install_vllm_deterministic() {
       log_error "To fix, run the following commands and re-run the installer:"
       log_error "  ${fix_pip} ${fix_cmd}"
       log_error "  ${fix_pip} install --force-reinstall --no-build-isolation ${v_spec}"
-      rm -f "$logf"
       return 2
     fi
   fi
 
   # 5) Generic fallback: try --no-build-isolation
   log_info "Retrying with --no-build-isolation..."
-  if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+  if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"${logf}" 2>&1; then
     log_ok "Installed ${v_spec} with --no-build-isolation"
-    rm -f "$logf"
     return 0
   fi
 
-  # 6) Give up — show full pip log
-  log_error "vLLM install ultimately failed. Pip output:"
-  cat "$logf" >&2
-  rm -f "$logf"
+  # 6) Give up — show log tail and fail
+  log_error "vLLM install ultimately failed. Last 50 lines of ${logf}:"
+  tail -n 50 "${logf}" >&2 || true
   return 2
 }
 # --- End vllm compatibility and deterministic install helpers ---
@@ -475,6 +792,16 @@ install_vllm_packages(){
   local pip="${VENV_PATH}/bin/pip"
   local py="${VENV_PATH}/bin/python"
 
+  # ── Step 1: Run the platform+CUDA resolver to populate RESOLVED_* globals ──
+  resolve_vllm_compat || log_info "Platform resolver unavailable; will fall back to explicit version or auto"
+
+  # ── Step 2: Determine vLLM version to install ──
+  # Resolver result is used only when no explicit --vllm-version was given.
+  if [[ -z "${VLLM_INSTALL_VERSION}" && -n "${RESOLVED_VLLM_VER}" ]]; then
+    VLLM_INSTALL_VERSION="${RESOLVED_VLLM_VER}"
+    log_info "Using resolver-selected vLLM version: ${VLLM_INSTALL_VERSION}"
+  fi
+
   local vllm_install_spec
   if [[ -n "${VLLM_INSTALL_VERSION}" ]]; then
     vllm_install_spec="vllm==${VLLM_INSTALL_VERSION}"
@@ -482,88 +809,118 @@ install_vllm_packages(){
     vllm_install_spec="vllm"
   fi
 
-  # Check whether the compatibility mapping covers this version.
-  # If so, _try_install_vllm_deterministic handles torch+setuptools+vllm.
-  local has_compat=false
+  # ── Step 3: Upgrade pip/wheel only ──
+  run_as_invoker "${pip}" install --upgrade pip wheel >/dev/null 2>&1 || true
+
+  # ── Step 4: Check whether the flat compatibility mapping covers this version ──
+  # If a flat mapping exists it means the caller pinned an explicit version with
+  # a known-good torch/setuptools combo — use the deterministic install path.
+  local has_flat_compat=false
   if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
     local compat_json
     compat_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
-    [[ -n "$compat_json" ]] && has_compat=true
+    [[ -n "${compat_json}" ]] && has_flat_compat=true
   fi
 
-  if [[ "${has_compat}" == true ]]; then
-    log_step "Installing vLLM ${VLLM_INSTALL_VERSION} via compatibility mapping"
-    if ! _try_install_vllm_deterministic "${vllm_install_spec}"; then
-      log_error "vLLM install failed via compatibility mapping. Aborting."
+  if [[ "${has_flat_compat}" == true ]]; then
+    # ── Path A: explicit version with flat compat mapping ──
+    log_step "Installing vLLM ${VLLM_INSTALL_VERSION} via flat compatibility mapping"
+    if ! _try_install_vllm_deterministic "${vllm_install_spec}" "false"; then
+      log_error "vLLM install failed via flat compatibility mapping. Aborting."
       exit 1
     fi
-    run_as_invoker "$pip" install uvicorn 2>/dev/null || true
-  else
-    # No compat mapping: install torch first based on platform/GPU, then vllm.
-    # Only upgrade pip and wheel — do NOT blindly upgrade setuptools
-    run_as_invoker "$pip" install --upgrade pip wheel
 
-    if [[ "${DRY_RUN}" != true ]] && "$py" -c "import torch" >/dev/null 2>&1; then
-      log_info "torch already present in venv; not forcing downgrade/replace"
-    else
-      if [[ "${PLATFORM}" == macos* ]]; then
-        log_step "Installing torch for macOS (${ARCH})"
-        run_as_invoker "$pip" install torch
-        log_warn "macOS vLLM support may be limited; CPU/MPS path selected"
-      elif [[ -n "${GPU_NAME}" ]]; then
-        if [[ "${IS_BLACKWELL}" == true ]]; then
-          log_warn "Detected GB10/Blackwell GPU (${GPU_NAME})"
-          log_info "Blackwell GPUs require nightly PyTorch (cu128) for full compatibility"
-          if [[ "${YES_MODE}" == true ]]; then
-            run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
-          else
-            read -r -p "Install nightly torch (cu128) for Blackwell? [Y/n] " ans
-            if [[ -z "${ans}" || "${ans}" =~ ^[Yy]$ ]]; then
-              run_as_invoker "$pip" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
-            else
-              log_warn "Using default torch — GPU support may be limited on Blackwell"
-              run_as_invoker "$pip" install torch
-            fi
-          fi
-        else
-          log_step "Installing CUDA torch (stable cu121)"
-          run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cu121
-        fi
-      else
-        log_step "Installing CPU torch"
-        run_as_invoker "$pip" install torch --index-url https://download.pytorch.org/whl/cpu
-      fi
+  elif [[ -n "${RESOLVED_TORCH_VER}" ]]; then
+    # ── Path B: resolved from platform_mappings — install torch first, then vllm ──
+    log_step "Installing vLLM via platform compat resolver (${ARCH_PLATFORM}, CUDA ${CUDA_VERSION:-none})"
+
+    # Pre-pin setuptools
+    if [[ -n "${RESOLVED_SETUPTOOLS_VER}" ]]; then
+      log_info "Pinning setuptools==${RESOLVED_SETUPTOOLS_VER} (resolved)"
+      run_as_invoker "${pip}" install --force-reinstall "setuptools==${RESOLVED_SETUPTOOLS_VER}" || true
     fi
 
-    if [[ "${DRY_RUN}" != true ]] && "$py" -c "import vllm" >/dev/null 2>&1; then
+    # Install torch/torchvision/torchaudio
+    _install_torch_from_resolved
+
+    # Install vLLM (torch already present — skip torch pre-install inside helper)
+    if [[ "${DRY_RUN}" != true ]] && "${py}" -c "import vllm" >/dev/null 2>&1; then
       log_info "vLLM already installed in ${VENV_PATH}"
     else
-      log_step "Installing vLLM"
-      if ! _try_install_vllm_deterministic "${vllm_install_spec}"; then
+      log_step "Installing ${vllm_install_spec}"
+      if ! _try_install_vllm_deterministic "${vllm_install_spec}" "true"; then
         log_error "vLLM install failed. Aborting installer."
         exit 1
       fi
     fi
-    run_as_invoker "$pip" install uvicorn 2>/dev/null || true
+
+  else
+    # ── Path C: no mapping at all — platform-heuristic fallback ──
+    log_warn "No compat mapping found; falling back to platform heuristics"
+
+    if [[ "${DRY_RUN}" != true ]] && "${py}" -c "import torch" >/dev/null 2>&1; then
+      log_info "torch already present in venv; not forcing downgrade/replace"
+    else
+      if [[ "${PLATFORM}" == macos* ]]; then
+        log_step "Installing torch for macOS (${ARCH})"
+        run_as_invoker "${pip}" install torch
+        log_warn "macOS vLLM support may be limited; CPU/MPS path selected"
+      elif [[ "${IS_BLACKWELL}" == true ]]; then
+        log_warn "Detected GB10/Blackwell GPU (${GPU_NAME:-unknown})"
+        log_info "Blackwell requires nightly PyTorch (cu128)"
+        if [[ "${YES_MODE}" == true ]]; then
+          run_as_invoker "${pip}" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+        else
+          read -r -p "Install nightly torch (cu128) for Blackwell? [Y/n] " ans
+          if [[ -z "${ans}" || "${ans}" =~ ^[Yy]$ ]]; then
+            run_as_invoker "${pip}" install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+          else
+            log_warn "Using default torch — GPU support may be limited on Blackwell"
+            run_as_invoker "${pip}" install torch
+          fi
+        fi
+      elif [[ -n "${CUDA_VERSION}" ]]; then
+        log_step "Installing CUDA torch (cu121 stable)"
+        run_as_invoker "${pip}" install torch --index-url https://download.pytorch.org/whl/cu121
+      else
+        log_step "Installing CPU torch"
+        run_as_invoker "${pip}" install torch --index-url https://download.pytorch.org/whl/cpu
+      fi
+    fi
+
+    if [[ "${DRY_RUN}" != true ]] && "${py}" -c "import vllm" >/dev/null 2>&1; then
+      log_info "vLLM already installed in ${VENV_PATH}"
+    else
+      log_step "Installing vLLM"
+      if ! _try_install_vllm_deterministic "${vllm_install_spec}" "true"; then
+        log_error "vLLM install failed. Aborting installer."
+        exit 1
+      fi
+    fi
   fi
 
-  # Post-install verification
+  # ── Step 5: Install uvicorn and minor runtime deps ──
+  run_as_invoker "${pip}" install uvicorn 2>/dev/null || true
+
+  # ── Step 6: Post-install verification ──
   log_step "Verifying installed vLLM and dependencies..."
   if [[ "${DRY_RUN}" == true ]]; then
     log_info "[DRY-RUN] Skipping pip check/import verification"
     return 0
   fi
-  run_as_invoker "${VENV_PATH}/bin/pip" check || {
-    log_error "pip check failed — dependency conflicts detected"
-    run_as_invoker "${VENV_PATH}/bin/python" -c "import pkgutil; print('installed pkg list sample:', [m.name for m in pkgutil.iter_modules()][:20])" || true
-    exit 1
-  }
 
-  # Quick import test
-  if ! run_as_invoker "${VENV_PATH}/bin/python" -c "import vllm, torch; print('vllm', getattr(vllm,'__version__','n/a'), 'torch', getattr(torch,'__version__','n/a'))"; then
-    log_error "Python import check for vllm/torch failed in venv at ${VENV_PATH}"
-    exit 1
-  fi
+  # pip check with auto-fixup (setuptools repin + full diagnostics on failure)
+  _pip_check_with_fixup || exit 1
+
+  # Import verification + version report
+  log_step "Import verification"
+  run_as_invoker "${VENV_PATH}/bin/python" - <<'PY'
+import torch, vllm
+print("torch", torch.__version__,
+      "cuda", getattr(torch.version, "cuda", None),
+      "cuda_available", torch.cuda.is_available())
+print("vllm", vllm.__version__)
+PY
 }
 
 install_vllm_service(){
@@ -584,6 +941,9 @@ Type=simple
 User=${INVOKER_USER}
 Group=$(id -gn "${INVOKER_USER}")
 Environment=HF_HOME=${MODEL_DIR}
+Environment=VLLM_VERSION=${VLLM_INSTALL_VERSION:-auto}
+Environment=TORCH_VERSION=${RESOLVED_TORCH_VER:-auto}
+Environment=BENCH_RACE_ARCH_PLATFORM=${ARCH_PLATFORM}
 ExecStart=${cmd}
 Restart=always
 RestartSec=3
@@ -604,6 +964,9 @@ After=default.target
 [Service]
 Type=simple
 Environment=HF_HOME=${MODEL_DIR}
+Environment=VLLM_VERSION=${VLLM_INSTALL_VERSION:-auto}
+Environment=TORCH_VERSION=${RESOLVED_TORCH_VER:-auto}
+Environment=BENCH_RACE_ARCH_PLATFORM=${ARCH_PLATFORM}
 ExecStart=${cmd}
 Restart=always
 RestartSec=3
@@ -629,7 +992,7 @@ UNIT"
 <plist version=\"1.0\"><dict>
 <key>Label</key><string>com.bench-race.vllm</string>
 <key>ProgramArguments</key><array><string>${VENV_PATH}/bin/python</string><string>-m</string><string>vllm.entrypoints.openai.api_server</string><string>--host</string><string>127.0.0.1</string><string>--port</string><string>${VLLM_PORT}</string><string>--download-dir</string><string>${MODEL_DIR}</string></array>
-<key>EnvironmentVariables</key><dict><key>HF_HOME</key><string>${MODEL_DIR}</string></dict>
+<key>EnvironmentVariables</key><dict><key>HF_HOME</key><string>${MODEL_DIR}</string><key>VLLM_VERSION</key><string>${VLLM_INSTALL_VERSION:-auto}</string><key>TORCH_VERSION</key><string>${RESOLVED_TORCH_VER:-auto}</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST"
@@ -644,7 +1007,7 @@ PLIST"
 <plist version=\"1.0\"><dict>
 <key>Label</key><string>com.bench-race.vllm</string>
 <key>ProgramArguments</key><array><string>${VENV_PATH}/bin/python</string><string>-m</string><string>vllm.entrypoints.openai.api_server</string><string>--host</string><string>127.0.0.1</string><string>--port</string><string>${VLLM_PORT}</string><string>--download-dir</string><string>${MODEL_DIR}</string></array>
-<key>EnvironmentVariables</key><dict><key>HF_HOME</key><string>${MODEL_DIR}</string></dict>
+<key>EnvironmentVariables</key><dict><key>HF_HOME</key><string>${MODEL_DIR}</string><key>VLLM_VERSION</key><string>${VLLM_INSTALL_VERSION:-auto}</string><key>TORCH_VERSION</key><string>${RESOLVED_TORCH_VER:-auto}</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST"
@@ -699,7 +1062,7 @@ smoke_checks(){
 }
 
 main(){
-  log_info "Platform=${PLATFORM} arch=${ARCH} gpu='${GPU_NAME:-none}'"
+  log_info "Platform=${PLATFORM} arch_platform=${ARCH_PLATFORM} arch=${ARCH} cuda=${CUDA_VERSION:-none} gpu='${GPU_NAME:-none}' blackwell=${IS_BLACKWELL}"
   create_or_update_agent_venv
   write_agent_config_if_missing
 
@@ -709,7 +1072,12 @@ main(){
   fi
 
   if [[ "${INSTALL_VLLM}" == true ]]; then
-    ensure_vllm_venv
+    if [[ "${USE_CONDA}" == true ]]; then
+      log_step "Conda mode: setting up conda env instead of venv"
+      _ensure_conda_env || exit 1
+    else
+      ensure_vllm_venv
+    fi
     install_vllm_packages
     ensure_vllm_config_block
     install_vllm_service
