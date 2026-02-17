@@ -1,5 +1,10 @@
 {
   "description": "vLLM -> recommended setuptools & torch mapping for installer automation (maintainers update as needed)",
+  "meta": {
+    "auto_strategy": "prefer-vllm-pins",
+    "auto_notes": "Let vllm pull in its preferred torch; only pre-pin setuptools if needed",
+    "schema_version": 2
+  },
   "mappings": {
     "0.14.1": {
       "setuptools": "77.0.3",
@@ -15,13 +20,139 @@
       "torch_tag": "cu128",
       "notes": "Requires CUDA 12.8 driver; use nightly index on GB10/Blackwell (CUDA >= 13)"
     },
-    "auto": {
-      "strategy": "prefer-vllm-pins",
-      "notes": "Let vllm pull in its preferred torch; only pre-pin setuptools if needed"
+    "0.6.6.post1": {
+      "setuptools": "77.0.3",
+      "torch": "2.5.1",
+      "torch_index_url": "https://download.pytorch.org/whl/cu121",
+      "torch_tag": "cu121",
+      "notes": "Stable CUDA 12.1 release for x86_64; widely available wheels"
     }
   },
   "defaults": {
     "setuptools": null,
     "torch": null
+  },
+  "platform_mappings": {
+    "linux-x86_64": [
+      {
+        "cuda_min": "13.0",
+        "nightly": true,
+        "torch_index_url": "https://download.pytorch.org/whl/nightly/cu128",
+        "torch_tag": "cu128",
+        "torch": "2.10.0",
+        "torchvision": "0.25.0",
+        "torchaudio": "2.10.0",
+        "vllm": "0.16.0",
+        "setuptools": "77.0.3",
+        "notes": "GB10/Blackwell CUDA>=13 on x86_64; nightly cu128 index required"
+      },
+      {
+        "cuda_min": "12.8",
+        "nightly": false,
+        "torch_index_url": "https://download.pytorch.org/whl/cu128",
+        "torch_tag": "cu128",
+        "torch": "2.9.1",
+        "torchvision": "0.24.1",
+        "torchaudio": "2.9.1",
+        "vllm": "0.15.1",
+        "setuptools": "77.0.3",
+        "notes": "CUDA 12.8 on x86_64; stable cu128 wheels available"
+      },
+      {
+        "cuda_min": "12.1",
+        "nightly": false,
+        "torch_index_url": "https://download.pytorch.org/whl/cu121",
+        "torch_tag": "cu121",
+        "torch": "2.5.1",
+        "torchvision": "0.20.1",
+        "torchaudio": "2.5.1",
+        "vllm": "0.6.6.post1",
+        "setuptools": "77.0.3",
+        "notes": "Stable CUDA 12.1 on x86_64"
+      },
+      {
+        "cuda_min": null,
+        "nightly": false,
+        "torch_index_url": "https://download.pytorch.org/whl/cpu",
+        "torch_tag": "cpu",
+        "torch": "2.9.1",
+        "torchvision": null,
+        "torchaudio": null,
+        "vllm": "0.14.1",
+        "setuptools": "77.0.3",
+        "notes": "CPU-only fallback for x86_64"
+      }
+    ],
+    "linux-aarch64": [
+      {
+        "cuda_min": "13.0",
+        "nightly": true,
+        "torch_index_url": "https://download.pytorch.org/whl/nightly/cu128",
+        "torch_tag": "cu128",
+        "torch": "2.10.0",
+        "torchvision": null,
+        "torchaudio": null,
+        "vllm": "0.16.0",
+        "setuptools": "77.0.3",
+        "conda_preferred": true,
+        "notes": "GB10/Blackwell aarch64 CUDA>=13; nightly cu128 index. Consider --use-conda for reliable wheel availability."
+      },
+      {
+        "cuda_min": "12.8",
+        "nightly": true,
+        "torch_index_url": "https://download.pytorch.org/whl/nightly/cu128",
+        "torch_tag": "cu128",
+        "torch": "2.9.1",
+        "torchvision": null,
+        "torchaudio": null,
+        "vllm": "0.15.1",
+        "setuptools": "77.0.3",
+        "conda_preferred": true,
+        "notes": "aarch64 CUDA 12.8; nightly cu128 index (stable index may lack aarch64 wheels). Consider --use-conda."
+      },
+      {
+        "cuda_min": null,
+        "nightly": false,
+        "torch_index_url": null,
+        "torch_tag": "cpu",
+        "torch": "2.9.1",
+        "torchvision": null,
+        "torchaudio": null,
+        "vllm": "0.14.1",
+        "setuptools": "77.0.3",
+        "conda_preferred": false,
+        "notes": "CPU-only fallback for aarch64"
+      }
+    ],
+    "macos-arm64": [
+      {
+        "cuda_min": null,
+        "nightly": false,
+        "torch_index_url": null,
+        "torch_tag": "cpu",
+        "torch": "2.9.1",
+        "torchvision": "0.24.1",
+        "torchaudio": "2.9.1",
+        "vllm": "0.14.1",
+        "setuptools": "77.0.3",
+        "conda_preferred": false,
+        "notes": "macOS Apple Silicon; CPU/MPS path"
+      }
+    ],
+    "macos-x86_64": [
+      {
+        "cuda_min": null,
+        "nightly": false,
+        "torch_index_url": null,
+        "torch_tag": "cpu",
+        "torch": "2.9.1",
+        "torchvision": "0.24.1",
+        "torchaudio": "2.9.1",
+        "vllm": "0.14.1",
+        "setuptools": "77.0.3",
+        "conda_preferred": false,
+        "notes": "macOS Intel; CPU path"
+      }
+    ]
   }
 }
