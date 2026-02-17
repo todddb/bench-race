@@ -5,11 +5,15 @@ on:
     branches: [ main, master, develop ]
     paths:
       - 'scripts/install_*.sh'
+      - 'scripts/smoke_test_vllm.sh'
+      - 'scripts/vllm_compat.json'
       - '.github/workflows/installer-checks.yml'
   pull_request:
     branches: [ main, master, develop ]
     paths:
       - 'scripts/install_*.sh'
+      - 'scripts/smoke_test_vllm.sh'
+      - 'scripts/vllm_compat.json'
       - '.github/workflows/installer-checks.yml'
 
 jobs:
@@ -61,6 +65,42 @@ jobs:
       - name: Dry run install_central.sh
         run: |
           bash scripts/install_central.sh --dry-run --yes
+
+  vllm-compat:
+    name: vLLM Compat Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify vllm_compat.json exists
+        run: test -f scripts/vllm_compat.json
+
+      - name: Validate vllm_compat.json is valid JSON
+        run: python3 -m json.tool scripts/vllm_compat.json >/dev/null
+
+      - name: Check vllm_compat.json has at least one mapping
+        run: |
+          python3 -c "
+          import json, sys
+          with open('scripts/vllm_compat.json') as f:
+              data = json.load(f)
+          mappings = data.get('mappings', {})
+          assert len(mappings) > 0, 'vllm_compat.json must have at least one mapping entry'
+          for ver, m in mappings.items():
+              assert 'setuptools' in m, f'mapping {ver} missing setuptools key'
+              assert 'torch' in m, f'mapping {ver} missing torch key'
+              print(f'  OK: {ver} -> setuptools={m[\"setuptools\"]}, torch={m[\"torch\"]}')
+          print(f'{len(mappings)} mapping(s) validated')
+          "
+
+      - name: Verify deterministic install helpers present
+        run: |
+          grep -q '_vllm_compat_lookup' scripts/install_agent.sh
+          grep -q '_try_install_vllm_deterministic' scripts/install_agent.sh
+
+      - name: Check smoke_test_vllm.sh syntax
+        run: bash -n scripts/smoke_test_vllm.sh
 
   macos-syntax:
     name: macOS Compatibility Check

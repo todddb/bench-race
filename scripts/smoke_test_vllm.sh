@@ -131,10 +131,41 @@ else
 fi
 
 # ------------------------------------------------------------------
-# Test 5: vLLM imports
+# Test 5: setuptools version (informational)
+# ------------------------------------------------------------------
+SETUPTOOLS_VER=$("$PYTHON" -c "import setuptools; print(setuptools.__version__)" 2>/dev/null || echo "unknown")
+TOTAL=$((TOTAL + 1))
+PASSED=$((PASSED + 1))
+pass "setuptools version: $SETUPTOOLS_VER"
+
+# ------------------------------------------------------------------
+# Test 6: vLLM imports
 # ------------------------------------------------------------------
 run_test "torch + vLLM import versions" "$PYTHON" -c "import torch, vllm; print(torch.__version__, vllm.__version__)" 2>/dev/null
 run_test "torch cuda probe" "$PYTHON" -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)" 2>/dev/null
+
+# ------------------------------------------------------------------
+# Test 6b: vllm_compat.json consistency (if file exists)
+# ------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPAT_FILE="${SCRIPT_DIR}/vllm_compat.json"
+if [[ -f "$COMPAT_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    VLLM_VER=$("$PYTHON" -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "")
+    if [[ -n "$VLLM_VER" ]]; then
+        MAPPED=$(jq -r --arg v "$VLLM_VER" '.mappings[$v] // empty' "$COMPAT_FILE" 2>/dev/null || true)
+        if [[ -n "$MAPPED" ]]; then
+            TOTAL=$((TOTAL + 1))
+            PASSED=$((PASSED + 1))
+            pass "vllm_compat.json has mapping for installed vLLM ${VLLM_VER}"
+        else
+            TOTAL=$((TOTAL + 1))
+            info "vllm_compat.json has no mapping for vLLM ${VLLM_VER} (not an error)"
+            SKIPPED=$((SKIPPED + 1))
+        fi
+    fi
+else
+    skip_test "vllm_compat.json consistency (file or jq not available)"
+fi
 
 # ------------------------------------------------------------------
 # Test 6: vLLM server healthcheck

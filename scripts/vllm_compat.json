@@ -1,0 +1,21 @@
+{
+  "description": "vLLM -> recommended setuptools & torch mapping for installer automation (maintainers update as needed)",
+  "mappings": {
+    "0.14.1": {
+      "setuptools": "77.0.3",
+      "torch": "2.9.1",
+      "torch_cuda_tag": "cu128",
+      "notes": "stable for macOS arm64 and many linux CUDA builds"
+    },
+    "0.15.1": {
+      "setuptools": "70.2.0",
+      "torch": "2.9.1",
+      "torch_cuda_tag": "cpu-or-cu128",
+      "notes": "example mapping; adjust when vLLM publishes new pins"
+    }
+  },
+  "defaults": {
+    "setuptools": null,
+    "torch": null
+  }
+}
