@@ -14,6 +14,7 @@
 #   --gpu-required        Fail if GPU is not available
 #   --skip-server         Skip vLLM server tests (import-only)
 #   --skip-generate       Skip token generation test
+#   --check-compat FILE   Verify installed packages match a vllm_compat.json mapping file
 
 set -euo pipefail
 
@@ -36,6 +37,7 @@ AGENT_URL="http://127.0.0.1:9001"
 GPU_REQUIRED=false
 SKIP_SERVER=false
 SKIP_GENERATE=false
+CHECK_COMPAT_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --gpu-required)    GPU_REQUIRED=true; shift ;;
         --skip-server)     SKIP_SERVER=true; shift ;;
         --skip-generate)   SKIP_GENERATE=true; shift ;;
+        --check-compat)    CHECK_COMPAT_FILE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --venv-path PATH     vLLM venv path"
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --gpu-required       Fail if no GPU"
             echo "  --skip-server        Skip server tests"
             echo "  --skip-generate      Skip generation test"
+            echo "  --check-compat FILE  Verify installed packages match vllm_compat.json"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -239,6 +243,51 @@ else
     skip_test "vLLM server healthcheck (--skip-server)"
     skip_test "vLLM model listing (--skip-server)"
     skip_test "Token generation (--skip-server)"
+fi
+
+# ------------------------------------------------------------------
+# Test 8b: Explicit compat-map pin verification (--check-compat FILE)
+# Validates that setuptools and torch versions in the venv match the
+# pins recorded in vllm_compat.json for the installed vLLM version.
+# ------------------------------------------------------------------
+if [[ -n "$CHECK_COMPAT_FILE" ]]; then
+    if [[ ! -f "$CHECK_COMPAT_FILE" ]]; then
+        fail "compat file not found: $CHECK_COMPAT_FILE"
+        FAILURES=$((FAILURES + 1))
+        TOTAL=$((TOTAL + 1))
+    elif ! command -v jq >/dev/null 2>&1; then
+        skip_test "compat pin check (jq not available)"
+    else
+        INSTALLED_VLLM=$("$PYTHON" -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "")
+        if [[ -z "$INSTALLED_VLLM" ]]; then
+            skip_test "compat pin check (vLLM not installed)"
+        else
+            COMPAT_ENTRY=$(jq -r --arg v "$INSTALLED_VLLM" '.mappings[$v] // empty' "$CHECK_COMPAT_FILE" 2>/dev/null || true)
+            if [[ -z "$COMPAT_ENTRY" ]]; then
+                TOTAL=$((TOTAL + 1))
+                SKIPPED=$((SKIPPED + 1))
+                info "compat pin check: no mapping for vLLM ${INSTALLED_VLLM} in ${CHECK_COMPAT_FILE}"
+            else
+                # Check setuptools pin
+                EXP_ST=$(printf "%s\n" "$COMPAT_ENTRY" | jq -r '.setuptools // empty' 2>/dev/null || true)
+                if [[ -n "$EXP_ST" ]]; then
+                    ACT_ST=$("$PYTHON" -c "import setuptools; print(setuptools.__version__)" 2>/dev/null || echo "unknown")
+                    run_test "setuptools pin matches compat map (expected ${EXP_ST}, got ${ACT_ST})" \
+                        bash -c "[[ '${ACT_ST}' == '${EXP_ST}' ]]"
+                fi
+                # Check torch pin (compare base version without +cu suffix for flexibility)
+                EXP_T=$(printf "%s\n" "$COMPAT_ENTRY" | jq -r '.torch // empty' 2>/dev/null || true)
+                if [[ -n "$EXP_T" ]]; then
+                    ACT_T=$("$PYTHON" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+                    # Strip +local suffix for comparison (e.g. 2.9.1+cu128 -> 2.9.1)
+                    EXP_T_BASE="${EXP_T%%+*}"
+                    ACT_T_BASE="${ACT_T%%+*}"
+                    run_test "torch base version matches compat map (expected ${EXP_T_BASE}, got ${ACT_T_BASE})" \
+                        bash -c "[[ '${ACT_T_BASE}' == '${EXP_T_BASE}' ]]"
+                fi
+            fi
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------------

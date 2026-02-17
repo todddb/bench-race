@@ -134,10 +134,14 @@ fi
 
 GPU_NAME=""
 CUDA_VERSION=""
+CUDA_MAJOR=""
 IS_BLACKWELL=false
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || true)"
-  CUDA_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 || true)"
+  # Parse CUDA toolkit version from nvidia-smi header output (e.g. "CUDA Version: 12.8")
+  # Using the header is more reliable than --query-gpu=driver_version for CUDA toolkit ver.
+  CUDA_VERSION="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | awk '{print $NF}' | head -n1 || true)"
+  CUDA_MAJOR="${CUDA_VERSION%%.*}"
   if echo "${GPU_NAME}" | tr '[:upper:]' '[:lower:]' | grep -Eq 'gb10|blackwell|b100|b200'; then
     IS_BLACKWELL=true
   fi
@@ -150,7 +154,8 @@ create_or_update_agent_venv(){
   if [[ ! -d "${REPO_ROOT}/agent/.venv" ]]; then
     run "$py" -m venv "${REPO_ROOT}/agent/.venv"
   fi
-  run "${REPO_ROOT}/agent/.venv/bin/python" -m pip install -U pip setuptools wheel
+  # Only upgrade pip and wheel — leave setuptools at its installed version unless pinned
+  run "${REPO_ROOT}/agent/.venv/bin/python" -m pip install --upgrade pip wheel
   run "${REPO_ROOT}/agent/.venv/bin/python" -m pip install -r "${REPO_ROOT}/agent/requirements.txt"
 }
 
@@ -273,12 +278,14 @@ _vllm_compat_lookup() {
 }
 
 # Deterministic vLLM install routine.
-# 1) Upgrades pip/wheel
-# 2) If compat mapping exists, pre-pins setuptools & torch
-# 3) Tries normal pip install
-# 4) Parses pip output for setuptools pins and retries
+# 1) Upgrades pip/wheel (NOT setuptools blindly)
+# 2) GB10/Blackwell pre-flight: warn early when CUDA>=13 and compat map targets cu128
+# 3) If compat mapping exists, pre-pins setuptools & torch before vllm install
+# 4) Tries normal pip install; on failure parses output for:
+#    a) setuptools pin requirement -> pins and retries with --no-build-isolation
+#    b) torch version mismatch -> downgrades torch (--yes) or prints fix commands
 # 5) Falls back to --no-build-isolation
-# 6) Fails with log output
+# 6) Fails with full pip log
 _try_install_vllm_deterministic() {
   local v_spec="${1:-vllm}"
   local pip_bin="${VENV_PATH}/bin/pip"
@@ -292,50 +299,88 @@ _try_install_vllm_deterministic() {
     return 0
   fi
 
-  # 1) Ensure pip/setuptools/wheel up-to-date as first step
+  # GB10/Blackwell + CUDA>=13 pre-flight check:
+  # If the compat map targets cu128 (CUDA 12.8) and we're on CUDA >= 13, warn early.
+  # Without --yes we bail with copy-pasteable fix commands so the user can act.
+  if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
+    local _pf_json
+    _pf_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
+    if [[ -n "$_pf_json" ]]; then
+      local _pf_tag _pf_torch
+      _pf_tag="$(printf "%s\n" "$_pf_json" | jq -r '.torch_tag // .torch_cuda_tag // empty' 2>/dev/null || true)"
+      _pf_torch="$(printf "%s\n" "$_pf_json" | jq -r '.torch // empty' 2>/dev/null || true)"
+      # Check: compat says cu128 AND we are on CUDA>=13 or known Blackwell GPU
+      if [[ "${_pf_tag}" == "cu128" ]] && \
+         { [[ "${IS_BLACKWELL}" == true ]] || { [[ -n "${CUDA_MAJOR}" ]] && [[ "${CUDA_MAJOR}" -ge 13 ]]; }; }; then
+        local _cur_torch
+        _cur_torch="$("$py_bin" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "not installed")"
+        if [[ "${YES_MODE}" == false ]]; then
+          log_error "GB10/Blackwell compatibility notice:"
+          log_error "  vLLM ${VLLM_INSTALL_VERSION} requires torch ${_pf_torch} (cu128)"
+          log_error "  Detected CUDA ${CUDA_VERSION:-unknown} | existing torch: ${_cur_torch}"
+          log_error ""
+          log_error "To proceed, re-run with --yes, or manually fix:"
+          log_error "  ${VENV_PATH}/bin/pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128"
+          log_error "  ${VENV_PATH}/bin/pip install --force-reinstall --no-build-isolation ${v_spec}"
+          rm -f "$logf"
+          return 2
+        fi
+        # YES_MODE: step 2 below will use the nightly cu128 index automatically
+        log_warn "GB10/Blackwell: CUDA ${CUDA_VERSION} detected; will install cu128 nightly torch for vLLM ${VLLM_INSTALL_VERSION}"
+      fi
+    fi
+  fi
+
+  # 1) Upgrade pip and wheel only — do NOT blindly upgrade setuptools
   run_as_invoker "$pip_bin" install --upgrade pip wheel >/dev/null 2>&1 || true
 
-  # 2) If mapping exists for user-specified VLLM_INSTALL_VERSION, pre-pin setuptools & torch
+  # 2) Pre-pin setuptools and torch from compat map when VLLM_INSTALL_VERSION is set
   if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
     local compat_json
     compat_json="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
     if [[ -n "$compat_json" ]]; then
       log_info "Using compatibility mapping for vLLM ${VLLM_INSTALL_VERSION}"
-      # extract pin values if present
-      local s_pin t_pin t_tag
+      local s_pin t_pin t_tag t_idx_url
       s_pin="$(printf "%s\n" "$compat_json" | jq -r '.setuptools // empty' 2>/dev/null || true)"
       t_pin="$(printf "%s\n" "$compat_json" | jq -r '.torch // empty' 2>/dev/null || true)"
-      t_tag="$(printf "%s\n" "$compat_json" | jq -r '.torch_cuda_tag // empty' 2>/dev/null || true)"
+      # Support both torch_tag (current) and torch_cuda_tag (legacy field name)
+      t_tag="$(printf "%s\n" "$compat_json" | jq -r '.torch_tag // .torch_cuda_tag // empty' 2>/dev/null || true)"
+      # Prefer explicit torch_index_url from the map; derive from tag as fallback
+      t_idx_url="$(printf "%s\n" "$compat_json" | jq -r '.torch_index_url // empty' 2>/dev/null || true)"
+      [[ -z "$t_idx_url" && "${t_tag}" =~ cu[0-9]+ ]] && t_idx_url="https://download.pytorch.org/whl/${t_tag}"
+
       if [[ -n "$s_pin" ]]; then
         log_info "Pinning setuptools==${s_pin} from compatibility mapping"
         run_as_invoker "$pip_bin" install --force-reinstall "setuptools==${s_pin}"
       fi
+
       if [[ -n "$t_pin" ]]; then
-        # install torch first (choose index-url if cuda tag present)
         if [[ "${t_tag}" =~ cu[0-9]+ ]]; then
-          local idx_url="https://download.pytorch.org/whl/${t_tag}"
-          # For Blackwell/GB10, prefer nightly index for cu128
-          if [[ "${IS_BLACKWELL}" == true && "${t_tag}" == "cu128" ]]; then
-            idx_url="https://download.pytorch.org/whl/nightly/cu128"
+          # For GB10/Blackwell or CUDA>=13 + cu128 target: switch to nightly index
+          if [[ "${t_tag}" == "cu128" ]] && \
+             { [[ "${IS_BLACKWELL}" == true ]] || { [[ -n "${CUDA_MAJOR}" ]] && [[ "${CUDA_MAJOR}" -ge 13 ]]; }; }; then
+            t_idx_url="https://download.pytorch.org/whl/nightly/cu128"
             log_info "GB10/Blackwell detected: using nightly PyTorch index for cu128"
-            run_as_invoker "$pip_bin" install --force-reinstall --pre "torch==${t_pin}" --index-url "$idx_url" \
-              || run_as_invoker "$pip_bin" install --force-reinstall --pre torch --index-url "$idx_url"
+            run_as_invoker "$pip_bin" install --force-reinstall --pre "torch==${t_pin}" --index-url "$t_idx_url" \
+              || run_as_invoker "$pip_bin" install --force-reinstall --pre torch --index-url "$t_idx_url"
           else
-            log_info "Pinning torch==${t_pin}+${t_tag} from compatibility mapping"
-            run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}+${t_tag}" --index-url "$idx_url" \
-              || run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}" --index-url "$idx_url"
+            log_info "Pinning torch==${t_pin} (${t_tag}) from compatibility mapping"
+            run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}" --index-url "$t_idx_url" \
+              || run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}+${t_tag}" --index-url "$t_idx_url"
           fi
-          # try matching torchvision/torchaudio if necessary (best-effort)
-          run_as_invoker "$pip_bin" install --force-reinstall "torchvision" --index-url "$idx_url" 2>/dev/null || true
+          # Best-effort torchvision to match torch (non-fatal)
+          run_as_invoker "$pip_bin" install --force-reinstall "torchvision" --index-url "$t_idx_url" 2>/dev/null || true
         else
-          log_info "Pinning torch==${t_pin} from compatibility mapping"
-          run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}"
+          # CPU torch (no CUDA index required)
+          log_info "Pinning torch==${t_pin} (cpu) from compatibility mapping"
+          run_as_invoker "$pip_bin" install --force-reinstall "torch==${t_pin}" 2>/dev/null \
+            || run_as_invoker "$pip_bin" install --force-reinstall torch || true
         fi
       fi
     fi
   fi
 
-  # 3) Normal attempt to install vllm
+  # 3) Normal vllm install attempt
   log_info "Attempting to install ${v_spec} into ${VENV_PATH}"
   if run_as_invoker "$pip_bin" install "${v_spec}" >"$logf" 2>&1; then
     log_ok "Installed ${v_spec} successfully"
@@ -343,21 +388,70 @@ _try_install_vllm_deterministic() {
     return 0
   fi
 
-  # 4) Parse for setuptools/tensor pins and retry
+  # 4) Parse pip output for dependency constraints and retry
   log_warn "vLLM install failed; inspecting pip output for constraints..."
   local logcat
-  logcat="$(sed -n '1,200p' "$logf" || true)"
-  # detect exact setuptools pin
+  logcat="$(head -n 200 "$logf" 2>/dev/null || cat "$logf")"
+
+  # 4a) Exact setuptools pin in pip error output
   local s_exact
   s_exact="$(printf "%s\n" "$logcat" | grep -oE 'setuptools==[0-9]+(\.[0-9]+){1,2}' | head -n1 || true)"
   if [[ -n "$s_exact" ]]; then
-    log_info "Pip output requires ${s_exact}; pinning and retrying"
+    log_info "Pip requires ${s_exact}; pinning and retrying with --no-build-isolation"
     run_as_invoker "$pip_bin" install --force-reinstall "$s_exact"
-    # try again with no-build-isolation
     if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
-      log_ok "Installed ${v_spec} after pinning setuptools"
+      log_ok "Installed ${v_spec} after pinning ${s_exact}"
       rm -f "$logf"
       return 0
+    fi
+  fi
+
+  # 4b) torch version mismatch: e.g. "requires torch==2.9.1" in pip resolver output
+  local torch_required
+  torch_required="$(printf "%s\n" "$logcat" | grep -oE 'requires torch==[^ ,)]+' | head -n1 | sed 's/requires torch==//' || true)"
+  if [[ -n "$torch_required" ]]; then
+    local torch_installed
+    torch_installed="$("$py_bin" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "not installed")"
+    log_warn "vLLM requires torch==${torch_required} but found: ${torch_installed}"
+
+    # Determine the best index-url for the required torch (from compat map if available)
+    local torch_fix_idx=""
+    if [[ -n "${VLLM_INSTALL_VERSION:-}" ]]; then
+      local _cj
+      _cj="$(_vllm_compat_lookup "${VLLM_INSTALL_VERSION}" 2>/dev/null || true)"
+      if [[ -n "$_cj" ]]; then
+        torch_fix_idx="$(printf "%s\n" "$_cj" | jq -r '.torch_index_url // empty' 2>/dev/null || true)"
+        if [[ -z "$torch_fix_idx" ]]; then
+          local _fix_tag
+          _fix_tag="$(printf "%s\n" "$_cj" | jq -r '.torch_tag // .torch_cuda_tag // empty' 2>/dev/null || true)"
+          [[ "${_fix_tag}" =~ cu[0-9]+ ]] && torch_fix_idx="https://download.pytorch.org/whl/${_fix_tag}"
+        fi
+      fi
+    fi
+
+    local fix_pip="${VENV_PATH}/bin/pip"
+    local fix_cmd="install --force-reinstall torch==${torch_required}"
+    [[ -n "$torch_fix_idx" ]] && fix_cmd="${fix_cmd} --index-url ${torch_fix_idx}"
+
+    if [[ "${YES_MODE}" == true ]]; then
+      log_info "YES_MODE: downgrading/replacing torch to ${torch_required}"
+      if [[ -n "$torch_fix_idx" ]]; then
+        run_as_invoker "$pip_bin" install --force-reinstall "torch==${torch_required}" --index-url "$torch_fix_idx" || true
+      else
+        run_as_invoker "$pip_bin" install --force-reinstall "torch==${torch_required}" || true
+      fi
+      if run_as_invoker "$pip_bin" install --force-reinstall --no-build-isolation "${v_spec}" >>"$logf" 2>&1; then
+        log_ok "Installed ${v_spec} after resolving torch mismatch"
+        rm -f "$logf"
+        return 0
+      fi
+    else
+      log_error "torch version conflict — cannot auto-resolve without --yes."
+      log_error "To fix, run the following commands and re-run the installer:"
+      log_error "  ${fix_pip} ${fix_cmd}"
+      log_error "  ${fix_pip} install --force-reinstall --no-build-isolation ${v_spec}"
+      rm -f "$logf"
+      return 2
     fi
   fi
 
@@ -369,7 +463,7 @@ _try_install_vllm_deterministic() {
     return 0
   fi
 
-  # 6) If still failing, show log and return non-zero
+  # 6) Give up — show full pip log
   log_error "vLLM install ultimately failed. Pip output:"
   cat "$logf" >&2
   rm -f "$logf"
@@ -406,7 +500,8 @@ install_vllm_packages(){
     run_as_invoker "$pip" install uvicorn 2>/dev/null || true
   else
     # No compat mapping: install torch first based on platform/GPU, then vllm.
-    run_as_invoker "$pip" install -U pip setuptools wheel
+    # Only upgrade pip and wheel — do NOT blindly upgrade setuptools
+    run_as_invoker "$pip" install --upgrade pip wheel
 
     if [[ "${DRY_RUN}" != true ]] && "$py" -c "import torch" >/dev/null 2>&1; then
       log_info "torch already present in venv; not forcing downgrade/replace"
