@@ -1,0 +1,49 @@
+[Unit]
+Description=Bench Race vLLM Inference Server
+Documentation=https://github.com/todddb/bench-race
+After=network.target
+# Do NOT add Wants/Requires for ollama - they are independent
+
+[Service]
+Type=simple
+User=bench
+Group=bench
+WorkingDirectory=__VENV_PATH__
+
+# vLLM serve command - model must be specified via environment or override
+# To serve a specific model, create an override:
+#   sudo systemctl edit bench-race-vllm
+#   [Service]
+#   Environment=VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
+ExecStart=__VENV_PATH__/bin/python -m vllm.entrypoints.openai.api_server \
+    --host 0.0.0.0 \
+    --port __VLLM_PORT__ \
+    --download-dir __MODEL_DIR__
+
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+TimeoutStartSec=300
+
+# Environment
+Environment=VLLM_PORT=__VLLM_PORT__
+Environment=HF_HOME=__MODEL_DIR__
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__MODEL_DIR__ __VENV_PATH__
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bench-race-vllm
+
+# GPU access
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=multi-user.target

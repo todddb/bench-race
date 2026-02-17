@@ -70,7 +70,9 @@ const computeOutputState = new Map();
 // Fallback reason display strings
 const FALLBACK_REASONS = {
   ollama_unreachable: "Ollama was unreachable",
+  vllm_unavailable: "vLLM was unavailable",
   missing_model: "Model not installed on Ollama",
+  backend_unavailable: "No backend available",
   stream_error: "Streaming error occurred",
   unknown: "Unknown reason",
 };
@@ -548,7 +550,9 @@ const toggleOverlay = (overlayId) => {
 const renderEngineBadge = (engine, fallbackReason) => {
   const engineValue = engine ?? "n/a";
   const isMock = engineValue === "mock";
-  let badge = `<span class="engine-badge ${isMock ? "mock" : "ollama"}">${engineValue}</span>`;
+  const isVllm = engineValue === "vllm";
+  const badgeClass = isMock ? "mock" : isVllm ? "vllm" : "ollama";
+  let badge = `<span class="engine-badge ${badgeClass}">${engineValue}</span>`;
   if (isMock && fallbackReason) {
     const reasonText = FALLBACK_REASONS[fallbackReason] || fallbackReason;
     badge += `<div class="fallback-reason">Fallback: ${reasonText}</div>`;
@@ -2102,6 +2106,8 @@ const startRun = async () => {
 
   beginRunTracking(ready.map((m) => m.machine_id));
 
+  const backendEl = document.getElementById("backend");
+  const backendValue = backendEl ? backendEl.value : "";
   const payload = {
     model: document.getElementById("model").value,
     prompt: document.getElementById("prompt").value,
@@ -2111,6 +2117,9 @@ const startRun = async () => {
     repeat: parseInt(document.getElementById("repeat").value, 10),
     machine_ids: ready.map((m) => m.machine_id),
   };
+  if (backendValue && backendValue !== "auto") {
+    payload.backend = backendValue;
+  }
 
   paneMap.forEach(({ out, metrics }, machineId) => {
     // Check if this machine is blocked
