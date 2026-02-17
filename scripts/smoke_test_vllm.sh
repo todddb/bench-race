@@ -8,7 +8,7 @@
 #   ./smoke_test_vllm.sh [OPTIONS]
 #
 # Options:
-#   --venv-path PATH      Path to vLLM venv (default: /opt/bench-race/vllm-venv)
+#   --venv-path PATH      Path to vLLM venv (default: ~/bench-race/vllm-venv)
 #   --vllm-url URL        vLLM server URL (default: http://127.0.0.1:8000)
 #   --agent-url URL       Agent server URL (default: http://127.0.0.1:9001)
 #   --gpu-required        Fail if GPU is not available
@@ -30,7 +30,7 @@ skip() { echo -e "  ${YELLOW}SKIP${NC} $*"; }
 info() { echo -e "  ${BLUE}INFO${NC} $*"; }
 
 # Defaults
-VENV_PATH="/opt/bench-race/vllm-venv"
+VENV_PATH="${HOME}/bench-race/vllm-venv"
 VLLM_URL="http://127.0.0.1:8000"
 AGENT_URL="http://127.0.0.1:9001"
 GPU_REQUIRED=false
@@ -128,7 +128,8 @@ fi
 # ------------------------------------------------------------------
 # Test 5: vLLM imports
 # ------------------------------------------------------------------
-run_test "vLLM imports" "$PYTHON" -c "import vllm; print(f'vllm {vllm.__version__}')" 2>/dev/null
+run_test "torch + vLLM import versions" "$PYTHON" -c "import torch, vllm; print(torch.__version__, vllm.__version__)" 2>/dev/null
+run_test "torch cuda probe" "$PYTHON" -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)" 2>/dev/null
 
 # ------------------------------------------------------------------
 # Test 6: vLLM server healthcheck
