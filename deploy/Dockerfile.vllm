@@ -1,14 +1,19 @@
 # Dockerfile.vllm
 # GPU-enabled vLLM inference server for bench-race
 #
-# Build:
+# Build (default CUDA 12.1):
 #   docker build -f deploy/Dockerfile.vllm -t bench-race-vllm .
+#
+# Build for GB10 / CUDA 12.8:
+#   docker build -f deploy/Dockerfile.vllm --build-arg CU_VERSION=cu128 -t bench-race-vllm .
 #
 # Run:
 #   docker run --gpus all -p 8000:8000 -v /mnt/models/vllm:/models bench-race-vllm \
 #     --model meta-llama/Llama-3.1-8B-Instruct
 
 FROM nvidia/cuda:12.1.1-devel-ubuntu22.04 AS base
+
+ARG CU_VERSION=cu121
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -24,10 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN groupadd -r vllm && useradd -r -g vllm -m vllm
 
-# Install PyTorch + vLLM
-RUN pip3 install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cu121 \
-    && pip3 install --no-cache-dir vllm uvicorn
+# Use a venv to avoid polluting system Python
+ENV VIRTUAL_ENV=/opt/vllm-venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install PyTorch + vLLM inside venv
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/${CU_VERSION} \
+    && pip install --no-cache-dir vllm uvicorn
 
 # Create model directory
 RUN mkdir -p /models && chown vllm:vllm /models

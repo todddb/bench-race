@@ -108,10 +108,20 @@ class ModelRegistry(BaseModel):
         return result
 
 
+# Manual overrides for model name resolution between backends.
+# Maps Ollama model name -> vLLM model ID for cases where heuristic
+# matching in _models_match() fails or produces false positives.
+# Add entries here when automatic matching is incorrect.
+MANUAL_ARTIFACT_MAP: Dict[str, str] = {
+    # Example: "ollama-model-name": "org/VllmModelId"
+}
+
+
 def build_registry_from_policy(
     policy: Dict[str, Any],
     ollama_models: Optional[List[str]] = None,
     vllm_models: Optional[List[str]] = None,
+    artifact_overrides: Optional[Dict[str, str]] = None,
 ) -> ModelRegistry:
     """
     Build a model registry from the existing model_policy.yaml format,
@@ -119,8 +129,13 @@ def build_registry_from_policy(
 
     This bridges the current model_policy.yaml format with the new
     unified registry without breaking existing workflows.
+
+    Args:
+        artifact_overrides: Optional dict mapping Ollama model names to
+            vLLM model IDs, overriding heuristic matching.
     """
     registry = ModelRegistry()
+    overrides = {**MANUAL_ARTIFACT_MAP, **(artifact_overrides or {})}
 
     required = policy.get("required", {})
     llm_models = required.get("llm", [])
@@ -159,16 +174,23 @@ def build_registry_from_policy(
             provisioning_status=ollama_status,
         ))
 
-        # vLLM artifact (if the model or a matching ID is available)
-        for vm in vllm_available:
-            if _models_match(model_name, vm):
-                artifacts.append(BackendArtifact(
-                    backend="vllm",
-                    artifact_id=vm,
-                    format="safetensors",
-                    provisioning_status="available",
-                ))
-                break
+        # vLLM artifact: check manual override first, then heuristic match
+        vllm_match = None
+        if model_name in overrides and overrides[model_name] in vllm_available:
+            vllm_match = overrides[model_name]
+        else:
+            for vm in vllm_available:
+                if _models_match(model_name, vm):
+                    vllm_match = vm
+                    break
+
+        if vllm_match:
+            artifacts.append(BackendArtifact(
+                backend="vllm",
+                artifact_id=vllm_match,
+                format="safetensors",
+                provisioning_status="available",
+            ))
 
         # Generate a logical model ID
         model_id = model_name.replace(":", "-").replace("_", "-")
@@ -195,9 +217,9 @@ def _models_match(ollama_name: str, vllm_name: str) -> bool:
     a = ollama_name.lower().replace(":", "-").replace("_", "-")
     b = vllm_name.lower().replace("/", "-").replace("_", "-")
 
-    # Extract key tokens
-    a_tokens = set(a.split("-"))
-    b_tokens = set(b.split("-"))
+    # Extract key tokens (filter out empty strings from leading/trailing delimiters)
+    a_tokens = set(t for t in a.split("-") if t)
+    b_tokens = set(t for t in b.split("-") if t)
 
     # Require at least family + size overlap
     overlap = a_tokens & b_tokens

@@ -23,6 +23,7 @@
 #   --vllm-port PORT      vLLM server port (default: 8000)
 #   --force-managed-venv  Force creating a managed venv even if PyTorch is already installed
 #   --skip-service        Skip systemd service installation
+#   --no-autostart        Install service but do not enable auto-start
 #   --uninstall-vllm      Remove vLLM service and venv (leaves Ollama and system PyTorch intact)
 #   --gpu-required        Fail if no GPU detected
 
@@ -54,6 +55,7 @@ log_decision(){ echo -e "${GREEN}[DECISION]${NC} $*" >&2; }
 DRY_RUN=false
 YES_MODE=false
 SKIP_SERVICE=false
+NO_AUTOSTART=false
 GPU_REQUIRED=false
 FORCE_MANAGED_VENV=false
 UNINSTALL=false
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --vllm-port)       VLLM_PORT="$2"; shift 2 ;;
         --force-managed-venv) FORCE_MANAGED_VENV=true; shift ;;
         --skip-service)    SKIP_SERVICE=true; shift ;;
+        --no-autostart)    NO_AUTOSTART=true; shift ;;
         --uninstall-vllm)  UNINSTALL=true; shift ;;
         --gpu-required)    GPU_REQUIRED=true; shift ;;
         -h|--help)
@@ -87,6 +90,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --vllm-port PORT     vLLM server port (default: 8000)"
             echo "  --force-managed-venv Force new venv even if PyTorch exists"
             echo "  --skip-service       Skip systemd service installation"
+            echo "  --no-autostart       Install service but do not enable auto-start"
             echo "  --uninstall-vllm     Remove vLLM (keeps Ollama, system PyTorch)"
             echo "  --gpu-required       Fail if no GPU detected"
             exit 0
@@ -445,16 +449,40 @@ fi
 if ! $SKIP_SERVICE; then
     log_step "Phase 7: Configuring systemd service"
 
+    # Ensure the 'bench' user exists (required by the service unit)
+    if ! id -u bench &>/dev/null; then
+        log_info "Creating 'bench' system user for service"
+        run sudo useradd --system --create-home --shell /usr/sbin/nologin bench
+    else
+        log_info "User 'bench' already exists"
+    fi
+
+    # Ensure bench user has access to model and venv directories
+    if [[ -d "$MODEL_DIR" ]]; then
+        run sudo chown -R bench:bench "$MODEL_DIR"
+    fi
+    if [[ -d "$VENV_PATH" ]]; then
+        run sudo chown -R bench:bench "$VENV_PATH"
+    fi
+
     SERVICE_FILE="/etc/systemd/system/bench-race-vllm.service"
     SERVICE_TEMPLATE="${REPO_ROOT}/deploy/bench-race-vllm.service"
 
     if [[ -f "$SERVICE_TEMPLATE" ]]; then
-        # Generate service file from template
+        # Generate service file from template using sed
         GENERATED_SERVICE=$(sed \
             -e "s|__VENV_PATH__|${VENV_PATH}|g" \
             -e "s|__MODEL_DIR__|${MODEL_DIR}|g" \
             -e "s|__VLLM_PORT__|${VLLM_PORT}|g" \
             "$SERVICE_TEMPLATE")
+
+        write_service_file() {
+            # Use a heredoc via tee for safe quoting (avoids issues with
+            # single-quote expansion inside the generated service content)
+            printf '%s\n' "$GENERATED_SERVICE" | run sudo tee "$SERVICE_FILE" > /dev/null
+            run sudo chmod 644 "$SERVICE_FILE"
+            run sudo systemctl daemon-reload
+        }
 
         if [[ -f "$SERVICE_FILE" ]]; then
             EXISTING_SERVICE=$(cat "$SERVICE_FILE")
@@ -462,8 +490,7 @@ if ! $SKIP_SERVICE; then
                 log_info "Systemd service unchanged, leaving as-is"
             else
                 log_info "Systemd service configuration changed, updating"
-                run bash -c "echo '$GENERATED_SERVICE' | sudo tee '$SERVICE_FILE' > /dev/null"
-                run sudo systemctl daemon-reload
+                write_service_file
                 if systemctl is-active --quiet bench-race-vllm 2>/dev/null; then
                     log_info "Restarting service due to config change"
                     run sudo systemctl restart bench-race-vllm
@@ -471,9 +498,13 @@ if ! $SKIP_SERVICE; then
             fi
         else
             log_info "Installing systemd service"
-            run bash -c "echo '$GENERATED_SERVICE' | sudo tee '$SERVICE_FILE' > /dev/null"
-            run sudo systemctl daemon-reload
-            run sudo systemctl enable bench-race-vllm
+            write_service_file
+            if $NO_AUTOSTART; then
+                log_decision "Service installed but NOT enabled (--no-autostart)"
+                log_info "To start manually: sudo systemctl start bench-race-vllm"
+            else
+                run sudo systemctl enable bench-race-vllm
+            fi
         fi
     else
         log_warning "Service template not found at $SERVICE_TEMPLATE; skipping service setup"
