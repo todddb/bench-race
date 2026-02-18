@@ -466,9 +466,23 @@ _install_torch_from_resolved() {
     run_as_invoker "${pip_bin}" install --pre \
       --index-url https://download.pytorch.org/whl/nightly/cu128 \
       --upgrade --force-reinstall ${torch_spec}
+    # If exact pinned nightly isn't available on the index, fall back to unpinned nightly install
+    if [[ $? -ne 0 ]]; then
+      log_warn "Exact pinned nightly (${torch_spec}) failed. Falling back to latest nightly (unpinned) for torch/torchvision/torchaudio."
+      run_as_invoker "${pip_bin}" install --pre \
+        --index-url https://download.pytorch.org/whl/nightly/cu128 \
+        --upgrade --force-reinstall torch torchvision torchaudio || true
+    fi
   else
     log_info "Installing torch first in stable mode"
-    run_as_invoker "${pip_bin}" install --upgrade --force-reinstall ${torch_spec}
+    # Try the pinned install first; if it fails (platform wheel missing), try installing torch alone.
+    if ! run_as_invoker "${pip_bin}" install --upgrade --force-reinstall ${torch_spec}; then
+      log_warn "Pinned stable torch spec (${torch_spec}) failed. Trying to install torch alone (un-pinned) as fallback."
+      run_as_invoker "${pip_bin}" install --upgrade --force-reinstall torch || true
+      # Try torchvision/torchaudio separately (they may be unavailable for this platform)
+      run_noabort "${pip_bin}" install --upgrade --force-reinstall torchvision || true
+      run_noabort "${pip_bin}" install --upgrade --force-reinstall torchaudio || true
+    fi
   fi
 }
 
@@ -549,6 +563,13 @@ _try_install_vllm_deterministic() {
   log_info "Installing ${v_spec} (torch is always installed first)"
   if run_as_invoker "${pip_bin}" install --force-reinstall "${v_spec}" >>"${logf}" 2>&1; then
     log_ok "Installed ${v_spec} successfully"
+    return 0
+  fi
+
+  # If exact pinned vllm version not found (or pip failed), try installing latest vllm as a fallback.
+  log_warn "Exact install of ${v_spec} failed; attempting fallback 'pip install vllm' (latest) to see if an unpinned install works."
+  if run_as_invoker "${pip_bin}" install vllm >>"${logf}" 2>&1; then
+    log_ok "Fallback 'pip install vllm' succeeded. Continuing with unpinned vllm."
     return 0
   fi
 
