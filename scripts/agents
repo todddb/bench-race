@@ -22,7 +22,16 @@ OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 OLLAMA_URL="http://${OLLAMA_HOST}:${OLLAMA_PORT}"
 
+# ---------------------------------------------------------------------------
+# Detect local-only mode: marker file left by install_agent.sh --local-only
+# ---------------------------------------------------------------------------
+BENCH_RACE_LOCAL_ONLY=false
+if [[ -f "${REPO_ROOT}/.bench-race-local-only" ]]; then
+  BENCH_RACE_LOCAL_ONLY=true
+fi
+
 # ComfyUI settings - read from agent.yaml or use defaults
+# When local-only, prefer repo-local paths
 COMFYUI_DIR="${COMFYUI_DIR:-${REPO_ROOT}/agent/third_party/comfyui}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 COMFYUI_HOST="${COMFYUI_HOST:-0.0.0.0}"
@@ -66,13 +75,37 @@ is_listening() {
   lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+# Check for a system-level systemd unit (requires sudo for start/stop).
+# In local-only mode, never report a system unit as "installed" — only check
+# user-level units.
 systemctl_is_installed() {
   local unit="$1"
-  command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^${unit}\.service"
+  command -v systemctl >/dev/null 2>&1 || return 1
+
+  if [[ "${BENCH_RACE_LOCAL_ONLY}" == true ]]; then
+    # Only check user-level units
+    systemctl --user list-unit-files 2>/dev/null | grep -q "^${unit}\.service"
+  else
+    systemctl list-unit-files 2>/dev/null | grep -q "^${unit}\.service"
+  fi
+}
+
+# Check if a user-level systemd unit is installed
+systemctl_user_is_installed() {
+  local unit="$1"
+  command -v systemctl >/dev/null 2>&1 && \
+    systemctl --user list-unit-files 2>/dev/null | grep -q "^${unit}\.service"
 }
 
 start_vllm() {
-  if systemctl_is_installed bench-race-vllm; then
+  if [[ "${BENCH_RACE_LOCAL_ONLY}" == true ]]; then
+    # In local-only mode, try user-level systemd first, then direct launch
+    if systemctl_user_is_installed bench-race-vllm; then
+      log "Starting user systemd unit bench-race-vllm"
+      systemctl --user start bench-race-vllm
+      return $?
+    fi
+  elif systemctl_is_installed bench-race-vllm; then
     log "Starting systemd unit bench-race-vllm"
     sudo systemctl start bench-race-vllm
     return $?
@@ -97,7 +130,13 @@ start_vllm() {
 }
 
 stop_vllm() {
-  if systemctl_is_installed bench-race-vllm; then
+  if [[ "${BENCH_RACE_LOCAL_ONLY}" == true ]]; then
+    if systemctl_user_is_installed bench-race-vllm; then
+      log "Stopping user systemd unit bench-race-vllm"
+      systemctl --user stop bench-race-vllm
+      return $?
+    fi
+  elif systemctl_is_installed bench-race-vllm; then
     log "Stopping systemd unit bench-race-vllm"
     sudo systemctl stop bench-race-vllm
     return $?

@@ -18,6 +18,9 @@ FORCE_RECREATE_VENV=false
 SKIP_SERVICE=false
 UNINSTALL_VLLM=false
 SYSTEM_INSTALL=false
+LOCAL_ONLY=false
+PRE_FLIGHT=false
+UNINSTALL_ALL=false
 PLATFORM_OVERRIDE=""
 AGENT_ID=""
 LABEL=""
@@ -104,6 +107,14 @@ Core options:
   --use-conda                 Use conda/mamba env instead of venv for vLLM
                               (preferred on aarch64+CUDA where pip wheels may be scarce)
 
+Local-only / cleanup options:
+  --local-only                Force all paths to repo-local/user-local locations;
+                              refuse system-wide writes and sudo for service installs
+  --preflight                 Print what will be changed/created and exit (no writes)
+  --uninstall-all             Remove all managed artifacts (venvs, models, services,
+                              pid/log files). Requires --confirm or -y to proceed
+  --confirm                   Non-interactive confirmation for --uninstall-all
+
 Compatibility options:
   --agent-id ID               agent/config machine id
   --label LABEL               agent label
@@ -133,25 +144,75 @@ while [[ $# -gt 0 ]]; do
     --agent-id) AGENT_ID="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
     --central-url) CENTRAL_URL="$2"; shift 2 ;;
+    --local-only) LOCAL_ONLY=true; shift ;;
+    --preflight|--preflight-only) PRE_FLIGHT=true; shift ;;
+    --uninstall-all) UNINSTALL_ALL=true; shift ;;
+    --confirm) YES_MODE=true; shift ;;
     --skip-ollama|--skip-comfyui) shift ;;  # accepted for compat; no-op in this script
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
 
-if [[ -z "${VENV_PATH}" ]]; then
-  if [[ "${SYSTEM_INSTALL}" == true ]]; then
-    VENV_PATH="/opt/bench-race/vllm-venv"
-  else
+# ---------------------------------------------------------------------------
+# --local-only / --system conflict check
+# ---------------------------------------------------------------------------
+if [[ "${LOCAL_ONLY}" == true && "${SYSTEM_INSTALL}" == true ]]; then
+  log_error "--local-only and --system are mutually exclusive."
+  log_error "Use --local-only for user-local/repo-local installs (no sudo, no /etc, no /opt)."
+  log_error "Use --system for system-wide installs (requires root/sudo)."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# --local-only: force user-local/repo-local paths
+# ---------------------------------------------------------------------------
+if [[ "${LOCAL_ONLY}" == true ]]; then
+  SYSTEM_INSTALL=false
+  # Set defaults to user-local unless explicitly overridden via --venv-path / --model-dir
+  if [[ -z "${VENV_PATH}" ]]; then
     VENV_PATH="${INVOKER_HOME}/bench-race/vllm-venv"
   fi
-fi
-if [[ -z "${MODEL_DIR}" ]]; then
-  if [[ "${SYSTEM_INSTALL}" == true ]]; then
-    MODEL_DIR="/mnt/models/vllm"
-  else
+  if [[ -z "${MODEL_DIR}" ]]; then
     MODEL_DIR="${INVOKER_HOME}/bench-race/models/vllm"
   fi
+else
+  if [[ -z "${VENV_PATH}" ]]; then
+    if [[ "${SYSTEM_INSTALL}" == true ]]; then
+      VENV_PATH="/opt/bench-race/vllm-venv"
+    else
+      VENV_PATH="${INVOKER_HOME}/bench-race/vllm-venv"
+    fi
+  fi
+  if [[ -z "${MODEL_DIR}" ]]; then
+    if [[ "${SYSTEM_INSTALL}" == true ]]; then
+      MODEL_DIR="/mnt/models/vllm"
+    else
+      MODEL_DIR="${INVOKER_HOME}/bench-race/models/vllm"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Guard: refuse accidental root installs without --system
+# ---------------------------------------------------------------------------
+if [[ "$(id -u)" -eq 0 && "${SYSTEM_INSTALL}" == false && "${UNINSTALL_ALL}" == false && "${UNINSTALL_VLLM}" == false && "${PRE_FLIGHT}" == false ]]; then
+  log_error "Running as root without --system is not allowed."
+  log_error ""
+  log_error "  For a LOCAL install (no system-wide writes):"
+  log_error "    Re-run as a normal user:  ./scripts/install_agent.sh --local-only"
+  log_error ""
+  log_error "  For a SYSTEM-WIDE install:"
+  log_error "    sudo ./scripts/install_agent.sh --system"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Guard: --local-only must not run as root (except for preflight / uninstall)
+# ---------------------------------------------------------------------------
+if [[ "${LOCAL_ONLY}" == true && "$(id -u)" -eq 0 && "${PRE_FLIGHT}" == false && "${UNINSTALL_ALL}" == false ]]; then
+  log_error "--local-only cannot run as root. Re-run as a normal user."
+  exit 1
 fi
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -207,6 +268,193 @@ fi
 if echo "${GPU_NAME}" | tr '[:upper:]' '[:lower:]' | grep -Eq 'gb10|blackwell|b100|b200'; then
   IS_BLACKWELL=true
 fi
+
+# ---------------------------------------------------------------------------
+# Compute service path for preflight / uninstall
+# ---------------------------------------------------------------------------
+_compute_service_paths() {
+  # Sets: SERVICE_TARGET, SERVICE_PATH, SERVICE_DESCRIPTION
+  if [[ "${OS}" == "linux" ]]; then
+    if [[ "${SYSTEM_INSTALL}" == true ]]; then
+      SERVICE_TARGET="system (systemd)"
+      SERVICE_PATH="/etc/systemd/system/bench-race-vllm.service"
+    else
+      SERVICE_TARGET="user (systemd user)"
+      SERVICE_PATH="${INVOKER_HOME}/.config/systemd/user/bench-race-vllm.service"
+    fi
+  elif [[ "${OS}" == "darwin" ]]; then
+    if [[ "${SYSTEM_INSTALL}" == true ]]; then
+      SERVICE_TARGET="system (LaunchDaemon)"
+      SERVICE_PATH="/Library/LaunchDaemons/com.bench-race.vllm.plist"
+    else
+      SERVICE_TARGET="user (LaunchAgent)"
+      SERVICE_PATH="${INVOKER_HOME}/Library/LaunchAgents/com.bench-race.vllm.plist"
+    fi
+  else
+    SERVICE_TARGET="unknown"
+    SERVICE_PATH="(platform not recognized)"
+  fi
+}
+_compute_service_paths
+
+# ---------------------------------------------------------------------------
+# --preflight: print planned paths and exit
+# ---------------------------------------------------------------------------
+if [[ "${PRE_FLIGHT}" == true ]]; then
+  local_label="default"
+  [[ "${LOCAL_ONLY}" == true ]] && local_label="local-only"
+  [[ "${SYSTEM_INSTALL}" == true ]] && local_label="system"
+  cat <<EOF
+[PREFLIGHT] ─────────────────────────────────────────────────
+[PREFLIGHT] Mode:             ${local_label}
+[PREFLIGHT] VENV_PATH:        ${VENV_PATH}
+[PREFLIGHT] MODEL_DIR:        ${MODEL_DIR}
+[PREFLIGHT] Agent venv:       ${REPO_ROOT}/agent/.venv
+[PREFLIGHT] Agent config:     ${REPO_ROOT}/agent/config/agent.yaml
+[PREFLIGHT] COMFYUI_DIR:      ${REPO_ROOT}/agent/third_party/comfyui
+[PREFLIGHT] SERVICE_TARGET:   ${SERVICE_TARGET}
+[PREFLIGHT] SERVICE_PATH:     ${SERVICE_PATH}
+[PREFLIGHT] Platform:         ${ARCH_PLATFORM}
+[PREFLIGHT] CUDA:             ${CUDA_VERSION:-none}
+[PREFLIGHT] GPU:              ${GPU_NAME:-none}
+[PREFLIGHT] Run dir:          ${REPO_ROOT}/run
+[PREFLIGHT] Log dir:          ${REPO_ROOT}/logs
+[PREFLIGHT] LOCAL_ONLY:       ${LOCAL_ONLY}
+[PREFLIGHT] SYSTEM_INSTALL:   ${SYSTEM_INSTALL}
+[PREFLIGHT] INSTALL_VLLM:     ${INSTALL_VLLM}
+[PREFLIGHT] USE_CONDA:        ${USE_CONDA}
+[PREFLIGHT] SKIP_SERVICE:     ${SKIP_SERVICE}
+[PREFLIGHT] ─────────────────────────────────────────────────
+EOF
+  if [[ "${LOCAL_ONLY}" == true ]]; then
+    echo "[PREFLIGHT] Will NOT write to /etc, /opt, or /Library (local-only mode)."
+  elif [[ "${SYSTEM_INSTALL}" == true ]]; then
+    echo "[PREFLIGHT] Will write system-level service files (--system mode)."
+  else
+    echo "[PREFLIGHT] Will write user-level service files only."
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# uninstall_all – comprehensive cleanup
+# ---------------------------------------------------------------------------
+uninstall_all() {
+  log_step "Uninstalling ALL managed bench-race agent artifacts"
+
+  if [[ "${YES_MODE}" != true ]]; then
+    log_warn "This will remove venvs, model directories, services, and pid/log files."
+    log_warn "Paths that will be removed:"
+    log_info "  vLLM venv:      ${VENV_PATH}"
+    log_info "  Agent venv:     ${REPO_ROOT}/agent/.venv"
+    log_info "  Model dir:      ${MODEL_DIR}"
+    log_info "  Service:        ${SERVICE_PATH}"
+    log_info "  Run dir:        ${REPO_ROOT}/run"
+    log_info "  Log dir:        ${REPO_ROOT}/logs"
+    log_info "  Local marker:   ${REPO_ROOT}/.bench-race-local-only"
+    read -r -p "Proceed? [y/N] " ans
+    if [[ ! "${ans}" =~ ^[Yy]$ ]]; then
+      log_info "Aborted."
+      exit 0
+    fi
+  fi
+
+  local removed=()
+
+  # Stop and remove services
+  if [[ "${OS}" == "linux" ]] && command -v systemctl >/dev/null 2>&1; then
+    # User-level service
+    local user_unit="${INVOKER_HOME}/.config/systemd/user/bench-race-vllm.service"
+    if [[ -f "${user_unit}" ]]; then
+      run_as_invoker systemctl --user stop bench-race-vllm >/dev/null 2>&1 || true
+      run_as_invoker systemctl --user disable bench-race-vllm >/dev/null 2>&1 || true
+      run_as_invoker rm -f "${user_unit}"
+      run_as_invoker systemctl --user daemon-reload >/dev/null 2>&1 || true
+      removed+=("${user_unit}")
+    fi
+    # System-level service (only if --system or running as root)
+    if [[ "${SYSTEM_INSTALL}" == true || "$(id -u)" -eq 0 ]]; then
+      local sys_unit="/etc/systemd/system/bench-race-vllm.service"
+      if [[ -f "${sys_unit}" ]]; then
+        run systemctl stop bench-race-vllm >/dev/null 2>&1 || true
+        run systemctl disable bench-race-vllm >/dev/null 2>&1 || true
+        run rm -f "${sys_unit}"
+        run systemctl daemon-reload >/dev/null 2>&1 || true
+        removed+=("${sys_unit}")
+      fi
+    fi
+  fi
+  if [[ "${OS}" == "darwin" ]]; then
+    local user_plist="${INVOKER_HOME}/Library/LaunchAgents/com.bench-race.vllm.plist"
+    if [[ -f "${user_plist}" ]]; then
+      run_as_invoker launchctl unload "${user_plist}" >/dev/null 2>&1 || true
+      run_as_invoker rm -f "${user_plist}"
+      removed+=("${user_plist}")
+    fi
+    if [[ "${SYSTEM_INSTALL}" == true || "$(id -u)" -eq 0 ]]; then
+      local sys_plist="/Library/LaunchDaemons/com.bench-race.vllm.plist"
+      if [[ -f "${sys_plist}" ]]; then
+        run launchctl unload "${sys_plist}" >/dev/null 2>&1 || true
+        run rm -f "${sys_plist}"
+        removed+=("${sys_plist}")
+      fi
+    fi
+  fi
+
+  # Remove vLLM venv
+  if [[ -d "${VENV_PATH}" ]]; then
+    run rm -rf "${VENV_PATH}"
+    removed+=("${VENV_PATH}")
+  fi
+
+  # Remove agent venv
+  if [[ -d "${REPO_ROOT}/agent/.venv" ]]; then
+    run rm -rf "${REPO_ROOT}/agent/.venv"
+    removed+=("${REPO_ROOT}/agent/.venv")
+  fi
+
+  # Remove model directory
+  if [[ -d "${MODEL_DIR}" ]]; then
+    run rm -rf "${MODEL_DIR}"
+    removed+=("${MODEL_DIR}")
+  fi
+
+  # Remove pid files
+  if [[ -d "${REPO_ROOT}/run" ]]; then
+    run rm -rf "${REPO_ROOT}/run"
+    removed+=("${REPO_ROOT}/run")
+  fi
+
+  # Remove log files
+  if [[ -d "${REPO_ROOT}/logs" ]]; then
+    run rm -rf "${REPO_ROOT}/logs"
+    removed+=("${REPO_ROOT}/logs")
+  fi
+
+  # Remove local-only marker
+  if [[ -f "${REPO_ROOT}/.bench-race-local-only" ]]; then
+    run rm -f "${REPO_ROOT}/.bench-race-local-only"
+    removed+=("${REPO_ROOT}/.bench-race-local-only")
+  fi
+
+  # Remove conda env if created by this installer
+  if command -v conda >/dev/null 2>&1; then
+    if conda env list 2>/dev/null | grep -q "^bench-race-vllm[[:space:]]"; then
+      log_info "Removing conda env bench-race-vllm"
+      conda env remove -n bench-race-vllm -y >/dev/null 2>&1 || true
+      removed+=("conda:bench-race-vllm")
+    fi
+  fi
+
+  log_ok "Uninstall complete. Summary of removed items:"
+  if [[ ${#removed[@]} -eq 0 ]]; then
+    log_info "  (nothing found to remove)"
+  else
+    for item in "${removed[@]}"; do
+      log_info "  removed: ${item}"
+    done
+  fi
+}
 
 create_or_update_agent_venv(){
   log_step "Ensuring agent venv is installed"
@@ -805,7 +1053,17 @@ smoke_checks(){
 }
 
 main(){
+  # Handle --uninstall-all before any install logic
+  if [[ "${UNINSTALL_ALL}" == true ]]; then
+    uninstall_all
+    exit 0
+  fi
+
   log_info "Platform=${PLATFORM} arch_platform=${ARCH_PLATFORM} arch=${ARCH} cuda=${CUDA_VERSION:-none} gpu='${GPU_NAME:-none}' blackwell=${IS_BLACKWELL}"
+  if [[ "${LOCAL_ONLY}" == true ]]; then
+    log_info "Mode: local-only (no system-wide writes)"
+  fi
+
   create_or_update_agent_venv
   write_agent_config_if_missing
 
@@ -829,6 +1087,17 @@ main(){
   fi
 
   smoke_checks
+
+  # Write local-only marker so scripts/agents can detect the install mode
+  if [[ "${LOCAL_ONLY}" == true ]]; then
+    if [[ "${DRY_RUN}" != true ]]; then
+      touch "${REPO_ROOT}/.bench-race-local-only"
+      log_info "Wrote local-only marker: ${REPO_ROOT}/.bench-race-local-only"
+    else
+      echo "[DRY-RUN] Would write local-only marker: ${REPO_ROOT}/.bench-race-local-only"
+    fi
+  fi
+
   log_ok "Install complete"
 }
 
