@@ -68,6 +68,23 @@ run_as_invoker(){
   fi
 }
 
+
+# run_noabort: run command but do NOT exit script on non-zero.
+# Returns exit code in RC variable (global), and prints the command for dry-run mode.
+run_noabort() {
+  RC=0
+  if [[ "${DRY_RUN}" == true ]]; then
+    echo "[DRY-RUN] (no-abort) $*"
+    RC=0
+    return 0
+  fi
+  set +e
+  "$@"
+  RC=$?
+  set -e
+  return ${RC}
+}
+
 usage(){
 cat <<USAGE
 Usage: ./scripts/install_agent.sh [OPTIONS]
@@ -463,10 +480,16 @@ _install_torch_from_resolved() {
       log_info "  mamba install -c pytorch-nightly pytorch torchvision torchaudio"
       log_info "  pip install vllm"
     fi
-    run_as_invoker "${pip_bin}" install --pre \
+    run_noabort "${pip_bin}" install --pre \
       --index-url https://download.pytorch.org/whl/nightly/cu128 \
       --upgrade --force-reinstall ${torch_spec}
-    # If exact pinned nightly isn't available on the index, fall back to unpinned nightly install
+    if [[ ${RC} -ne 0 ]]; then
+      log_warn "Exact pinned nightly (${torch_spec}) failed (rc=${RC}). Falling back to latest nightly (unpinned) for torch/torchvision/torchaudio."
+      run_noabort "${pip_bin}" install --pre \
+        --index-url https://download.pytorch.org/whl/nightly/cu128 \
+        --upgrade --force-reinstall torch torchvision torchaudio || true
+    fi
+# If exact pinned nightly isn't available on the index, fall back to unpinned nightly install
     if [[ $? -ne 0 ]]; then
       log_warn "Exact pinned nightly (${torch_spec}) failed. Falling back to latest nightly (unpinned) for torch/torchvision/torchaudio."
       run_as_invoker "${pip_bin}" install --pre \
@@ -476,7 +499,13 @@ _install_torch_from_resolved() {
   else
     log_info "Installing torch first in stable mode"
     # Try the pinned install first; if it fails (platform wheel missing), try installing torch alone.
-    if ! run_as_invoker "${pip_bin}" install --upgrade --force-reinstall ${torch_spec}; then
+    if ! run_noabort "${pip_bin}" install --upgrade --force-reinstall ${torch_spec}
+    if [[ ${RC} -ne 0 ]]; then
+      log_warn "Pinned stable torch spec (${torch_spec}) failed (rc=${RC}). Trying to install torch alone (un-pinned) as fallback."
+      run_noabort "${pip_bin}" install --upgrade --force-reinstall torch || true
+      run_noabort "${pip_bin}" install --upgrade --force-reinstall torchvision || true
+      run_noabort "${pip_bin}" install --upgrade --force-reinstall torchaudio || true
+    fi; then
       log_warn "Pinned stable torch spec (${torch_spec}) failed. Trying to install torch alone (un-pinned) as fallback."
       run_as_invoker "${pip_bin}" install --upgrade --force-reinstall torch || true
       # Try torchvision/torchaudio separately (they may be unavailable for this platform)
@@ -561,7 +590,8 @@ _try_install_vllm_deterministic() {
   run_as_invoker "${pip_bin}" install --upgrade pip wheel >/dev/null 2>&1 || true
 
   log_info "Installing ${v_spec} (torch is always installed first)"
-  if run_as_invoker "${pip_bin}" install --force-reinstall "${v_spec}" >>"${logf}" 2>&1; then
+  run_noabort "${pip_bin}" install --force-reinstall "${v_spec}" >>"${logf}" 2>&1
+  if [[ ${RC} -eq 0 ]]; then
     log_ok "Installed ${v_spec} successfully"
     return 0
   fi
