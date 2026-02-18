@@ -683,7 +683,11 @@ install_or_update_comfyui() {
         log_info "Creating Python venv for ComfyUI..."
         (
             set -euo pipefail
+            if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
+            /opt/homebrew/bin/python3.12 -m venv "$COMFY_DIR/.venv"
+        else
             python3 -m venv "$COMFY_DIR/.venv"
+        fi
         ) || {
             log_error "Failed to create ComfyUI venv"
             return 1
@@ -845,7 +849,11 @@ install_or_update_agent_venv() {
         log_info "Creating Python venv for agent..."
         (
             set -euo pipefail
+            if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
+            /opt/homebrew/bin/python3.12 -m venv "$AGENT_DIR/.venv"
+        else
             python3 -m venv "$AGENT_DIR/.venv"
+        fi
         ) || {
             log_error "Failed to create agent venv"
             return 1
