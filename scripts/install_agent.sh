@@ -622,8 +622,11 @@ _try_install_vllm_deterministic() {
       _pf_tag="$(printf "%s\n" "$_pf_json" | jq -r '.torch_tag // .torch_cuda_tag // empty' 2>/dev/null || true)"
       _pf_torch="$(printf "%s\n" "$_pf_json" | jq -r '.torch // empty' 2>/dev/null || true)"
       # Check: compat says cu128 AND we are on CUDA>=13 or known Blackwell GPU
+      # Only auto-select nightly/cu128 when compat map asks for cu128 AND:
+#  * we detected a Blackwell/GB10 GPU (IS_BLACKWELL), OR
+#  * we are running on linux-aarch64 (ARM) where pip wheels are scarce.
       if [[ "${_pf_tag}" == "cu128" ]] && \
-         { [[ "${IS_BLACKWELL}" == true ]] || { [[ -n "${CUDA_MAJOR}" ]] && [[ "${CUDA_MAJOR}" -ge 13 ]]; }; }; then
+         { [[ "${IS_BLACKWELL}" == true ]] || [[ "${ARCH_PLATFORM}" == "linux-aarch64" ]]; }; then
         local _cur_torch
         _cur_torch="$("$py_bin" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "not installed")"
         if [[ "${YES_MODE}" == false ]]; then
@@ -637,7 +640,9 @@ _try_install_vllm_deterministic() {
           return 2
         fi
         # YES_MODE: step 2 below will use the nightly cu128 index automatically
-        log_warn "GB10/Blackwell: CUDA ${CUDA_VERSION} detected; will install cu128 nightly torch for vLLM ${VLLM_INSTALL_VERSION}"
+        log_warn "Compat requests cu128; using nightly/cu128 only for Blackwell (GB10) or linux-aarch64 platforms."
+        log_warn "Detected: ARCH_PLATFORM=${ARCH_PLATFORM} IS_BLACKWELL=${IS_BLACKWELL} CUDA=${CUDA_VERSION}"
+        log_warn "Installer will proceed with nightly/cu128 because the platform matches the special-case criteria."
       fi
     fi
   fi
