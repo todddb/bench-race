@@ -72,6 +72,17 @@ UPDATE_MODE=false
 # Helper Functions
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Prefer Homebrew python3.12 on macOS if available
+# This sets PYTHON_BIN to a sensible python executable (defaults to python3)
+PYTHON_BIN=python3
+if [[ "$(uname -s)" == "Darwin" && -x /opt/homebrew/bin/python3.12 ]]; then
+    PYTHON_BIN=/opt/homebrew/bin/python3.12
+fi
+# ---------------------------------------------------------------------------
+
+
+
 run_command() {
     if [[ "$DRY_RUN" == true ]]; then
         echo "[DRY-RUN] Would execute: $*"
@@ -133,7 +144,7 @@ ensure_prereqs() {
     local missing_tools=()
 
     # Check for required tools
-    if ! command -v python3 &>/dev/null; then
+    if ! command -v "$PYTHON_BIN" &>/dev/null; then
         missing_tools+=("python3")
     fi
 
@@ -156,7 +167,7 @@ ensure_prereqs() {
     fi
 
     # Check for Python venv module
-    if ! python3 -m venv --help &>/dev/null; then
+    if ! $PYTHON_BIN -m venv --help &>/dev/null; then
         log_error "Python venv module not available"
         if [[ "$OS_TYPE" == "linux" ]]; then
             log_info "Install with: sudo apt-get install python3-venv"
@@ -166,7 +177,7 @@ ensure_prereqs() {
 
     # Check Python version (reject 3.14+ per the existing setup_venv_central.sh logic)
     local python_version
-    python_version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    python_version=$($PYTHON_BIN -c \'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")\')
     local major minor
     IFS='.' read -r major minor <<< "$python_version"
 
@@ -187,7 +198,7 @@ install_or_update_central_venv() {
 
     if [[ ! -d "$CENTRAL_DIR/.venv" ]]; then
         log_info "Creating Python venv for central..."
-        run_command python3 -m venv "$CENTRAL_DIR/.venv"
+        run_command $PYTHON_BIN -m venv "$CENTRAL_DIR/.venv"
     else
         log_info "Central venv already exists"
     fi
