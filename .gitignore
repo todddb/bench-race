@@ -72,3 +72,30 @@ agent/config/agent.yaml
 .docker/
 docker-compose.override.yml
 
+# agent runtime artifacts
+/agent/run/
+/agent/log/
+/agent/*.pid
+
+# model weights (HF downloads) - do NOT commit models
+/agent/models/
+/agent/models-*
+
+# per-backend virtualenvs (we want venvs in-repo for deterministic runtime but not in git)
+# If you prefer to store venvs in the repo for other reasons, at minimum don't push them.
+# Use patterns matching your venv names:
+agent/third_party/*/.venv/
+agent/third_party/*/.venv/**
+
+# local python cache and pip caches
+**/__pycache__/
+*.py[cod]
+pip-log.txt
+pip-delete-this-directory.txt
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
