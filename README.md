@@ -759,6 +759,36 @@ To sync models across multiple machines:
 
 The script is idempotent - running it multiple times is safe and will only download missing models.
 
+### Agent model directory layout (new)
+
+The sync flow now prepares a split model layout under `agent/models`:
+
+- `agent/models/ollama/<model-name>`: Ollama-targeted models.
+- `agent/models/vllm/<model-name>`: vLLM-targeted models and sanitized symlink names.
+
+When central calls `POST /api/machines/<id>/sync`, it now sends `target_dir="ollama"` and `sanitize_names=true` to the agent sync endpoint. The agent then:
+
+1. Ensures `agent/models/ollama` and `agent/models/vllm` exist.
+2. Downloads/syncs requested Ollama models.
+3. Auto-creates sanitized symlinks in `agent/models/vllm` that point to `agent/models/ollama` directories (using `scripts/model_sanitize.sh`).
+4. Runs a non-destructive legacy migration for prior `agent/models/<name>` entries.
+
+Operator scripts:
+
+```bash
+./scripts/ensure_model_dirs.sh
+./scripts/migrate_existing_models.sh
+./scripts/vllm_link_from_ollama.sh
+```
+
+### Test instructions
+
+```bash
+pytest -q tests/test_model_sync_payload.py
+python -m py_compile agent/agent_app.py central/app.py
+bash -n scripts/ensure_model_dirs.sh scripts/vllm_link_from_ollama.sh scripts/migrate_existing_models.sh scripts/sync_models.sh
+```
+
 ### Script Output
 
 ```
