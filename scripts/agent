@@ -279,23 +279,54 @@ start_ollama() {
     wait_ready probe_ollama "Ollama" "$OLLAMA_PIDFILE" 30
 }
 
+
 start_vllm() {
-    local model="${1:-}"
-    if [[ -z "$model" ]]; then
+    local model_arg="${1:-}"
+    if [[ -z "$model_arg" ]]; then
         log_err "Usage: start-backend vllm <model-path-or-name>"
-        log_err "Example: ./scripts/agent start-backend vllm agent/models/llama-70b"
+        log_err "Example (local dir): ./scripts/agent start-backend vllm agent/models/llama-8b"
+        log_err "To download from HF and start in one step, run:"
+        log_err "  ./scripts/agent sync-and-start-vllm <huggingface-id>"
         return 1
     fi
 
     # Enforce only-one-LLM
     stop_other_llm_backends "vllm"
 
+    # If vLLM already running, show helpful message
     if probe_vllm; then
         log_warn "vLLM already running at http://${VLLM_HOST}:${VLLM_PORT}"
         log_warn "Stop it first to switch models: ./scripts/agent stop-backend vllm"
         return 0
     fi
 
+    # Prefer absolute/local path if it exists
+    local model_path="$model_arg"
+    if [[ ! -d "$model_path" && -d "${AGENT_DIR}/models/${model_arg}" ]]; then
+        model_path="${AGENT_DIR}/models/${model_arg}"
+    fi
+
+    # If model_path is still not a directory, decide next step
+    if [[ ! -d "$model_path" ]]; then
+        # If the user passed something that looks like a HF id (contains '/', or ':', or non-safe chars),
+        # do not auto-download by default — tell user how to proceed.
+        if echo "$model_arg" | grep -E '[/:]' >/dev/null 2>&1; then
+            local sanitized
+            sanitized="$("${SCRIPT_DIR}/model_sanitize.sh" "$model_arg")"
+            log_err "Model path not found: $model_arg"
+            log_err "It looks like a HuggingFace model id. To download and start it, run:"
+            log_err "  ./scripts/agent sync-and-start-vllm \"$model_arg\""
+            log_err "This will create agent/models/${sanitized} and then start vLLM."
+            return 2
+        else
+            log_err "Model path not found: $model_path"
+            log_err "Make sure the local model dir exists (contains config.json / model files),"
+            log_err "or use sync-and-start-vllm to download from HuggingFace."
+            return 1
+        fi
+    fi
+
+    # At this point model_path is a directory
     if [[ ! -d "$VLLM_DIR/.venv" ]]; then
         log_err "vLLM venv not found at $VLLM_DIR/.venv"
         log_err "Run: ./scripts/install_agent.sh"
@@ -303,12 +334,6 @@ start_vllm() {
     fi
 
     local VENV_PY="$VLLM_DIR/.venv/bin/python"
-
-    # Resolve model path
-    local model_path="$model"
-    if [[ ! -d "$model_path" ]] && [[ -d "${AGENT_DIR}/models/${model}" ]]; then
-        model_path="${AGENT_DIR}/models/${model}"
-    fi
 
     log_info "Starting vLLM with model: $model_path"
     log_info "  Host: ${VLLM_HOST}:${VLLM_PORT}"
@@ -331,6 +356,7 @@ start_vllm() {
 
     wait_ready probe_vllm "vLLM" "$VLLM_PIDFILE" 300
 }
+
 
 start_comfyui() {
     if probe_comfyui; then
@@ -587,6 +613,9 @@ case "$CMD" in
     start-vllm)
         start_vllm "$@"
         ;;
+    sync-and-start-vllm)
+        sync_and_start_vllm "$@"
+        ;;
     stop-vllm)
         stop_vllm
         ;;
@@ -612,3 +641,45 @@ case "$CMD" in
         exit 2
         ;;
 esac
+
+
+# ============================================================================
+# sync-and-start-vllm: download a model from HF into agent/models/<sanitized>
+# then start vllm pointing at that directory.
+# ============================================================================
+sync_and_start_vllm() {
+    local hf_id="${1:-}"
+    if [[ -z "$hf_id" ]]; then
+        log_err "Usage: sync-and-start-vllm <huggingface-model-id>"
+        return 1
+    fi
+
+    # Sanitize the HF id to a filesystem-safe local name
+    local sanitized
+    sanitized="$("${SCRIPT_DIR}/model_sanitize.sh" "$hf_id")"
+    local dest="${AGENT_DIR}/models/${sanitized}"
+
+    # Ensure sync_models.sh exists and is executable
+    local sync_script="${SCRIPT_DIR}/sync_models.sh"
+    if [[ ! -x "$sync_script" && ! -f "$sync_script" ]]; then
+        log_err "sync_models.sh not found at ${sync_script}. Please ensure it exists and is executable."
+        return 2
+    fi
+
+    # Call the sync utility to download model into agent/models/<sanitized>
+    log_info "Syncing HuggingFace model '$hf_id' -> ${dest} (sanitized: ${sanitized})"
+    "${sync_script}" "$hf_id" --local-name "${sanitized}" || {
+        log_err "Model sync failed for $hf_id"
+        return 3
+    }
+
+    # Verify model dir has a config file (basic validation)
+    if [[ ! -f "${dest}/config.json" && -z "$(ls -A "${dest}" 2>/dev/null)" ]]; then
+        log_err "Downloaded model directory looks empty or missing config.json: ${dest}"
+        log_err "Inspect the download or try a different HF model id."
+        return 4
+    fi
+
+    # Start vLLM using the local model dir
+    start_vllm "${dest}"
+}
