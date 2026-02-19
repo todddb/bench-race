@@ -53,6 +53,24 @@
                 </div>
 
                 <div class="controls-right">
+                  <div class="control-field">
+                    <label for="backend-select" class="control-label">Backend</label>
+                    <div class="backend-selector">
+                      <select id="backend-select">
+                        <option value="ollama" selected>Ollama</option>
+                        <option value="vllm">vLLM</option>
+                        <option value="comfyui">ComfyUI</option>
+                      </select>
+                      <span id="backend-status" class="backend-status-indicator" title="Backend status">--</span>
+                      <button id="backend-stop" class="btn btn-secondary btn-small" type="button" title="Stop backend">Stop</button>
+                      <label class="toggle-inline" title="Keep backend running after idle timeout">
+                        <input type="checkbox" id="backend-keep-warm" />
+                        <span class="toggle-label-text">Keep warm</span>
+                      </label>
+                    </div>
+                    <div class="helper">Inference engine. Starting one LLM backend stops the other.</div>
+                  </div>
+
                   <div class="model-row control-field">
                     <label for="model" class="control-label">Model</label>
                     <select id="model">

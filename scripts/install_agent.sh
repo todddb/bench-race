@@ -18,11 +18,13 @@
 #   --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
 #   --yes                 Non-interactive mode (use defaults)
 #   --install-sudoers     Install a passwordless sudoers drop-in (Linux only)
-#   --no-service          Skip systemd/launchctl service installation
+#   --system-service      Opt-in: install systemd/launchctl services (default: no services)
+#   --cleanup-systemd     Remove previously created systemd/launchctl units
 #   --update              Update existing installation
 #   --dry-run             Show what would be done without doing it
 #   --skip-ollama         Skip Ollama installation
 #   --skip-comfyui        Skip ComfyUI installation
+#   --skip-vllm           Skip vLLM installation
 
 set -euo pipefail
 
@@ -32,6 +34,10 @@ AGENT_DIR="${REPO_ROOT}/agent"
 CONFIG_DIR="${AGENT_DIR}/config"
 CONFIG_FILE="${CONFIG_DIR}/agent.yaml"
 COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
+VLLM_DIR="${AGENT_DIR}/third_party/vllm"
+MODELS_DIR="${AGENT_DIR}/models"
+AGENT_RUN_DIR="${AGENT_DIR}/run"
+AGENT_LOG_DIR="${AGENT_DIR}/log"
 
 # ============================================================================
 # Color Output
@@ -79,10 +85,12 @@ ARCH=""
 IS_GB10=false
 DRY_RUN=false
 YES_MODE=false
-NO_SERVICE=false
+SYSTEM_SERVICE=false
+CLEANUP_SYSTEMD=false
 UPDATE_MODE=false
 SKIP_OLLAMA=false
 SKIP_COMFYUI=false
+SKIP_VLLM=false
 INSTALL_SUDOERS=false
 
 AGENT_ID=""
@@ -839,6 +847,105 @@ PYCODE
 }
 
 # ============================================================================
+# vLLM Installation
+# ============================================================================
+
+install_or_update_vllm() {
+    if [[ "$SKIP_VLLM" == true ]]; then
+        log_info "Skipping vLLM installation (--skip-vllm)"
+        return 0
+    fi
+
+    log_step "Installing/updating vLLM..."
+
+    # Create vLLM directory
+    run_command mkdir -p "$VLLM_DIR"
+
+    # Create venv if not present
+    if [[ ! -d "$VLLM_DIR/.venv" ]]; then
+        log_info "Creating Python venv for vLLM..."
+        (
+            set -euo pipefail
+            if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
+                /opt/homebrew/bin/python3.12 -m venv "$VLLM_DIR/.venv"
+            else
+                python3 -m venv "$VLLM_DIR/.venv"
+            fi
+        ) || {
+            log_error "Failed to create vLLM venv"
+            return 1
+        }
+    fi
+
+    local VENV_PY="$VLLM_DIR/.venv/bin/python"
+    local VENV_PIP="$VLLM_DIR/.venv/bin/pip"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[DRY-RUN] Would install vLLM dependencies"
+        return 0
+    fi
+
+    # Upgrade pip
+    (
+        set -euo pipefail
+        "$VENV_PY" -m pip install --quiet --upgrade pip
+    ) || {
+        log_error "Failed to upgrade pip in vLLM venv"
+        return 1
+    }
+
+    # GPU detection for PyTorch index
+    local gpu_present=0
+    local compute_major=0
+    local compute_minor=0
+
+    if command -v nvidia-smi &>/dev/null; then
+        gpu_present=1
+        local cc_raw
+        cc_raw=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "")
+        if [[ -n "$cc_raw" ]]; then
+            cc_raw=$(echo "$cc_raw" | tr -d '[:space:]' | cut -d',' -f1)
+            if [[ "$cc_raw" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+                compute_major="${BASH_REMATCH[1]}"
+                compute_minor="${BASH_REMATCH[2]}"
+            fi
+        fi
+    fi
+
+    # Install vLLM with appropriate CUDA support
+    log_info "Installing vLLM..."
+
+    if [[ "$gpu_present" -eq 1 ]]; then
+        if [[ "$compute_major" -ge 13 ]] || [[ "$compute_major" -eq 12 && "$compute_minor" -ge 1 ]]; then
+            # GB10/Blackwell: use nightly builds
+            log_info "Installing vLLM with nightly CUDA support (compute $compute_major.$compute_minor)..."
+            "$VENV_PIP" install --quiet --pre vllm 2>/dev/null || \
+                "$VENV_PIP" install --quiet vllm
+        else
+            "$VENV_PIP" install --quiet vllm
+        fi
+    else
+        if [[ "$OS_TYPE" == "macos" ]]; then
+            log_warning "vLLM has limited macOS support. Installing anyway..."
+        fi
+        "$VENV_PIP" install --quiet vllm 2>/dev/null || {
+            log_warning "vLLM installation failed (may require NVIDIA GPU)"
+            return 1
+        }
+    fi
+
+    # Also install huggingface_hub, transformers, safetensors for model management
+    "$VENV_PIP" install --quiet huggingface_hub transformers safetensors
+
+    # Verify
+    if "$VENV_PY" -c "import vllm; print(f'vLLM {vllm.__version__}')" 2>/dev/null; then
+        log_success "vLLM installed at $VLLM_DIR"
+    else
+        log_warning "vLLM installed but import verification failed (may need GPU at runtime)"
+    fi
+}
+
+# ============================================================================
 # Agent Python Environment
 # ============================================================================
 
@@ -1055,6 +1162,12 @@ write_agent_config() {
         printf "  port: 8188\n"
         printf "  install_dir: \"agent/third_party/comfyui\"\n"
         printf "  checkpoints_dir: \"agent/third_party/comfyui/models/checkpoints\"\n"
+        printf "\n"
+        printf "vllm:\n"
+        printf "  enabled: true\n"
+        printf "  host: \"127.0.0.1\"\n"
+        printf "  port: 8000\n"
+        printf "  install_dir: \"agent/third_party/vllm\"\n"
     } > "$tmp_file"
 
     # Move temp file to final location
@@ -1137,12 +1250,13 @@ PYCODE
 # ============================================================================
 
 install_services() {
-    if [[ "$NO_SERVICE" == true ]]; then
-        log_info "Skipping service installation (--no-service)"
+    if [[ "$SYSTEM_SERVICE" != true ]]; then
+        log_info "Skipping service installation (default: no system services)"
+        log_info "Use --system-service to opt-in to systemd/launchctl service creation"
         return 0
     fi
 
-    log_step "Installing services..."
+    log_step "Installing system services (opt-in)..."
 
     if [[ "$OS_TYPE" == "linux" ]] && command -v systemctl &>/dev/null; then
         log_info "Installing systemd services..."
@@ -1152,6 +1266,58 @@ install_services() {
         log_info "macOS service installation via launchctl..."
         log_warning "launchctl service installation not yet implemented"
         log_info "You can start the agent manually: bin/control agent start"
+    fi
+}
+
+# ============================================================================
+# Cleanup systemd/launchctl services
+# ============================================================================
+
+cleanup_systemd() {
+    log_step "Cleaning up previously installed system services..."
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[DRY-RUN] Would remove system services"
+        return 0
+    fi
+
+    local removed=0
+
+    if [[ "$OS_TYPE" == "linux" ]] && command -v systemctl &>/dev/null; then
+        for svc in bench-race-agent bench-race-ollama bench-race-comfyui bench-race-vllm; do
+            if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+                log_info "Stopping and disabling ${svc}.service..."
+                run_privileged systemctl stop "${svc}.service" 2>/dev/null || true
+                run_privileged systemctl disable "${svc}.service" 2>/dev/null || true
+                if [[ -f "/etc/systemd/system/${svc}.service" ]]; then
+                    run_privileged rm -f "/etc/systemd/system/${svc}.service"
+                    ((removed++))
+                fi
+            fi
+        done
+        if [[ $removed -gt 0 ]]; then
+            run_privileged systemctl daemon-reload
+            log_success "Removed ${removed} systemd service(s)"
+        else
+            log_info "No bench-race systemd services found"
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        for plist in com.bench-race.agent com.bench-race.ollama com.bench-race.comfyui com.bench-race.vllm; do
+            local plist_path="$HOME/Library/LaunchAgents/${plist}.plist"
+            if [[ -f "$plist_path" ]]; then
+                log_info "Unloading and removing ${plist}..."
+                launchctl unload "$plist_path" 2>/dev/null || true
+                rm -f "$plist_path"
+                ((removed++))
+            fi
+        done
+        if [[ $removed -gt 0 ]]; then
+            log_success "Removed ${removed} launchctl plist(s)"
+        else
+            log_info "No bench-race launchctl plists found"
+        fi
+    else
+        log_info "No service manager detected"
     fi
 }
 
@@ -1323,11 +1489,13 @@ Options:
   --platform PLATFORM   Override platform detection (macos|linux|linux-gb10)
   --yes                 Non-interactive mode (use defaults)
   --install-sudoers     Install passwordless sudoers drop-in (Linux only)
-  --no-service          Skip systemd/launchctl service installation
+  --system-service      Opt-in: install systemd/launchctl services
+  --cleanup-systemd     Remove previously created systemd/launchctl units
   --update              Update existing installation
   --dry-run             Show what would be done without doing it
   --skip-ollama         Skip Ollama installation
   --skip-comfyui        Skip ComfyUI installation
+  --skip-vllm           Skip vLLM installation
   --help                Show this help message
 
 EOF
@@ -1361,7 +1529,15 @@ parse_args() {
                 shift
                 ;;
             --no-service)
-                NO_SERVICE=true
+                # Legacy flag: already the default behavior
+                shift
+                ;;
+            --system-service)
+                SYSTEM_SERVICE=true
+                shift
+                ;;
+            --cleanup-systemd)
+                CLEANUP_SYSTEMD=true
                 shift
                 ;;
             --update)
@@ -1378,6 +1554,10 @@ parse_args() {
                 ;;
             --skip-comfyui)
                 SKIP_COMFYUI=true
+                shift
+                ;;
+            --skip-vllm)
+                SKIP_VLLM=true
                 shift
                 ;;
             --help)
@@ -1449,6 +1629,16 @@ main() {
     log_info "  GPU: ${gpu_info}"
     echo ""
 
+    # Handle --cleanup-systemd (can run independently)
+    if [[ "$CLEANUP_SYSTEMD" == true ]]; then
+        cleanup_systemd
+    fi
+
+    # Create agent directory structure
+    log_step "Creating agent directory structure..."
+    run_command mkdir -p "$MODELS_DIR" "$AGENT_RUN_DIR" "$AGENT_LOG_DIR"
+    run_command mkdir -p "$AGENT_DIR/third_party/comfyui" "$AGENT_DIR/third_party/vllm"
+
     # Check prerequisites
     ensure_prereqs
 
@@ -1458,6 +1648,7 @@ main() {
     # Install components
     install_or_update_ollama || log_warning "Ollama installation had issues"
     install_or_update_comfyui || log_warning "ComfyUI installation had issues"
+    install_or_update_vllm || log_warning "vLLM installation had issues"
     install_or_update_agent_venv || {
         log_error "Failed to setup Agent Python environment"
         exit 1
@@ -1498,9 +1689,10 @@ main() {
     log_info "  Central URL: ${CENTRAL_URL}"
     echo ""
     log_info "Next steps:"
-    log_info "  1. Start the agent: bin/control agent start"
-    log_info "  2. Check status: bin/control agent status"
-    log_info "  3. Add this machine to central/config/machines.yaml:"
+    log_info "  1. Start a backend: ./scripts/agent start-backend ollama"
+    log_info "  2. Check status: ./scripts/agent status"
+    log_info "  3. Sync models: ./scripts/sync_models.sh <hf-id> --local-name <name>"
+    log_info "  4. Add this machine to central/config/machines.yaml:"
     echo ""
     echo "    - machine_id: \"${AGENT_ID}\""
     echo "      label: \"${LABEL}\""

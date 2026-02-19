@@ -2122,6 +2122,78 @@ def api_reset_agent(machine_id: str):
         }), 500
 
 
+@app.post("/api/agents/<machine_id>/backend/select")
+def api_backend_select(machine_id: str):
+    """Proxy backend selection to agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        from flask import request as flask_request
+        response = requests.post(
+            f"{agent_base_url}/api/backend/select",
+            json=flask_request.get_json(),
+            timeout=600,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Backend selection timed out", "ok": False}), 504
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
+
+
+@app.post("/api/agents/<machine_id>/backend/stop")
+def api_backend_stop(machine_id: str):
+    """Proxy backend stop to agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        from flask import request as flask_request
+        backend = flask_request.args.get("backend", "")
+        response = requests.post(
+            f"{agent_base_url}/api/backend/stop?backend={backend}",
+            timeout=30,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
+
+
+@app.get("/api/agents/<machine_id>/backend/status")
+def api_backend_status(machine_id: str):
+    """Proxy backend status from agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
+
+
 @app.get("/api/capabilities")
 def api_capabilities():
     caps = []

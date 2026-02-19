@@ -31,6 +31,9 @@ class Capabilities(BaseModel):
     # Extended capability fields for preflight checks
     ollama_reachable: Optional[bool] = None
     ollama_models: List[str] = Field(default_factory=list)  # Actually available on Ollama
+    vllm_reachable: Optional[bool] = None
+    vllm_models: List[str] = Field(default_factory=list)  # Actually loaded on vLLM
+    active_backend: Optional[str] = None  # Currently selected LLM backend
     agent_reachable: Optional[bool] = None  # Set by central when aggregating
     comfyui_gpu_ok: Optional[bool] = None
     comfyui_cpu_ok: Optional[bool] = None
@@ -46,6 +49,7 @@ class LLMRequest(BaseModel):
     num_ctx: int = 4096
     repeat: int = 1
     stream: bool = True
+    engine: Optional[str] = None  # "ollama" or "vllm"; None = use active backend
 
 
 class WhisperRequest(BaseModel):
@@ -87,8 +91,8 @@ class LLMResult(BaseModel):
     prompt_tokens: Optional[int] = None
     total_ms: Optional[float] = None
     model: str
-    engine: str = "ollama"
-    fallback_reason: Optional[str] = None  # "ollama_unreachable", "missing_model", "stream_error"
+    engine: str = "ollama"  # "ollama", "vllm", or "mock"
+    fallback_reason: Optional[str] = None  # "ollama_unreachable", "vllm_unreachable", "missing_model", "stream_error"
 
 
 class WhisperResult(BaseModel):

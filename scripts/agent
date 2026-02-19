@@ -1,0 +1,614 @@
+#!/usr/bin/env bash
+# scripts/agent — Inference backend lifecycle manager
+#
+# Manages Ollama, vLLM and ComfyUI backends: start, stop, status.
+# Enforces only-one-active-LLM-backend: starting vLLM stops Ollama and vice versa.
+# ComfyUI is treated as an independent backend (image generation).
+#
+# Usage:
+#   ./scripts/agent status
+#   ./scripts/agent start-backend <backend> [<model-path-or-name>]
+#   ./scripts/agent stop-backend <backend>
+#   ./scripts/agent start                    # start agent app (FastAPI)
+#   ./scripts/agent stop                     # stop agent app + all backends
+#   ./scripts/agent start-vllm <model>       # convenience: start-backend vllm <model>
+#   ./scripts/agent stop-vllm                # convenience: stop-backend vllm
+#   ./scripts/agent start-ollama             # convenience: start-backend ollama
+#   ./scripts/agent stop-ollama              # convenience: stop-backend ollama
+#   ./scripts/agent start-comfyui            # convenience: start-backend comfyui
+#   ./scripts/agent stop-comfyui             # convenience: stop-backend comfyui
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+AGENT_DIR="${REPO_ROOT}/agent"
+RUN_DIR="${AGENT_DIR}/run"
+LOG_DIR="${AGENT_DIR}/log"
+
+# Backend directories
+COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
+VLLM_DIR="${AGENT_DIR}/third_party/vllm"
+
+# PID files
+AGENT_PIDFILE="${RUN_DIR}/agent.pid"
+OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
+VLLM_PIDFILE="${RUN_DIR}/vllm.pid"
+COMFYUI_PIDFILE="${RUN_DIR}/comfy.pid"
+
+# Log files
+AGENT_LOGFILE="${LOG_DIR}/agent.log"
+OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
+VLLM_LOGFILE="${LOG_DIR}/vllm.log"
+COMFYUI_LOGFILE="${LOG_DIR}/comfy.log"
+
+# Configurable ports
+OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
+COMFYUI_PORT="${COMFYUI_PORT:-8188}"
+AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
+AGENT_PORT="${AGENT_PORT:-9001}"
+
+# Inactivity timeout (seconds); 0 = disabled
+AGENT_BACKEND_IDLE_SECS="${AGENT_BACKEND_IDLE_SECS:-0}"
+
+# GPU pinning
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+
+mkdir -p "${RUN_DIR}" "${LOG_DIR}"
+
+# ============================================================================
+# Logging
+# ============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log()      { echo -e "[$(date '+%H:%M:%S')] $*"; }
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_err()  { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# ============================================================================
+# PID helpers
+# ============================================================================
+
+pid_is_running() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+read_pid() {
+    local pidfile="$1"
+    if [[ -f "$pidfile" ]]; then
+        cat "$pidfile"
+    fi
+}
+
+write_pid() {
+    echo "$2" > "$1"
+}
+
+remove_pid() {
+    rm -f "$1"
+}
+
+# Graceful stop: SIGTERM, wait, then SIGKILL
+stop_process() {
+    local pidfile="$1"
+    local name="$2"
+    local pid
+    pid="$(read_pid "$pidfile")"
+    if [[ -z "$pid" ]]; then
+        log_info "$name: not running (no pidfile)"
+        return 0
+    fi
+    if ! pid_is_running "$pid"; then
+        log_info "$name: stale pidfile (pid $pid not running)"
+        remove_pid "$pidfile"
+        return 0
+    fi
+
+    log_info "Stopping $name (pid $pid)..."
+    kill "$pid" 2>/dev/null || true
+
+    local i=0
+    while [[ $i -lt 30 ]]; do
+        if ! pid_is_running "$pid"; then
+            break
+        fi
+        sleep 0.3
+        ((i++))
+    done
+
+    if pid_is_running "$pid"; then
+        log_warn "$name still running after 9s; sending SIGKILL..."
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+
+    remove_pid "$pidfile"
+    log_ok "$name stopped"
+}
+
+# ============================================================================
+# Health probes
+# ============================================================================
+
+probe_ollama() {
+    curl -fsS --max-time 2 "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1
+}
+
+probe_vllm() {
+    curl -fsS --max-time 2 "http://${VLLM_HOST}:${VLLM_PORT}/health" >/dev/null 2>&1 || \
+    curl -fsS --max-time 2 "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" >/dev/null 2>&1
+}
+
+probe_comfyui() {
+    curl -fsS --max-time 2 "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" >/dev/null 2>&1
+}
+
+probe_agent() {
+    curl -fsS --max-time 2 "http://127.0.0.1:${AGENT_PORT}/health" >/dev/null 2>&1
+}
+
+# Wait for a probe to succeed
+wait_ready() {
+    local probe_fn="$1"
+    local name="$2"
+    local pidfile="$3"
+    local max_wait="${4:-60}"
+
+    local i=0
+    while [[ $i -lt $max_wait ]]; do
+        if $probe_fn; then
+            log_ok "$name is ready"
+            return 0
+        fi
+        # Check if process died
+        if [[ -n "$pidfile" ]]; then
+            local pid
+            pid="$(read_pid "$pidfile")"
+            if [[ -n "$pid" ]] && ! pid_is_running "$pid"; then
+                log_err "$name process exited unexpectedly"
+                return 1
+            fi
+        fi
+        sleep 1
+        ((i++))
+    done
+
+    log_err "$name did not become ready within ${max_wait}s"
+    return 1
+}
+
+# ============================================================================
+# LLM backends (mutually exclusive)
+# ============================================================================
+
+LLM_BACKENDS="ollama vllm"
+
+active_llm_backend() {
+    for backend in $LLM_BACKENDS; do
+        local pidfile_var
+        case "$backend" in
+            ollama) pidfile_var="$OLLAMA_PIDFILE" ;;
+            vllm)   pidfile_var="$VLLM_PIDFILE" ;;
+        esac
+        local pid
+        pid="$(read_pid "$pidfile_var")"
+        if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+            echo "$backend"
+            return 0
+        fi
+    done
+    # Also check if ollama is running externally (system service)
+    if probe_ollama; then
+        echo "ollama"
+        return 0
+    fi
+}
+
+stop_other_llm_backends() {
+    local keep="$1"
+    for backend in $LLM_BACKENDS; do
+        if [[ "$backend" == "$keep" ]]; then
+            continue
+        fi
+        case "$backend" in
+            ollama)
+                local pid
+                pid="$(read_pid "$OLLAMA_PIDFILE")"
+                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+                    log_info "Stopping ollama (only-one-active-backend policy)..."
+                    stop_process "$OLLAMA_PIDFILE" "ollama"
+                fi
+                ;;
+            vllm)
+                local pid
+                pid="$(read_pid "$VLLM_PIDFILE")"
+                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+                    log_info "Stopping vllm (only-one-active-backend policy)..."
+                    stop_process "$VLLM_PIDFILE" "vllm"
+                fi
+                ;;
+        esac
+    done
+}
+
+# ============================================================================
+# Backend start functions
+# ============================================================================
+
+start_ollama() {
+    # Enforce only-one-LLM
+    stop_other_llm_backends "ollama"
+
+    if probe_ollama; then
+        log_ok "Ollama already running at http://${OLLAMA_HOST}:${OLLAMA_PORT}"
+        return 0
+    fi
+
+    if ! command -v ollama &>/dev/null; then
+        log_err "ollama not found in PATH"
+        return 1
+    fi
+
+    local pid
+    pid="$(read_pid "$OLLAMA_PIDFILE")"
+    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+        log_info "Ollama process exists (pid $pid); waiting for API..."
+    else
+        log_info "Starting ollama serve..."
+        local env_args=()
+        if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
+            env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
+        fi
+        env "${env_args[@]}" nohup ollama serve >> "$OLLAMA_LOGFILE" 2>&1 &
+        write_pid "$OLLAMA_PIDFILE" "$!"
+    fi
+
+    wait_ready probe_ollama "Ollama" "$OLLAMA_PIDFILE" 30
+}
+
+start_vllm() {
+    local model="${1:-}"
+    if [[ -z "$model" ]]; then
+        log_err "Usage: start-backend vllm <model-path-or-name>"
+        log_err "Example: ./scripts/agent start-backend vllm agent/models/llama-70b"
+        return 1
+    fi
+
+    # Enforce only-one-LLM
+    stop_other_llm_backends "vllm"
+
+    if probe_vllm; then
+        log_warn "vLLM already running at http://${VLLM_HOST}:${VLLM_PORT}"
+        log_warn "Stop it first to switch models: ./scripts/agent stop-backend vllm"
+        return 0
+    fi
+
+    if [[ ! -d "$VLLM_DIR/.venv" ]]; then
+        log_err "vLLM venv not found at $VLLM_DIR/.venv"
+        log_err "Run: ./scripts/install_agent.sh"
+        return 1
+    fi
+
+    local VENV_PY="$VLLM_DIR/.venv/bin/python"
+
+    # Resolve model path
+    local model_path="$model"
+    if [[ ! -d "$model_path" ]] && [[ -d "${AGENT_DIR}/models/${model}" ]]; then
+        model_path="${AGENT_DIR}/models/${model}"
+    fi
+
+    log_info "Starting vLLM with model: $model_path"
+    log_info "  Host: ${VLLM_HOST}:${VLLM_PORT}"
+
+    local env_args=()
+    if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
+        env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
+    fi
+
+    env "${env_args[@]}" nohup "$VENV_PY" -m vllm.entrypoints.openai.api_server \
+        --model "$model_path" \
+        --host "$VLLM_HOST" \
+        --port "$VLLM_PORT" \
+        --trust-remote-code \
+        >> "$VLLM_LOGFILE" 2>&1 &
+    write_pid "$VLLM_PIDFILE" "$!"
+
+    log_info "vLLM started (pid $(read_pid "$VLLM_PIDFILE"))"
+    log_info "Model loading may take several minutes for large models..."
+
+    wait_ready probe_vllm "vLLM" "$VLLM_PIDFILE" 300
+}
+
+start_comfyui() {
+    if probe_comfyui; then
+        log_ok "ComfyUI already running at http://${COMFYUI_HOST}:${COMFYUI_PORT}"
+        return 0
+    fi
+
+    if [[ ! -d "$COMFY_DIR" ]]; then
+        log_err "ComfyUI not found at $COMFY_DIR"
+        log_err "Run: ./scripts/install_agent.sh"
+        return 1
+    fi
+
+    if [[ ! -d "$COMFY_DIR/.venv" ]]; then
+        log_err "ComfyUI venv not found at $COMFY_DIR/.venv"
+        return 1
+    fi
+
+    local VENV_PY="$COMFY_DIR/.venv/bin/python"
+
+    log_info "Starting ComfyUI on ${COMFYUI_HOST}:${COMFYUI_PORT}..."
+
+    local env_args=()
+    if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
+        env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
+    fi
+
+    (
+        cd "$COMFY_DIR"
+        env "${env_args[@]}" nohup "$VENV_PY" main.py \
+            --listen "$COMFYUI_HOST" \
+            --port "$COMFYUI_PORT" \
+            >> "$COMFYUI_LOGFILE" 2>&1 &
+        echo "$!" > "$COMFYUI_PIDFILE"
+    )
+
+    wait_ready probe_comfyui "ComfyUI" "$COMFYUI_PIDFILE" 60
+}
+
+# ============================================================================
+# Backend stop functions
+# ============================================================================
+
+stop_ollama()  { stop_process "$OLLAMA_PIDFILE" "Ollama"; }
+stop_vllm()    { stop_process "$VLLM_PIDFILE" "vLLM"; }
+stop_comfyui() { stop_process "$COMFYUI_PIDFILE" "ComfyUI"; }
+
+# ============================================================================
+# Agent app (FastAPI) management
+# ============================================================================
+
+start_agent_app() {
+    local pid
+    pid="$(read_pid "$AGENT_PIDFILE")"
+    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+        log_ok "Agent app already running (pid $pid)"
+        return 0
+    fi
+
+    if [[ ! -d "$AGENT_DIR/.venv" ]]; then
+        log_err "Agent venv not found at $AGENT_DIR/.venv"
+        return 1
+    fi
+
+    # shellcheck disable=SC1091
+    source "$AGENT_DIR/.venv/bin/activate"
+
+    log_info "Starting agent app on ${AGENT_HOST}:${AGENT_PORT}..."
+    nohup uvicorn agent.agent_app:app \
+        --host "$AGENT_HOST" \
+        --port "$AGENT_PORT" \
+        >> "$AGENT_LOGFILE" 2>&1 &
+    write_pid "$AGENT_PIDFILE" "$!"
+
+    wait_ready probe_agent "Agent app" "$AGENT_PIDFILE" 15
+}
+
+stop_agent_app() {
+    stop_process "$AGENT_PIDFILE" "Agent app"
+}
+
+# ============================================================================
+# Status
+# ============================================================================
+
+status_backend() {
+    local name="$1"
+    local pidfile="$2"
+    local probe_fn="$3"
+    local port="$4"
+
+    local pid
+    pid="$(read_pid "$pidfile")"
+    local running=false
+    local healthy=false
+
+    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+        running=true
+    fi
+
+    if $probe_fn 2>/dev/null; then
+        healthy=true
+    fi
+
+    if $healthy; then
+        echo -e "  ${GREEN}${name}${NC}: running (healthy) on port ${port}"
+    elif $running; then
+        echo -e "  ${YELLOW}${name}${NC}: running (pid $pid) but not healthy on port ${port}"
+    else
+        echo -e "  ${RED}${name}${NC}: stopped"
+    fi
+}
+
+do_status() {
+    echo ""
+    echo "=== Backend Status ==="
+    status_backend "Ollama"  "$OLLAMA_PIDFILE"  probe_ollama  "$OLLAMA_PORT"
+    status_backend "vLLM"    "$VLLM_PIDFILE"    probe_vllm    "$VLLM_PORT"
+    status_backend "ComfyUI" "$COMFYUI_PIDFILE" probe_comfyui "$COMFYUI_PORT"
+    echo ""
+    echo "=== Agent App ==="
+    status_backend "Agent"   "$AGENT_PIDFILE"   probe_agent   "$AGENT_PORT"
+    echo ""
+
+    local active
+    active="$(active_llm_backend)"
+    if [[ -n "$active" ]]; then
+        log_info "Active LLM backend: $active"
+    else
+        log_info "No active LLM backend"
+    fi
+    echo ""
+}
+
+# ============================================================================
+# Dispatch: start-backend / stop-backend
+# ============================================================================
+
+do_start_backend() {
+    local backend="${1:-}"
+    shift || true
+    local model="${1:-}"
+
+    case "$backend" in
+        ollama)
+            start_ollama
+            ;;
+        vllm)
+            start_vllm "$model"
+            ;;
+        comfyui)
+            start_comfyui
+            ;;
+        *)
+            log_err "Unknown backend: $backend"
+            log_err "Valid backends: ollama, vllm, comfyui"
+            return 1
+            ;;
+    esac
+}
+
+do_stop_backend() {
+    local backend="${1:-}"
+
+    case "$backend" in
+        ollama)  stop_ollama ;;
+        vllm)    stop_vllm ;;
+        comfyui) stop_comfyui ;;
+        *)
+            log_err "Unknown backend: $backend"
+            log_err "Valid backends: ollama, vllm, comfyui"
+            return 1
+            ;;
+    esac
+}
+
+# ============================================================================
+# Convenience: start / stop all
+# ============================================================================
+
+do_start() {
+    start_agent_app
+}
+
+do_stop() {
+    stop_agent_app
+    stop_ollama
+    stop_vllm
+    stop_comfyui
+}
+
+# ============================================================================
+# Usage
+# ============================================================================
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command> [args...]
+
+Commands:
+  status                             Show backend and agent status
+  start-backend <backend> [model]    Start an inference backend
+  stop-backend <backend>             Stop an inference backend
+  start                              Start the agent app (FastAPI)
+  stop                               Stop agent app and all backends
+  start-vllm <model>                 Convenience: start-backend vllm <model>
+  stop-vllm                          Convenience: stop-backend vllm
+  start-ollama                       Convenience: start-backend ollama
+  stop-ollama                        Convenience: stop-backend ollama
+  start-comfyui                      Convenience: start-backend comfyui
+  stop-comfyui                       Convenience: stop-backend comfyui
+
+Backends: ollama, vllm, comfyui
+
+Only one LLM backend (ollama or vllm) can run at a time.
+Starting one will stop the other automatically.
+
+Environment:
+  OLLAMA_HOST, OLLAMA_PORT              (default: 127.0.0.1:11434)
+  VLLM_HOST, VLLM_PORT                 (default: 127.0.0.1:8000)
+  COMFYUI_HOST, COMFYUI_PORT           (default: 127.0.0.1:8188)
+  AGENT_HOST, AGENT_PORT               (default: 0.0.0.0:9001)
+  AGENT_BACKEND_IDLE_SECS              Inactivity timeout (default: 0 = disabled)
+  CUDA_VISIBLE_DEVICES                  Pin GPU(s) for backends
+
+PID files: ${RUN_DIR}/
+Log files: ${LOG_DIR}/
+EOF
+}
+
+# ============================================================================
+# Main dispatch
+# ============================================================================
+
+CMD="${1:-}"
+shift || true
+
+case "$CMD" in
+    status)
+        do_status
+        ;;
+    start-backend)
+        do_start_backend "$@"
+        ;;
+    stop-backend)
+        do_stop_backend "$@"
+        ;;
+    start)
+        do_start
+        ;;
+    stop)
+        do_stop
+        ;;
+    start-vllm)
+        start_vllm "$@"
+        ;;
+    stop-vllm)
+        stop_vllm
+        ;;
+    start-ollama)
+        start_ollama
+        ;;
+    stop-ollama)
+        stop_ollama
+        ;;
+    start-comfyui)
+        start_comfyui
+        ;;
+    stop-comfyui)
+        stop_comfyui
+        ;;
+    ""|-h|--help|help)
+        usage
+        exit 0
+        ;;
+    *)
+        log_err "Unknown command: $CMD"
+        usage
+        exit 2
+        ;;
+esac
