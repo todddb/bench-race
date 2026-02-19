@@ -1555,7 +1555,6 @@ async def _check_ollama_health(timeout_s: float = None) -> dict:
     if timeout_s is None:
         timeout_s = OLLAMA_START_TIMEOUT_S
 
-    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
     health_url = f"{base_url}/api/tags"
 
     slog.info("reset_checking_ollama_health", url=health_url, timeout_s=timeout_s)
@@ -1844,7 +1843,6 @@ async def reset_agent():
 
 @app.get("/capabilities")
 async def capabilities():
-    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
 
     # Check Ollama reachability and get available models
     ollama_reachable = await check_ollama_available(base_url)
@@ -3147,8 +3145,27 @@ async def _pull_ollama_model(sync_id: str, model: str, base_url: str) -> None:
                     break
 
 
+
+
+async def _sync_models_via_script(models: List[str]) -> None:
+    script = ROOT_DIR / "agent" / "scripts" / "sync_models.sh"
+    if not script.exists():
+        raise RuntimeError(f"Sync script not found: {script}")
+
+    proc = await asyncio.create_subprocess_exec(
+        str(script),
+        *models,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err_msg = stderr.decode("utf-8", errors="replace").strip()
+        out_msg = stdout.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(err_msg or out_msg or f"sync_models.sh failed with exit code {proc.returncode}")
+
 async def _sync_models(sync_id: str, req: SyncRequest) -> None:
-    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
     target_dir = req.target_dir if req.target_dir in ("ollama", "vllm", "both") else "ollama"
     try:
         _ensure_model_layout()
@@ -3172,22 +3189,21 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                 "sync_progress",
                 {"model": model, "phase": "queued", "percent": None, "message": "Queued"},
             )
-            if target_dir in ("ollama", "both"):
-                await _pull_ollama_model(sync_id, model, base_url)
-            if target_dir in ("vllm", "both"):
-                model_name = _sanitize_model_name(model) if req.sanitize_names else model
-                model_dir = _models_root() / "vllm" / model_name
-                model_dir.mkdir(parents=True, exist_ok=True)
-                await _broadcast_sync_event(
-                    sync_id,
-                    "sync_progress",
-                    {
-                        "model": model,
-                        "phase": "complete",
-                        "percent": 100,
-                        "message": f"Prepared vLLM model directory: {model_dir}",
-                    },
-                )
+
+        if req.llm:
+            await _sync_models_via_script(req.llm)
+
+        for model in req.llm:
+            await _broadcast_sync_event(
+                sync_id,
+                "sync_progress",
+                {
+                    "model": model,
+                    "phase": "complete",
+                    "percent": 100,
+                    "message": "Model synced to agent/models/ollama with vLLM sanitized symlink",
+                },
+            )
 
         for model in req.whisper:
             await _broadcast_sync_event(
@@ -3202,9 +3218,6 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                 "sync_progress",
                 {"model": profile, "phase": "complete", "percent": 100, "message": "SDXL sync not configured"},
             )
-
-        if target_dir in ("ollama", "both") and req.sanitize_names:
-            _link_vllm_from_ollama()
 
         await _broadcast_sync_event(sync_id, "sync_done", {"message": "Sync complete"})
     except Exception as exc:
