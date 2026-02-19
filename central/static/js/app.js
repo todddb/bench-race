@@ -507,7 +507,8 @@ const toggleOverlay = (overlayId) => {
 const renderEngineBadge = (engine, fallbackReason) => {
   const engineValue = engine ?? "n/a";
   const isMock = engineValue === "mock";
-  let badge = `<span class="engine-badge ${isMock ? "mock" : "ollama"}">${engineValue}</span>`;
+  const badgeClass = isMock ? "mock" : (engineValue === "vllm" ? "vllm" : "ollama");
+  let badge = `<span class="engine-badge ${badgeClass}">${engineValue}</span>`;
   if (isMock && fallbackReason) {
     const reasonText = FALLBACK_REASONS[fallbackReason] || fallbackReason;
     badge += `<div class="fallback-reason">Fallback: ${reasonText}</div>`;
@@ -2634,6 +2635,106 @@ document.getElementById("refresh-caps")?.addEventListener("click", async () => {
 document.getElementById("model")?.addEventListener("change", () => {
   fetchStatus();
 });
+
+// ============================================================================
+// Backend Selector
+// ============================================================================
+
+const backendSelect = document.getElementById("backend-select");
+const backendStatusEl = document.getElementById("backend-status");
+const backendStopBtn = document.getElementById("backend-stop");
+const backendKeepWarm = document.getElementById("backend-keep-warm");
+
+const updateBackendStatus = (state, text) => {
+  if (!backendStatusEl) return;
+  backendStatusEl.className = "backend-status-indicator " + state;
+  backendStatusEl.textContent = text || state;
+};
+
+// Get machine IDs from the pane elements
+const getMachineIds = () => {
+  const panes = document.querySelectorAll(".pane[data-excluded='false']");
+  return Array.from(panes).map(p => p.id.replace("pane-", "")).filter(Boolean);
+};
+
+// When backend selection changes, send select request via central proxy
+backendSelect?.addEventListener("change", async () => {
+  const backend = backendSelect.value;
+  const model = document.getElementById("model")?.value || "";
+  const keepWarm = backendKeepWarm?.checked || false;
+
+  updateBackendStatus("starting", "Starting...");
+
+  const machineIds = getMachineIds();
+  for (const machineId of machineIds) {
+    try {
+      const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/select`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ backend, model, keep_warm: keepWarm }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        updateBackendStatus(data.state || "ready", data.state === "ready" ? "Ready" : "Starting...");
+      } else {
+        updateBackendStatus("error", "Error");
+      }
+    } catch (e) {
+      console.error("Backend select failed for", machineId, e);
+    }
+  }
+});
+
+// Stop backend button
+backendStopBtn?.addEventListener("click", async () => {
+  const backend = backendSelect?.value;
+  updateBackendStatus("stopped", "Stopping...");
+
+  const machineIds = getMachineIds();
+  for (const machineId of machineIds) {
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/stop?backend=${backend}`, { method: "POST" });
+    } catch (e) {
+      console.error("Backend stop failed for", machineId, e);
+    }
+  }
+
+  updateBackendStatus("stopped", "Stopped");
+});
+
+// Poll backend status periodically via central proxy
+const pollBackendStatus = async () => {
+  const machineIds = getMachineIds();
+  if (machineIds.length === 0) return;
+
+  // Use first machine as representative
+  const machineId = machineIds[0];
+  try {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/status`);
+    if (resp.ok) {
+      const data = await resp.json();
+      const active = data.active_backend;
+      if (active && backendSelect && backendSelect.value !== active) {
+        backendSelect.value = active;
+      }
+      if (active) {
+        const backendHealth = data.backends?.[active];
+        if (backendHealth?.healthy) {
+          updateBackendStatus("ready", "Ready");
+        } else {
+          updateBackendStatus("starting", "Starting...");
+        }
+      } else {
+        updateBackendStatus("stopped", "Stopped");
+      }
+    }
+  } catch (e) {
+    // Silently fail — agent may be unreachable
+  }
+};
+
+// Poll every 10 seconds
+setInterval(pollBackendStatus, 10000);
 
 // Run view banner actions
 document.getElementById("run-view-return")?.addEventListener("click", () => {

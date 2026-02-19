@@ -82,6 +82,22 @@ comfyui:
     - "cuda_unsupported_arch"
 
 ########################################
+# vLLM configuration
+########################################
+
+vllm:
+  enabled: true
+
+  host: "127.0.0.1"
+  port: 8000
+
+  # Install directory for vLLM venv (repo-relative)
+  install_dir: "agent/third_party/vllm"
+
+  # Optional: override start arguments
+  # extra_args: ["--tensor-parallel-size", "2"]
+
+########################################
 # Compute benchmark defaults
 ########################################
 

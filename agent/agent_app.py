@@ -40,6 +40,7 @@ if str(ROOT_DIR) not in sys.path:
 # now import shared pydantic schemas
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
 from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
+from backends.vllm_backend import check_vllm_available, stream_vllm_generate, get_vllm_models
 
 # Import agent-specific modules
 from agent.logging_utils import init_logging, get_logger, HOSTNAME
@@ -1224,6 +1225,189 @@ async def health():
     return {"ok": True, "machine_id": CFG.get("machine_id"), "label": CFG.get("label")}
 
 
+# ---------------------------
+# Backend lifecycle endpoints
+# ---------------------------
+
+# Track which inference backend is currently active
+_ACTIVE_BACKEND: Optional[str] = None  # "ollama", "vllm", "comfyui", or None
+_BACKEND_KEEP_WARM: bool = False
+_BACKEND_IDLE_SECS: int = int(os.environ.get("AGENT_BACKEND_IDLE_SECS", "0"))
+_BACKEND_IDLE_TASK: Optional[asyncio.Task] = None
+
+
+class BackendSelectRequest(BaseModel):
+    backend: str  # "ollama", "vllm", "comfyui"
+    model: Optional[str] = None
+    keep_warm: bool = False
+
+
+class BackendStatusResponse(BaseModel):
+    active_backend: Optional[str] = None
+    backends: Dict[str, Any] = Field(default_factory=dict)
+    keep_warm: bool = False
+
+
+async def _check_backend_health(backend: str) -> Dict[str, Any]:
+    """Check if a backend is healthy and return status info."""
+    vllm_cfg = CFG.get("vllm", {})
+    vllm_base = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
+    ollama_base = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
+    comfy_host = CFG.get("comfyui", {}).get("host", "127.0.0.1")
+    comfy_port = CFG.get("comfyui", {}).get("port", 8188)
+
+    if backend == "ollama":
+        healthy = await check_ollama_available(ollama_base)
+        return {"name": "ollama", "healthy": healthy, "url": ollama_base}
+    elif backend == "vllm":
+        from backends.vllm_backend import check_vllm_available
+        healthy = await check_vllm_available(vllm_base)
+        return {"name": "vllm", "healthy": healthy, "url": vllm_base}
+    elif backend == "comfyui":
+        try:
+            url = f"http://{comfy_host}:{comfy_port}/system_stats"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(url)
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        return {"name": "comfyui", "healthy": healthy, "url": f"http://{comfy_host}:{comfy_port}"}
+    return {"name": backend, "healthy": False, "error": "unknown backend"}
+
+
+async def _run_agent_script(command: str, *args: str) -> Dict[str, Any]:
+    """Run a scripts/agent subcommand and return result."""
+    agent_script = ROOT_DIR / "scripts" / "agent"
+    if not agent_script.exists():
+        return {"ok": False, "error": f"scripts/agent not found at {agent_script}"}
+
+    cmd = [str(agent_script), command] + list(args)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(ROOT_DIR),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": stdout.decode(errors="replace")[-2000:],
+            "stderr": stderr.decode(errors="replace")[-2000:],
+        }
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "Timed out after 600s"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _idle_timeout_watcher():
+    """Background task that stops the backend after inactivity."""
+    global _ACTIVE_BACKEND
+    if _BACKEND_IDLE_SECS <= 0:
+        return
+    await asyncio.sleep(_BACKEND_IDLE_SECS)
+    if _ACTIVE_BACKEND and not _BACKEND_KEEP_WARM:
+        slog.info("backend_idle_timeout", backend=_ACTIVE_BACKEND, idle_secs=_BACKEND_IDLE_SECS)
+        await _run_agent_script("stop-backend", _ACTIVE_BACKEND)
+        _ACTIVE_BACKEND = None
+
+
+def _reset_idle_timer():
+    """Reset the idle timeout timer."""
+    global _BACKEND_IDLE_TASK
+    if _BACKEND_IDLE_TASK and not _BACKEND_IDLE_TASK.done():
+        _BACKEND_IDLE_TASK.cancel()
+    if _BACKEND_IDLE_SECS > 0 and not _BACKEND_KEEP_WARM:
+        _BACKEND_IDLE_TASK = asyncio.create_task(_idle_timeout_watcher())
+
+
+@app.post("/api/backend/select")
+async def select_backend(req: BackendSelectRequest):
+    """
+    Select and start an inference backend.
+    Stops any conflicting backend first (only-one-active-LLM-backend policy).
+    """
+    global _ACTIVE_BACKEND, _BACKEND_KEEP_WARM
+
+    backend = req.backend.lower()
+    if backend not in ("ollama", "vllm", "comfyui"):
+        raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
+
+    slog.info("backend_select", backend=backend, model=req.model, keep_warm=req.keep_warm)
+    _BACKEND_KEEP_WARM = req.keep_warm
+
+    # Build args for start-backend
+    args = [backend]
+    if req.model:
+        args.append(req.model)
+
+    result = await _run_agent_script("start-backend", *args)
+
+    if result.get("ok"):
+        _ACTIVE_BACKEND = backend
+        _reset_idle_timer()
+
+        # Wait for health
+        health_info = await _check_backend_health(backend)
+        return {
+            "ok": True,
+            "backend": backend,
+            "state": "ready" if health_info.get("healthy") else "starting",
+            "health": health_info,
+        }
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "backend": backend,
+                "state": "error",
+                "error": result.get("stderr", result.get("error", "Unknown error")),
+            },
+        )
+
+
+@app.post("/api/backend/stop")
+async def stop_backend_endpoint(backend: Optional[str] = None):
+    """Stop a specific backend or the active one."""
+    global _ACTIVE_BACKEND
+
+    target = backend or _ACTIVE_BACKEND
+    if not target:
+        return {"ok": True, "message": "No active backend to stop"}
+
+    slog.info("backend_stop", backend=target)
+    result = await _run_agent_script("stop-backend", target)
+
+    if _ACTIVE_BACKEND == target:
+        _ACTIVE_BACKEND = None
+
+    return {
+        "ok": result.get("ok", False),
+        "backend": target,
+        "state": "stopped",
+    }
+
+
+@app.get("/api/backend/status")
+async def backend_status():
+    """Return status of all backends."""
+    statuses = {}
+    for b in ("ollama", "vllm", "comfyui"):
+        try:
+            statuses[b] = await _check_backend_health(b)
+        except Exception as e:
+            statuses[b] = {"name": b, "healthy": False, "error": str(e)}
+
+    return BackendStatusResponse(
+        active_backend=_ACTIVE_BACKEND,
+        backends=statuses,
+        keep_warm=_BACKEND_KEEP_WARM,
+    )
+
+
 async def _stop_ollama() -> dict:
     """Stop Ollama service with detailed logging. Platform-specific implementation."""
     import platform
@@ -1629,6 +1813,14 @@ async def capabilities():
     if ollama_reachable:
         ollama_models = await get_ollama_models(base_url)
 
+    # Check vLLM reachability and get available models
+    vllm_cfg = CFG.get("vllm", {})
+    vllm_base = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
+    vllm_reachable = await check_vllm_available(vllm_base)
+    vllm_models = []
+    if vllm_reachable:
+        vllm_models = await get_vllm_models(vllm_base)
+
     cap = Capabilities(
         machine_id=CFG.get("machine_id"),
         label=CFG.get("label"),
@@ -1662,7 +1854,12 @@ async def capabilities():
         comfyui_gpu_ok=COMFYUI_PREFLIGHT.get("comfyui_gpu_ok"),
         comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
-    return JSONResponse(cap.model_dump())
+    cap_dict = cap.model_dump()
+    # Add extended backend info (not in base schema but useful for UI)
+    cap_dict["vllm_reachable"] = vllm_reachable
+    cap_dict["vllm_models"] = vllm_models
+    cap_dict["active_backend"] = _ACTIVE_BACKEND
+    return JSONResponse(cap_dict)
 
 
 @app.get("/api/agent/runtime_metrics")
@@ -2031,65 +2228,108 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     )
 
     log.info("Starting job %s model=%s", job_id, model)
-    base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+
+    # Determine which LLM backend to use based on active backend selection
+    ollama_base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    vllm_cfg = CFG.get("vllm", {})
+    vllm_base_url = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
+
+    # If vLLM is the active backend, try it first
+    use_vllm = _ACTIVE_BACKEND == "vllm"
 
     backend_selected = None
     try:
-        available = await check_ollama_available(base_url)
-        if not available:
-            backend_selected = "mock"
-            slog.info(
-                "job_backend_selected",
-                job_id=job_id,
-                backend=backend_selected,
-                reason="ollama_unreachable",
-            )
-            log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
-
-            slog.info("job_started", job_id=job_id, backend=backend_selected)
-            result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
-        else:
-            # Check if model is available on Ollama
-            ollama_models = await get_ollama_models(base_url)
-            if model not in ollama_models:
-                backend_selected = "mock"
-                slog.info(
-                    "job_backend_selected",
-                    job_id=job_id,
-                    backend=backend_selected,
-                    reason="missing_model",
-                    available_models=ollama_models,
-                )
-                log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
-
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
-                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
-            else:
-                backend_selected = "ollama"
-                slog.info(
-                    "job_backend_selected",
-                    job_id=job_id,
-                    backend=backend_selected,
-                    reason="model_available",
-                )
-                log.info("Using Ollama backend for job %s", job_id)
+        if use_vllm:
+            # Try vLLM first
+            vllm_available = await check_vllm_available(vllm_base_url)
+            if vllm_available:
+                backend_selected = "vllm"
+                slog.info("job_backend_selected", job_id=job_id, backend="vllm", reason="active_backend")
+                log.info("Using vLLM backend for job %s", job_id)
 
                 slog.info("job_started", job_id=job_id, backend=backend_selected)
 
-                async def _on_token(text: str, timestamp_s: float) -> None:
+                async def _on_token_vllm(text: str, timestamp_s: float) -> None:
                     ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
                     await _broadcast_event(ev)
 
-                result = await stream_ollama_generate(
+                result = await stream_vllm_generate(
                     job_id=job_id,
                     model=model,
                     prompt=prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     num_ctx=num_ctx,
-                    base_url=base_url,
-                    on_token=_on_token,
+                    base_url=vllm_base_url,
+                    on_token=_on_token_vllm,
                 )
+                # Reset idle timer on activity
+                _reset_idle_timer()
+            else:
+                backend_selected = "mock"
+                slog.info("job_backend_selected", job_id=job_id, backend="mock", reason="vllm_unreachable")
+                log.warning("vLLM unreachable; falling back to mock backend for job %s", job_id)
+                slog.info("job_started", job_id=job_id, backend=backend_selected)
+                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="vllm_unreachable")
+        else:
+            # Default: try Ollama
+            available = await check_ollama_available(ollama_base_url)
+            if not available:
+                backend_selected = "mock"
+                slog.info(
+                    "job_backend_selected",
+                    job_id=job_id,
+                    backend=backend_selected,
+                    reason="ollama_unreachable",
+                )
+                log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
+
+                slog.info("job_started", job_id=job_id, backend=backend_selected)
+                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
+            else:
+                # Check if model is available on Ollama
+                ollama_models = await get_ollama_models(ollama_base_url)
+                if model not in ollama_models:
+                    backend_selected = "mock"
+                    slog.info(
+                        "job_backend_selected",
+                        job_id=job_id,
+                        backend=backend_selected,
+                        reason="missing_model",
+                        available_models=ollama_models,
+                    )
+                    log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
+
+                    slog.info("job_started", job_id=job_id, backend=backend_selected)
+                    result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
+                else:
+                    backend_selected = "ollama"
+                    slog.info(
+                        "job_backend_selected",
+                        job_id=job_id,
+                        backend=backend_selected,
+                        reason="model_available",
+                    )
+                    log.info("Using Ollama backend for job %s", job_id)
+
+                    slog.info("job_started", job_id=job_id, backend=backend_selected)
+
+                    async def _on_token(text: str, timestamp_s: float) -> None:
+                        ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
+                        await _broadcast_event(ev)
+
+                    result = await stream_ollama_generate(
+                        job_id=job_id,
+                        model=model,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        num_ctx=num_ctx,
+                        base_url=ollama_base_url,
+                        on_token=_on_token,
+                    )
+                    # Reset idle timer on activity
+                    _reset_idle_timer()
     except Exception as e:
         backend_selected = "mock"
         slog.info(
@@ -2099,7 +2339,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
             reason="stream_error",
             error=str(e),
         )
-        log.warning("Ollama stream failed (%s); falling back to mock stream", e)
+        log.warning("LLM stream failed (%s); falling back to mock stream", e)
 
         slog.info("job_started", job_id=job_id, backend=backend_selected)
         result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")

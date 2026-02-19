@@ -67,6 +67,28 @@ agent/config/agent.yaml
 *.iml
 
 ########################################
+# Agent inference backends
+########################################
+# Downloaded model weights (large files, never commit)
+agent/models/*
+!agent/models/.gitkeep
+
+# Per-backend virtual environments
+agent/third_party/*/.venv/
+
+# PID files and runtime state
+agent/run/*
+!agent/run/.gitkeep
+run/
+
+# Agent logs
+agent/log/*
+!agent/log/.gitkeep
+
+# Model cache
+agent/model_cache/
+
+########################################
 # Docker / tooling
 ########################################
 .docker/
