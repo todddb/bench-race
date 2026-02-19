@@ -94,3 +94,6 @@ agent/model_cache/
 .docker/
 docker-compose.override.yml
 
+agent/third_party/comfyui/*
+!agent/third_party/comfyui/.gitkeep
+
