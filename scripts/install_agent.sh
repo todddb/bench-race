@@ -861,24 +861,33 @@ install_or_update_vllm() {
     # Create vLLM directory
     run_command mkdir -p "$VLLM_DIR"
 
-    # Create venv if not present
-    if [[ ! -d "$VLLM_DIR/.venv" ]]; then
+    local VLLM_VENV_DIR="$VLLM_DIR/.venv"
+
+    # Create venv if not present; recreate in update mode for clean installs
+    if [[ "$UPDATE_MODE" == true && -d "$VLLM_VENV_DIR" ]]; then
+        log_info "Recreating vLLM virtualenv (--update provided)..."
+        run_command rm -rf "$VLLM_VENV_DIR"
+    fi
+
+    if [[ ! -d "$VLLM_VENV_DIR" ]]; then
         log_info "Creating Python venv for vLLM..."
         (
             set -euo pipefail
             if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
-                /opt/homebrew/bin/python3.12 -m venv "$VLLM_DIR/.venv"
+                /opt/homebrew/bin/python3.12 -m venv "$VLLM_VENV_DIR"
             else
-                python3 -m venv "$VLLM_DIR/.venv"
+                python3 -m venv "$VLLM_VENV_DIR"
             fi
         ) || {
             log_error "Failed to create vLLM venv"
             return 1
         }
+    else
+        log_info "vLLM venv already exists"
     fi
 
-    local VENV_PY="$VLLM_DIR/.venv/bin/python"
-    local VENV_PIP="$VLLM_DIR/.venv/bin/pip"
+    local VENV_PY="$VLLM_VENV_DIR/bin/python"
+    local VENV_PIP="$VLLM_VENV_DIR/bin/pip"
 
     if [[ "$DRY_RUN" == true ]]; then
         log_info "[DRY-RUN] Would install vLLM dependencies"
@@ -894,55 +903,46 @@ install_or_update_vllm() {
         return 1
     }
 
-    # GPU detection for PyTorch index
-    local gpu_present=0
-    local compute_major=0
-    local compute_minor=0
-
-    if command -v nvidia-smi &>/dev/null; then
-        gpu_present=1
-        local cc_raw
-        cc_raw=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "")
-        if [[ -n "$cc_raw" ]]; then
-            cc_raw=$(echo "$cc_raw" | tr -d '[:space:]' | cut -d',' -f1)
-            if [[ "$cc_raw" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
-                compute_major="${BASH_REMATCH[1]}"
-                compute_minor="${BASH_REMATCH[2]}"
-            fi
-        fi
+    local has_cuda=false
+    if [[ "$OS_TYPE" == "linux" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi -L >/dev/null 2>&1; then
+        has_cuda=true
     fi
 
-    # Install vLLM with appropriate CUDA support
-    log_info "Installing vLLM..."
-
-    if [[ "$gpu_present" -eq 1 ]]; then
-        if [[ "$compute_major" -ge 13 ]] || [[ "$compute_major" -eq 12 && "$compute_minor" -ge 1 ]]; then
-            # GB10/Blackwell: use nightly builds
-            log_info "Installing vLLM with nightly CUDA support (compute $compute_major.$compute_minor)..."
-            "$VENV_PIP" install --quiet --pre vllm 2>/dev/null || \
-                "$VENV_PIP" install --quiet vllm
-        else
-            "$VENV_PIP" install --quiet vllm
-        fi
+    log_info "Installing vLLM dependencies..."
+    if [[ "$OS_TYPE" == "linux" && "$has_cuda" == true ]]; then
+        log_info "Linux + CUDA detected: installing torch==2.9.1+cu130 and vllm==0.15.1"
+        "$VENV_PIP" install \
+            --index-url https://download.pytorch.org/whl/cu130 \
+            --extra-index-url https://pypi.org/simple \
+            torch==2.9.1+cu130 vllm==0.15.1 transformers safetensors tqdm
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        log_info "macOS detected: installing CPU wheels"
+        "$VENV_PIP" install torch vllm transformers safetensors tqdm
     else
-        if [[ "$OS_TYPE" == "macos" ]]; then
-            log_warning "vLLM has limited macOS support. Installing anyway..."
-        fi
-        "$VENV_PIP" install --quiet vllm 2>/dev/null || {
-            log_warning "vLLM installation failed (may require NVIDIA GPU)"
-            return 1
-        }
+        log_info "Non-macOS platform without CUDA detected: installing CPU wheels"
+        "$VENV_PIP" install torch vllm transformers safetensors tqdm
     fi
 
-    # Also install huggingface_hub, transformers, safetensors for model management
-    "$VENV_PIP" install --quiet huggingface_hub transformers safetensors
+    # Smoke test
+    log_info "Running vLLM smoke test..."
+    "$VENV_PY" - <<'PYCODE'
+import sys
 
-    # Verify
-    if "$VENV_PY" -c "import vllm; print(f'vLLM {vllm.__version__}')" 2>/dev/null; then
-        log_success "vLLM installed at $VLLM_DIR"
-    else
-        log_warning "vLLM installed but import verification failed (may need GPU at runtime)"
-    fi
+import torch
+
+print(f"torch.__version__: {torch.__version__}")
+print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+
+try:
+    import vllm._C  # noqa: F401
+except Exception as exc:
+    print(f"ERROR: Failed to import vllm._C: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print("vLLM smoke test passed")
+PYCODE
+
+    log_success "vLLM installed at $VLLM_DIR"
 }
 
 # ============================================================================
