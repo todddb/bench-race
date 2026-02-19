@@ -2608,8 +2608,10 @@ def api_sync_models(machine_id: str):
             "sdxl_profiles": [
                 profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
             ],
+            "target_dir": "ollama",
+            "sanitize_names": True,
         }
-        if not any(missing.values()):
+        if not any((missing["llm"], missing["whisper"], missing["sdxl_profiles"])):
             return jsonify({"sync_id": None, "message": "No missing required models"})
         sync_resp = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/models/sync",

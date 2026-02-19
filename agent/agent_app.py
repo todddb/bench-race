@@ -119,6 +119,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _startup_checks():
+    _ensure_model_layout()
+    _migrate_legacy_models()
+    _link_vllm_from_ollama()
     install_dir = _comfy_install_dir()
     result = run_comfyui_cuda_probe(install_dir)
     if result:
@@ -152,6 +155,8 @@ class SyncRequest(BaseModel):
     llm: List[str] = Field(default_factory=list)
     whisper: List[str] = Field(default_factory=list)
     sdxl_profiles: List[str] = Field(default_factory=list)
+    target_dir: str = "ollama"
+    sanitize_names: bool = True
 
 
 class ComfyTxt2ImgRequest(BaseModel):
@@ -229,6 +234,40 @@ async def _broadcast_payload(payload: Dict[str, Any]):
 # ---------------------------
 # Image Storage Helpers
 # ---------------------------
+
+
+def _models_root() -> Path:
+    return ROOT_DIR / "agent" / "models"
+
+
+def _ensure_model_layout() -> None:
+    script = ROOT_DIR / "scripts" / "ensure_model_dirs.sh"
+    if script.exists():
+        subprocess.run([str(script)], check=True)
+    else:
+        (_models_root() / "ollama").mkdir(parents=True, exist_ok=True)
+        (_models_root() / "vllm").mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_legacy_models() -> None:
+    script = ROOT_DIR / "scripts" / "migrate_existing_models.sh"
+    if script.exists():
+        subprocess.run([str(script)], check=True)
+
+
+def _link_vllm_from_ollama() -> None:
+    script = ROOT_DIR / "scripts" / "vllm_link_from_ollama.sh"
+    if script.exists():
+        subprocess.run([str(script)], check=True)
+
+
+def _sanitize_model_name(name: str) -> str:
+    script = ROOT_DIR / "scripts" / "model_sanitize.sh"
+    if script.exists() and os.access(script, os.X_OK):
+        proc = subprocess.run([str(script), name], capture_output=True, text=True, check=True)
+        return proc.stdout.strip()
+    return name
+
 def _ensure_output_images_dir():
     """Ensure output_images directory exists."""
     OUTPUT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -3110,7 +3149,9 @@ async def _pull_ollama_model(sync_id: str, model: str, base_url: str) -> None:
 
 async def _sync_models(sync_id: str, req: SyncRequest) -> None:
     base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
+    target_dir = req.target_dir if req.target_dir in ("ollama", "vllm", "both") else "ollama"
     try:
+        _ensure_model_layout()
         await _broadcast_sync_event(
             sync_id,
             "sync_started",
@@ -3119,7 +3160,9 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                     "llm": req.llm,
                     "whisper": req.whisper,
                     "sdxl_profiles": req.sdxl_profiles,
-                }
+                },
+                "target_dir": target_dir,
+                "sanitize_names": req.sanitize_names,
             },
         )
 
@@ -3129,7 +3172,22 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                 "sync_progress",
                 {"model": model, "phase": "queued", "percent": None, "message": "Queued"},
             )
-            await _pull_ollama_model(sync_id, model, base_url)
+            if target_dir in ("ollama", "both"):
+                await _pull_ollama_model(sync_id, model, base_url)
+            if target_dir in ("vllm", "both"):
+                model_name = _sanitize_model_name(model) if req.sanitize_names else model
+                model_dir = _models_root() / "vllm" / model_name
+                model_dir.mkdir(parents=True, exist_ok=True)
+                await _broadcast_sync_event(
+                    sync_id,
+                    "sync_progress",
+                    {
+                        "model": model,
+                        "phase": "complete",
+                        "percent": 100,
+                        "message": f"Prepared vLLM model directory: {model_dir}",
+                    },
+                )
 
         for model in req.whisper:
             await _broadcast_sync_event(
@@ -3144,6 +3202,9 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                 "sync_progress",
                 {"model": profile, "phase": "complete", "percent": 100, "message": "SDXL sync not configured"},
             )
+
+        if target_dir in ("ollama", "both") and req.sanitize_names:
+            _link_vllm_from_ollama()
 
         await _broadcast_sync_event(sync_id, "sync_done", {"message": "Sync complete"})
     except Exception as exc:

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# sync_models.sh — Download HuggingFace models to agent/models/
+# sync_models.sh — Download HuggingFace models to agent/models/{ollama,vllm}
 #
 # Uses huggingface_hub.snapshot_download to fetch canonical HF safetensors
-# into agent/models/<name> as the single source of truth for weights.
+# into agent/models/<target-dir>/<name> as the single source of truth for weights.
 #
 # Usage:
-#   ./scripts/sync_models.sh <hf-id> [--local-name <name>] [--ollama-create]
+#   ./scripts/sync_models.sh <hf-id> [--local-name <name>] [--target-dir <ollama|vllm>] [--ollama-create]
 #
 # Examples:
 #   ./scripts/sync_models.sh meta-llama/Llama-2-70b-chat --local-name llama-70b
@@ -22,6 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 AGENT_DIR="${AGENT_DIR:-${REPO_ROOT}/agent}"
 MODELS_DIR="${AGENT_DIR}/models"
+TARGET_DIR="ollama"
 
 # ============================================================================
 # Colors
@@ -50,13 +51,14 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") <hf-repo-id> [OPTIONS]
 
-Download a HuggingFace model to agent/models/<name>.
+Download a HuggingFace model to agent/models/<target-dir>/<name>.
 
 Arguments:
   <hf-repo-id>           HuggingFace model identifier (e.g. meta-llama/Llama-2-70b-chat)
 
 Options:
   --local-name <name>    Local directory name (default: derived from hf-repo-id)
+  --target-dir <name>    Destination under agent/models (ollama|vllm, default: ollama)
   --ollama-create        Create an Ollama model from the downloaded safetensors
   --help, -h             Show this help
 
@@ -75,6 +77,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --local-name)
             LOCAL_NAME="$2"
+            shift 2
+            ;;
+        --target-dir)
+            TARGET_DIR="$2"
             shift 2
             ;;
         --ollama-create)
@@ -109,6 +115,11 @@ if [[ -z "$HF_ID" ]]; then
     exit 1
 fi
 
+if [[ "$TARGET_DIR" != "ollama" && "$TARGET_DIR" != "vllm" ]]; then
+    log_err "--target-dir must be one of: ollama, vllm"
+    exit 1
+fi
+
 # Derive local name from HF ID if not specified
 if [[ -z "$LOCAL_NAME" ]]; then
     # meta-llama/Llama-2-70b-chat -> Llama-2-70b-chat
@@ -117,7 +128,7 @@ if [[ -z "$LOCAL_NAME" ]]; then
     LOCAL_NAME=$(echo "$LOCAL_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 fi
 
-MODEL_DIR="${MODELS_DIR}/${LOCAL_NAME}"
+MODEL_DIR="${MODELS_DIR}/${TARGET_DIR}/${LOCAL_NAME}"
 
 # ============================================================================
 # Find Python with huggingface_hub
