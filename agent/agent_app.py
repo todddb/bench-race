@@ -1845,6 +1845,7 @@ async def reset_agent():
 async def capabilities():
 
     # Check Ollama reachability and get available models
+    base_url = __import__('os').environ.get('OLLAMA_BASE_URL','http://127.0.0.1:11434')
     ollama_reachable = await check_ollama_available(base_url)
     ollama_models = []
     if ollama_reachable:
