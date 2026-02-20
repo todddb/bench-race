@@ -1192,3 +1192,34 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 @media (max-width: 720px) {
   .app-version { display: none; }
 }
+
+/* --- Model validation (Test button) --- */
+.model-policy-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.model-validation-results { margin: 8px 0; padding: 8px; background: var(--surface-2, #1e293b); border-radius: 8px; font-size: 13px; max-height: 240px; overflow-y: auto; }
+.model-validation-results.hidden { display: none; }
+.validation-row { padding: 4px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.validation-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.validation-pill.valid { background: #166534; color: #bbf7d0; }
+.validation-pill.invalid { background: #991b1b; color: #fecaca; }
+.sanitized-name { font-size: 11px; color: #94a3b8; font-family: monospace; }
+.agent-pill { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+.agent-pill.present { background: #166534; color: #bbf7d0; }
+.agent-pill.missing { background: #78350f; color: #fde68a; }
+.validation-reason { color: #f87171; font-size: 12px; }
+.validation-loading, .validation-empty, .validation-error { color: #94a3b8; padding: 4px; }
+.validation-error { color: #f87171; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #475569; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.6s linear infinite; }
+.spinner.hidden { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- vLLM sync button --- */
+.btn-sync-vllm { padding: 6px 10px; font-size: 12px; border-radius: 8px; background: #7c3aed; color: #fff; border: none; cursor: pointer; }
+.btn-sync-vllm:hover { background: #6d28d9; }
+.btn-sync-vllm:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-sync-vllm.hidden { display: none; }
+
+/* --- Missing models banner --- */
+.missing-models-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #78350f; border-radius: 6px; margin: 4px 0; font-size: 13px; color: #fde68a; }
+.missing-models-banner.hidden { display: none; }
+.missing-models-text { flex: 1; }
+.missing-models-sync { font-size: 11px; }
