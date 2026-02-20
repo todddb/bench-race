@@ -3352,6 +3352,242 @@ def api_set_comfy_settings():
 
 
 # -----------------------------------------------------------------------------
+# Model Sync / Validate / Convert API
+# Endpoints for syncing Ollama models and converting for vLLM on agents.
+# -----------------------------------------------------------------------------
+SYNC_JOBS: Dict[str, Dict[str, Any]] = {}
+SYNC_JOBS_LOCK = threading.Lock()
+
+
+def _sanitize_model_name_py(name: str) -> str:
+    """Python-native sanitizer matching shared/sanitize_name.py."""
+    import re as _re
+    s = _re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    s = _re.sub(r"_+", "_", s)
+    s = s.strip("_")
+    return s[:90]
+
+
+@app.post("/api/models/validate")
+def api_validate_models():
+    """Validate model names. Optionally check agent availability."""
+    payload = request.get_json(force=True) or {}
+    models = payload.get("models") or []
+    check_agents = payload.get("check_agents", False)
+
+    if not isinstance(models, list):
+        return jsonify({"error": "models must be a list"}), 400
+
+    results = []
+    for model in models:
+        if not isinstance(model, str) or not model.strip():
+            results.append({"model": model, "valid": False, "reason": "Empty or non-string model name"})
+            continue
+
+        name = model.strip()
+        sanitized = _sanitize_model_name_py(name)
+
+        entry = {
+            "model": name,
+            "sanitized_name": sanitized,
+            "valid": True,
+            "reason": None,
+        }
+
+        # Basic format validation: at least one alphanumeric character
+        if not sanitized:
+            entry["valid"] = False
+            entry["reason"] = "Name sanitizes to empty string"
+        elif len(name) > 200:
+            entry["valid"] = False
+            entry["reason"] = "Model name too long (>200 chars)"
+
+        # Optional: check which agents have this model
+        if check_agents and entry["valid"]:
+            agent_status = []
+            for m in MACHINES:
+                mid = m.get("machine_id", "unknown")
+                try:
+                    r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+                    r.raise_for_status()
+                    cap = r.json()
+                    available = _available_llm_models(cap)
+                    agent_status.append({
+                        "machine_id": mid,
+                        "has_model": name in available,
+                    })
+                except Exception:
+                    agent_status.append({"machine_id": mid, "has_model": False, "error": "unreachable"})
+            entry["agents"] = agent_status
+
+        results.append(entry)
+
+    return jsonify({"results": results})
+
+
+@app.post("/api/agents/<machine_id>/sync_models")
+def api_agent_sync_models(machine_id: str):
+    """Trigger model sync + optional vLLM conversion on a specific agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    payload = request.get_json(force=True) or {}
+    models = payload.get("models")
+    if models is None:
+        # Default: sync all required models
+        required = _required_models()
+        models = required.get("llm") or []
+    if not isinstance(models, list) or not models:
+        return jsonify({"error": "No models to sync"}), 400
+
+    job_id = str(uuid.uuid4())
+
+    # Build per-model entries
+    model_entries = []
+    for m in models:
+        model_entries.append({
+            "id": m,
+            "display_name": m,
+            "sanitized_name": _sanitize_model_name_py(m),
+            "hf_repo_id": None,
+        })
+
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id] = {
+            "job_id": job_id,
+            "machine_id": machine_id,
+            "status": "pending",
+            "models": {e["id"]: {"status": "pending", "error_message": None} for e in model_entries},
+            "created_at": time.time(),
+        }
+
+    # Fire off the sync to the agent asynchronously in a thread
+    def _run_sync():
+        try:
+            with SYNC_JOBS_LOCK:
+                SYNC_JOBS[job_id]["status"] = "running"
+
+            resp = requests.post(
+                f"{machine['agent_base_url'].rstrip('/')}/_internal/sync_models",
+                json={"job_id": job_id, "models": model_entries},
+                timeout=600,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            with SYNC_JOBS_LOCK:
+                job = SYNC_JOBS[job_id]
+                for mr in result.get("results", []):
+                    mid = mr.get("id") or mr.get("display_name")
+                    if mid in job["models"]:
+                        job["models"][mid]["status"] = mr.get("status", "unknown")
+                        job["models"][mid]["error_message"] = mr.get("error_message")
+                        job["models"][mid]["ollama_path"] = mr.get("ollama_path")
+                        job["models"][mid]["vllm_path"] = mr.get("vllm_path")
+                        job["models"][mid]["sanitized_name"] = mr.get("sanitized_name")
+                all_done = all(m["status"] in ("success", "failed") for m in job["models"].values())
+                any_failed = any(m["status"] == "failed" for m in job["models"].values())
+                job["status"] = "completed" if all_done and not any_failed else "partial" if all_done else "running"
+        except Exception as e:
+            log.exception("Sync job %s failed: %s", job_id, e)
+            with SYNC_JOBS_LOCK:
+                SYNC_JOBS[job_id]["status"] = "failed"
+                SYNC_JOBS[job_id]["error"] = str(e)
+
+    thread = threading.Thread(target=_run_sync, daemon=True)
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "pending", "models": [e["id"] for e in model_entries]})
+
+
+@app.get("/api/agents/<machine_id>/sync_status/<job_id>")
+def api_agent_sync_status(machine_id: str, job_id: str):
+    """Poll sync job status for a specific agent."""
+    with SYNC_JOBS_LOCK:
+        job = SYNC_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job.get("machine_id") != machine_id:
+        return jsonify({"error": "Job does not belong to this machine"}), 404
+    return jsonify(job)
+
+
+@app.get("/api/agents/<machine_id>/model_status")
+def api_agent_model_status(machine_id: str):
+    """Check which required models are present/missing on an agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    required = _required_models()
+    try:
+        r = requests.get(
+            f"{machine['agent_base_url'].rstrip('/')}/_internal/model_status",
+            timeout=5,
+        )
+        r.raise_for_status()
+        agent_data = r.json()
+    except Exception as e:
+        # Fallback to capabilities check
+        try:
+            r2 = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+            r2.raise_for_status()
+            cap = r2.json()
+            available = _available_llm_models(cap)
+            vllm_available = cap.get("vllm_models") or []
+            agent_data = {
+                "models": {
+                    m: {
+                        "ollama_present": m in available,
+                        "vllm_present": m in vllm_available,
+                    }
+                    for m in required.get("llm", [])
+                }
+            }
+        except Exception:
+            return jsonify({"error": f"Agent unreachable: {e}"}), 502
+
+    required_llm = required.get("llm", [])
+    models_info = agent_data.get("models", {})
+    missing_ollama = [m for m in required_llm if not models_info.get(m, {}).get("ollama_present", False)]
+    missing_vllm = [m for m in required_llm if not models_info.get(m, {}).get("vllm_present", False)]
+
+    return jsonify({
+        "machine_id": machine_id,
+        "required": required_llm,
+        "models": models_info,
+        "missing_ollama": missing_ollama,
+        "missing_vllm": missing_vllm,
+        "all_present": len(missing_ollama) == 0 and len(missing_vllm) == 0,
+    })
+
+
+@app.post("/api/agents/<machine_id>/delete_model")
+def api_agent_delete_model(machine_id: str):
+    """Delete a model from a specific agent (cleanup symlinks, converted dirs)."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
+
+    payload = request.get_json(force=True) or {}
+    model_id = payload.get("id") or payload.get("display_name")
+    if not model_id:
+        return jsonify({"error": "Model id or display_name required"}), 400
+
+    try:
+        resp = requests.post(
+            f"{machine['agent_base_url'].rstrip('/')}/_internal/delete_model",
+            json={"id": model_id, "display_name": model_id},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+# -----------------------------------------------------------------------------
 # Service Control API
 # Security: Check for local requests or valid token
 # -----------------------------------------------------------------------------

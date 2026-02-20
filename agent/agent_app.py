@@ -3400,6 +3400,239 @@ async def comfy_sync_checkpoints(req: ComfyCheckpointSyncRequest):
 
 
 # ---------------------------
+# Internal endpoints for model sync/convert (called by central)
+# ---------------------------
+MODEL_MAP_PATH = AGENT_DIR / "models" / "_model_map.json"
+MODEL_MAP_LOCK = asyncio.Lock()
+
+
+def _load_model_map() -> Dict[str, Any]:
+    if MODEL_MAP_PATH.exists():
+        try:
+            return json.loads(MODEL_MAP_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_model_map(data: Dict[str, Any]) -> None:
+    MODEL_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_MAP_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+class InternalSyncRequest(BaseModel):
+    job_id: str
+    models: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class InternalDeleteRequest(BaseModel):
+    id: str
+    display_name: str
+
+
+@app.post("/_internal/sync_models")
+async def internal_sync_models(req: InternalSyncRequest):
+    """Sync and optionally convert models for Ollama + vLLM."""
+    results = []
+    sync_script = AGENT_DIR / "scripts" / "ollama_sync_and_convert.sh"
+
+    for entry in req.models:
+        model_id = entry.get("id") or entry.get("display_name", "")
+        display_name = entry.get("display_name", model_id)
+        hf_repo_id = entry.get("hf_repo_id")
+        sanitized = _sanitize_model_name(display_name)
+
+        result = {
+            "id": model_id,
+            "display_name": display_name,
+            "sanitized_name": sanitized,
+            "ollama_path": "",
+            "vllm_path": "",
+            "status": "failed",
+            "error_message": None,
+        }
+
+        try:
+            # Try using the shell script if available
+            if sync_script.exists() and os.access(sync_script, os.X_OK):
+                cmd = [str(sync_script), display_name, "--id", model_id]
+                if hf_repo_id:
+                    cmd.extend(["--hf-repo", hf_repo_id])
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, "AGENT_DIR": str(AGENT_DIR)},
+                )
+                stdout, stderr = await proc.communicate()
+
+                if proc.returncode == 0 and stdout:
+                    try:
+                        script_result = json.loads(stdout.decode("utf-8", errors="replace"))
+                        result.update(script_result)
+                    except json.JSONDecodeError:
+                        result["status"] = "success"
+                        result["error_message"] = "Script succeeded but returned non-JSON output"
+                else:
+                    err_text = stderr.decode("utf-8", errors="replace").strip()
+                    result["error_message"] = err_text or f"Script exited with code {proc.returncode}"
+            else:
+                # Fallback: pull via Ollama directly
+                ollama_cfg = CFG.get("ollama", {})
+                base_url = ollama_cfg.get("base_url", "http://127.0.0.1:11434")
+
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=600.0, write=60.0)) as client:
+                        pull_resp = await client.post(
+                            f"{base_url.rstrip('/')}/api/pull",
+                            json={"name": display_name, "stream": False},
+                        )
+                        pull_resp.raise_for_status()
+
+                    result["status"] = "success"
+                    result["ollama_path"] = str(_models_root() / "ollama" / sanitized)
+
+                    # Create vLLM symlink if ollama model dir exists
+                    ollama_dir = _models_root() / "ollama" / sanitized
+                    vllm_link = _models_root() / "vllm" / sanitized
+                    if ollama_dir.exists() and not vllm_link.exists():
+                        vllm_link.symlink_to(ollama_dir)
+                        result["vllm_path"] = str(vllm_link)
+
+                except Exception as pull_err:
+                    result["error_message"] = f"Ollama pull failed: {pull_err}"
+
+            # Update model map
+            async with MODEL_MAP_LOCK:
+                model_map = _load_model_map()
+                model_map[model_id] = {
+                    "display_name": display_name,
+                    "sanitized_name": sanitized,
+                    "ollama_path": result.get("ollama_path", ""),
+                    "vllm_path": result.get("vllm_path", ""),
+                    "status": result["status"],
+                    "synced_at": datetime.now().isoformat(),
+                }
+                _save_model_map(model_map)
+
+        except Exception as e:
+            log.exception("Failed to sync model %s: %s", model_id, e)
+            result["error_message"] = str(e)
+
+        results.append(result)
+
+    return {"job_id": req.job_id, "results": results}
+
+
+@app.post("/_internal/delete_model")
+async def internal_delete_model(req: InternalDeleteRequest):
+    """Delete model files (vLLM symlink, converted dir, optionally Ollama copy)."""
+    display_name = req.display_name or req.id
+    sanitized = _sanitize_model_name(display_name)
+    auto_delete = CFG.get("auto_delete_ollama", False)
+
+    deleted = {"vllm_symlink": False, "converted_dir": False, "ollama_copy": False}
+
+    # Remove vLLM symlink
+    vllm_link = _models_root() / "vllm" / sanitized
+    if vllm_link.is_symlink():
+        vllm_link.unlink()
+        deleted["vllm_symlink"] = True
+
+    # Remove converted directory (only if agent-owned)
+    converted_dir = _models_root() / "converted" / sanitized
+    marker = converted_dir / ".benchrace_converted_by_agent=true"
+    if converted_dir.exists() and marker.exists():
+        shutil.rmtree(converted_dir, ignore_errors=True)
+        deleted["converted_dir"] = True
+
+    # Optionally remove Ollama copy
+    if auto_delete:
+        try:
+            ollama_cfg = CFG.get("ollama", {})
+            base_url = ollama_cfg.get("base_url", "http://127.0.0.1:11434")
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.delete(
+                    f"{base_url.rstrip('/')}/api/delete",
+                    json={"name": display_name},
+                )
+            deleted["ollama_copy"] = True
+        except Exception as e:
+            log.warning("Failed to delete Ollama copy of %s: %s", display_name, e)
+
+    # Update model map
+    async with MODEL_MAP_LOCK:
+        model_map = _load_model_map()
+        model_map.pop(req.id, None)
+        model_map.pop(display_name, None)
+        _save_model_map(model_map)
+
+    return {"id": req.id, "display_name": display_name, "sanitized_name": sanitized, "deleted": deleted}
+
+
+@app.get("/_internal/model_status")
+async def internal_model_status():
+    """Report per-model presence for Ollama and vLLM."""
+    ollama_cfg = CFG.get("ollama", {})
+    base_url = ollama_cfg.get("base_url", "http://127.0.0.1:11434")
+
+    # Get Ollama models
+    ollama_models: List[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            r.raise_for_status()
+            for m in r.json().get("models", []):
+                name = m.get("name", "")
+                ollama_models.append(name)
+                # Also add without tag for matching
+                if ":" in name:
+                    ollama_models.append(name.split(":")[0])
+    except Exception:
+        pass
+
+    # Get vLLM models
+    vllm_models: List[str] = []
+    vllm_dir = _models_root() / "vllm"
+    if vllm_dir.exists():
+        for entry in vllm_dir.iterdir():
+            if entry.is_dir() or entry.is_symlink():
+                vllm_models.append(entry.name)
+
+    # Load model map for richer info
+    model_map = _load_model_map()
+
+    models_status: Dict[str, Any] = {}
+
+    # Check all models in model_map
+    for model_id, info in model_map.items():
+        sanitized = info.get("sanitized_name", "")
+        display_name = info.get("display_name", model_id)
+        models_status[model_id] = {
+            "display_name": display_name,
+            "sanitized_name": sanitized,
+            "ollama_present": display_name in ollama_models or any(display_name in m for m in ollama_models),
+            "vllm_present": sanitized in vllm_models,
+            "synced_at": info.get("synced_at"),
+        }
+
+    # Also check any Ollama models not in map
+    for om in ollama_models:
+        if om not in models_status:
+            sanitized = _sanitize_model_name(om)
+            models_status[om] = {
+                "display_name": om,
+                "sanitized_name": sanitized,
+                "ollama_present": True,
+                "vllm_present": sanitized in vllm_models,
+                "synced_at": None,
+            }
+
+    return {"models": models_status}
+
+
+# ---------------------------
 # WebSocket endpoint
 # ---------------------------
 @app.websocket("/ws")

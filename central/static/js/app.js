@@ -1349,6 +1349,165 @@ function initSyncButtons(machines) {
   });
 }
 
+// ---- Model validation (Test button in settings) ----
+async function testModels() {
+  const editor = document.getElementById("model-policy-editor");
+  const spinner = document.getElementById("test-models-spinner");
+  const resultsDiv = document.getElementById("model-validation-results");
+  const btn = document.getElementById("test-models-btn");
+  if (!editor || !resultsDiv) return;
+
+  const models = editor.value
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!models.length) {
+    resultsDiv.innerHTML = '<div class="validation-empty">No models to test.</div>';
+    resultsDiv.classList.remove("hidden");
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.classList.remove("hidden");
+  resultsDiv.classList.remove("hidden");
+  resultsDiv.innerHTML = '<div class="validation-loading">Validating...</div>';
+
+  try {
+    const resp = await fetch("/api/models/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models, check_agents: true }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Validation failed");
+
+    resultsDiv.innerHTML = (data.results || [])
+      .map((r) => {
+        const pill = r.valid
+          ? '<span class="validation-pill valid">Valid</span>'
+          : '<span class="validation-pill invalid">Invalid</span>';
+        const sanitized = r.sanitized_name ? `<span class="sanitized-name">${r.sanitized_name}</span>` : "";
+        const agentInfo = (r.agents || [])
+          .map((a) => `<span class="agent-pill ${a.has_model ? "present" : "missing"}">${a.machine_id}</span>`)
+          .join(" ");
+        return `<div class="validation-row">${pill} <strong>${r.model}</strong> ${sanitized} ${agentInfo}${r.reason ? ` <span class="validation-reason">${r.reason}</span>` : ""}</div>`;
+      })
+      .join("");
+  } catch (err) {
+    resultsDiv.innerHTML = `<div class="validation-error">${err.message}</div>`;
+  } finally {
+    if (btn) btn.disabled = false;
+    if (spinner) spinner.classList.add("hidden");
+  }
+}
+
+// ---- vLLM Sync + job polling ----
+const vllmSyncJobs = new Map(); // machineId -> { jobId, pollTimer }
+
+function initVllmSyncButtons(machines) {
+  machines.forEach((machine) => {
+    const btn = document.getElementById(`sync-vllm-${machine.machine_id}`);
+    if (!btn) return;
+    btn.classList.remove("hidden");
+    btn.addEventListener("click", () => startVllmSync(machine.machine_id));
+
+    // Missing models banner sync button
+    const bannerBtn = document.querySelector(`#missing-models-${machine.machine_id} .missing-models-sync`);
+    if (bannerBtn) {
+      bannerBtn.addEventListener("click", () => startVllmSync(machine.machine_id));
+    }
+  });
+}
+
+async function startVllmSync(machineId) {
+  const btn = document.getElementById(`sync-vllm-${machineId}`);
+  if (btn) btn.disabled = true;
+  updateSyncUI(machineId, { message: "Starting vLLM sync..." });
+
+  try {
+    const resp = await fetch(`/api/agents/${machineId}/sync_models`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || "Sync request failed");
+
+    if (data.job_id) {
+      vllmSyncJobs.set(machineId, { jobId: data.job_id });
+      pollVllmSyncStatus(machineId, data.job_id);
+    } else {
+      completeSyncUI(machineId, "Up to date");
+    }
+  } catch (err) {
+    completeSyncUI(machineId, err.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollVllmSyncStatus(machineId, jobId) {
+  const poll = async () => {
+    try {
+      const resp = await fetch(`/api/agents/${machineId}/sync_status/${jobId}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Status check failed");
+
+      const models = data.models || {};
+      const total = Object.keys(models).length;
+      const done = Object.values(models).filter((m) => m.status === "success" || m.status === "failed").length;
+      const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+
+      updateSyncUI(machineId, {
+        message: `Syncing models (${done}/${total})`,
+        percent: percent,
+      });
+
+      if (data.status === "completed" || data.status === "partial" || data.status === "failed") {
+        const failed = Object.values(models).filter((m) => m.status === "failed");
+        if (failed.length > 0) {
+          completeSyncUI(machineId, `Sync done: ${failed.length} failed`, true);
+        } else {
+          completeSyncUI(machineId, "Sync complete");
+        }
+        vllmSyncJobs.delete(machineId);
+        checkMissingModels(machineId);
+        await fetchStatus();
+        return;
+      }
+
+      setTimeout(poll, 3000);
+    } catch (err) {
+      completeSyncUI(machineId, err.message, true);
+      vllmSyncJobs.delete(machineId);
+    }
+  };
+  poll();
+}
+
+async function checkMissingModels(machineId) {
+  const banner = document.getElementById(`missing-models-${machineId}`);
+  if (!banner) return;
+
+  try {
+    const resp = await fetch(`/api/agents/${machineId}/model_status`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const missingVllm = data.missing_vllm || [];
+    const missingOllama = data.missing_ollama || [];
+    const totalMissing = new Set([...missingVllm, ...missingOllama]).size;
+
+    if (totalMissing > 0) {
+      banner.classList.remove("hidden");
+      banner.querySelector(".missing-models-text").textContent = `Missing ${totalMissing} model${totalMissing !== 1 ? "s" : ""}`;
+    } else {
+      banner.classList.add("hidden");
+    }
+  } catch {
+    // Silently ignore — banner stays hidden
+  }
+}
+
 const isScrolledToBottom = (el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
 
 const maybeAutoScrollOutput = (machineId) => {
@@ -1886,6 +2045,9 @@ socket.on("connect", async () => {
       }
     });
     initSyncButtons(machines);
+    initVllmSyncButtons(machines);
+    // Check missing models for each machine
+    machines.forEach((m) => checkMissingModels(m.machine_id));
     await fetchStatus();
     await loadBaselineRun();
     await fetchRecentRuns();
@@ -2283,6 +2445,10 @@ document.getElementById("delete-all-runs")?.addEventListener("click", async () =
 
 document.getElementById("recheck-checkpoints")?.addEventListener("click", async () => {
   await loadCheckpointCatalog(true);
+});
+
+document.getElementById("test-models-btn")?.addEventListener("click", async () => {
+  await testModels();
 });
 
 document.querySelectorAll("[data-overlay-close]").forEach((button) => {

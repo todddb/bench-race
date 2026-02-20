@@ -179,7 +179,12 @@
                     <span class="toggle-label">Enabled</span>
                   </label>
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
+                  <button class="btn btn-sync-vllm hidden" id="sync-vllm-{{ m.machine_id }}" title="Sync and convert models for vLLM">Sync vLLM</button>
                 </div>
+              </div>
+              <div class="missing-models-banner hidden" id="missing-models-{{ m.machine_id }}">
+                <span class="missing-models-text"></span>
+                <button class="btn btn-small btn-primary missing-models-sync" data-machine-id="{{ m.machine_id }}">Sync Models</button>
               </div>
               <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
                 <div class="progress-bar">
@@ -276,6 +281,11 @@
             <label for="model-policy-editor" class="control-label">Model Policy (central source of truth)</label>
             <div class="help-text">One model per line. Example: llama3.1:8b-instruct-q8_0</div>
             <textarea id="model-policy-editor" class="settings-textarea" rows="10"></textarea>
+            <div class="model-policy-actions">
+              <button id="test-models-btn" class="btn btn-secondary btn-small" type="button">Test Models</button>
+              <span id="test-models-spinner" class="spinner hidden"></span>
+            </div>
+            <div id="model-validation-results" class="model-validation-results hidden"></div>
             <div id="model-policy-error" class="form-error hidden" role="alert"></div>
             <div id="model-policy-summary" class="helper hidden"></div>
           </div>
