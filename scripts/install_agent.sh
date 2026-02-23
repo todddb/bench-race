@@ -92,6 +92,7 @@ UPDATE_MODE=false
 SKIP_OLLAMA=false
 SKIP_COMFYUI=false
 SKIP_VLLM=true
+INSTALL_VLLM=false   # opt-in; override with --install-vllm or INSTALL_VLLM=true env var
 INSTALL_SUDOERS=false
 
 AGENT_ID=""
@@ -853,7 +854,8 @@ PYCODE
 
 install_or_update_vllm() {
     # vLLM is opt-in (default: skip). Honor INSTALL_VLLM=true env var as override.
-    if [[ "${INSTALL_VLLM:-false}" == "true" ]]; then
+    # INSTALL_VLLM defaults to false (set in Global Variables section above).
+    if [[ "${INSTALL_VLLM}" == "true" ]]; then
         SKIP_VLLM=false
     fi
 
@@ -1573,6 +1575,7 @@ parse_args() {
                 ;;
             --install-vllm)
                 SKIP_VLLM=false
+                INSTALL_VLLM=true
                 shift
                 ;;
             --help)
