@@ -504,10 +504,12 @@ const toggleOverlay = (overlayId) => {
   }
 };
 
+const ENGINE_BADGE_CLASSES = { ollama: "ollama", mlx: "mlx", vllm: "vllm", triton: "triton", mock: "mock" };
+
 const renderEngineBadge = (engine, fallbackReason) => {
   const engineValue = engine ?? "n/a";
   const isMock = engineValue === "mock";
-  const badgeClass = isMock ? "mock" : (engineValue === "vllm" ? "vllm" : "ollama");
+  const badgeClass = isMock ? "mock" : (ENGINE_BADGE_CLASSES[engineValue] ?? "ollama");
   let badge = `<span class="engine-badge ${badgeClass}">${engineValue}</span>`;
   if (isMock && fallbackReason) {
     const reasonText = FALLBACK_REASONS[fallbackReason] || fallbackReason;
@@ -2885,8 +2887,11 @@ const pollBackendStatus = async () => {
       }
       if (active) {
         const backendHealth = data.backends?.[active];
+        // Read the label from the dropdown option — avoids hardcoding engine names
+        const activeOption = backendSelect?.querySelector(`option[value="${active}"]`);
+        const backendLabel = activeOption?.textContent || active;
         if (backendHealth?.healthy) {
-          updateBackendStatus("ready", "Ready");
+          updateBackendStatus(`ready backend-${active}`, backendLabel);
         } else {
           updateBackendStatus("starting", "Starting...");
         }
