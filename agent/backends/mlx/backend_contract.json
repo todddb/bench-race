@@ -1,0 +1,30 @@
+{
+  "GET /health": {
+    "returns": "{status, engine, model, mem:{ram_pct, vram_pct}}"
+  },
+  "GET /models": {
+    "returns": "{models:[{id, size, quant, arch, equivalence_group, supported_backends}]}"
+  },
+  "POST /start": {
+    "body": "{model_id, args}",
+    "returns": "{started: true, pid}"
+  },
+  "POST /stop": {
+    "returns": "{stopped: true}"
+  },
+  "POST /model/switch": {
+    "body": "{model_id}",
+    "returns": "{ok: true, load_time}"
+  },
+  "POST /infer": {
+    "body": "{prompt, max_tokens, temperature, stream:false}",
+    "returns": "{text, tokens, meta}"
+  },
+  "WS /stream": {
+    "start": "{model, prompt, params}",
+    "frames": "{type: 'token'|'done'|'error', token, text, token_idx, stats?}"
+  },
+  "GET /capabilities": {
+    "returns": "{streaming: true, supports_model_switch: true, max_batch: 1}"
+  }
+}
