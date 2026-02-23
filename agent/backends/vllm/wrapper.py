@@ -1,3 +1,9 @@
+"""
+NOTE: This wrapper is part of the legacy vLLM backend and is no longer active.
+The current backend uses the upstream vLLM image (bench-race/vllm:blackwell)
+which exposes the OpenAI-compatible API directly on port 8000.
+This file is retained for reference only.
+"""
 from __future__ import annotations
 
 import asyncio

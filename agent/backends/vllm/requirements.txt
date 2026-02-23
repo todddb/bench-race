@@ -1,3 +1,5 @@
+# NOTE: These requirements are for the legacy wrapper backend (no longer active).
+# The current vLLM backend is built from source via scripts/install_x64_vllm.sh.
 vllm==0.6.2
 transformers==4.45.0
 tokenizers>=0.19.1

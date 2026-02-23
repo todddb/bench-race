@@ -1153,18 +1153,44 @@ SOFTWARE.
 
 ## Additional backend installers (vLLM + Triton)
 
-### vLLM Docker backend (x64)
+### vLLM Docker backend (x64 / Blackwell)
 
+Supports NVIDIA Blackwell GPUs (RTX Pro 6000, RTX 5090, sm_120) as well as
+Ada Lovelace and Hopper (sm_89, sm_90).
+
+Build the image (one-time, ~30-60 min — compiles CUDA kernels from source):
 ```bash
 ./scripts/install_x64_vllm.sh
-./scripts/agent start-vllm
-curl http://127.0.0.1:${VLLM_PORT:-8000}/health
+```
+
+Start with a HuggingFace model:
+```bash
+./scripts/agent start-vllm Qwen/Qwen2.5-72B-Instruct
+./scripts/agent start-vllm Qwen/Qwen2.5-72B-Instruct-AWQ
+```
+
+Start with a local model directory:
+```bash
+./scripts/agent start-vllm agent/models/my-model
+```
+
+Stop (releases GPU for Ollama):
+```bash
+./scripts/agent stop-vllm
+```
+
+Health check:
+```bash
+curl http://127.0.0.1:${VLLM_PORT:-8000}/v1/models
 ```
 
 Notes:
-- Image tag: `bench-race/vllm`
-- Wrapper implements Backend Contract endpoints: `/health`, `/models`, `/model/switch`, `/infer`, `WS /stream`
-- Model volume: `agent/models/vllm`
+- Image tag: `bench-race/vllm:blackwell` (also tagged `bench-race/vllm:latest`)
+- Runs vLLM's native OpenAI-compatible API on port 8000
+- HuggingFace weights cached in `~/.cache/huggingface` (persists across restarts)
+- Local models mounted from `agent/models/vllm`
+- Context length controlled by `VLLM_MAX_MODEL_LEN` env var (default: 32768)
+- On WSL2: GPU passthrough requires NVIDIA Container Toolkit inside WSL2
 
 ### Triton / NVIDIA backend (GB10)
 

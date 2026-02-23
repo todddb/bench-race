@@ -332,28 +332,81 @@ start_ollama() {
 
 
 start_vllm_container() {
-    local model="${1:-${VLLM_MODEL:-facebook/opt-125m}}"
+    local model="${1:-${VLLM_MODEL:-}}"
+    if [[ -z "$model" ]]; then
+        log_err "Usage: ./scripts/agent start-vllm <model>"
+        log_err "Example (HuggingFace): ./scripts/agent start-vllm Qwen/Qwen2.5-72B-Instruct"
+        log_err "Example (local path):  ./scripts/agent start-vllm agent/models/my-model"
+        return 1
+    fi
+
     maybe_suspend_ollama_for_custom_backend
     stop_other_llm_backends "vllm"
+
     if ! command -v docker &>/dev/null; then
         log_err "docker not found in PATH"
+        return 1
+    fi
+
+    # Check image exists - if not, tell user to build it
+    local image
+    if docker image inspect bench-race/vllm:blackwell >/dev/null 2>&1; then
+        image="bench-race/vllm:blackwell"
+    elif docker image inspect bench-race/vllm:latest >/dev/null 2>&1; then
+        image="bench-race/vllm:latest"
+    else
+        log_err "vLLM Docker image not found. Build it first:"
+        log_err "  ./scripts/install_x64_vllm.sh"
         return 1
     fi
 
     docker rm -f bench-race-vllm >/dev/null 2>&1 || true
     mkdir -p "${AGENT_DIR}/models/vllm"
 
+    # Resolve model path: if it's a local directory, mount it and use /models/<name>
+    local model_arg="$model"
+    local extra_vol_args=()
+    if [[ -d "$model" ]]; then
+        local model_name
+        model_name="$(basename "$model")"
+        extra_vol_args=(-v "$(realpath "$model"):/models/${model_name}")
+        model_arg="/models/${model_name}"
+    elif [[ -d "${AGENT_DIR}/models/${model}" ]]; then
+        local model_name="$model"
+        extra_vol_args=(-v "${AGENT_DIR}/models/${model}:/models/${model_name}")
+        model_arg="/models/${model_name}"
+    fi
+
     local gpu_args=()
     if command -v nvidia-smi >/dev/null 2>&1; then
         gpu_args=(--gpus all)
     fi
 
-    log_info "Starting vLLM docker wrapper on ${VLLM_HOST}:${VLLM_PORT} (model: ${model})"
-    docker run -d --name bench-race-vllm         -p "${VLLM_PORT}:8010"         "${gpu_args[@]}"         -e VLLM_PORT=8010         -e VLLM_MODEL="${model}"         -v "${AGENT_DIR}/models/vllm:/models"         bench-race/vllm >/dev/null
+    # Determine max_model_len from env or default
+    local max_len="${VLLM_MAX_MODEL_LEN:-32768}"
 
-    local pid="$(docker inspect -f '{{.State.Pid}}' bench-race-vllm)"
+    log_info "Starting vLLM (${image}) on ${VLLM_HOST}:${VLLM_PORT} (model: ${model_arg})"
+
+    docker run -d \
+        --name bench-race-vllm \
+        --runtime nvidia \
+        --ipc host \
+        -p "${VLLM_PORT}:8000" \
+        "${gpu_args[@]}" \
+        "${extra_vol_args[@]}" \
+        -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+        -v "${AGENT_DIR}/models/vllm:/agent-models" \
+        "$image" \
+        --model "$model_arg" \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --max-model-len "$max_len" \
+        >/dev/null
+
+    local pid
+    pid="$(docker inspect -f '{{.State.Pid}}' bench-race-vllm)"
     write_pid "$VLLM_PIDFILE" "$pid"
-    wait_ready probe_vllm "vLLM (docker)" "$VLLM_PIDFILE" 180
+    wait_ready probe_vllm "vLLM (docker)" "$VLLM_PIDFILE" 300
 }
 
 start_vllm() {
@@ -511,7 +564,11 @@ start_mlx() {
 # ============================================================================
 
 stop_ollama()  { stop_process "$OLLAMA_PIDFILE" "Ollama"; }
-stop_vllm()    { docker rm -f bench-race-vllm >/dev/null 2>&1 || true; stop_process "$VLLM_PIDFILE" "vLLM"; }
+stop_vllm()    {
+    # docker rm -f handles container cleanup; --ipc host is released automatically on container exit
+    docker rm -f bench-race-vllm >/dev/null 2>&1 || true
+    stop_process "$VLLM_PIDFILE" "vLLM"
+}
 stop_comfyui() { stop_process "$COMFYUI_PIDFILE" "ComfyUI"; }
 stop_mlx()     { stop_process "$MLX_PIDFILE" "MLX"; }
 
@@ -715,8 +772,9 @@ Commands:
   stop-backend <backend>             Stop an inference backend
   start                              Start the agent app (FastAPI)
   stop                               Stop agent app and all backends
-  start-vllm <model>                 Convenience: start-backend vllm <model>
-  stop-vllm                          Convenience: stop-backend vllm
+  start-vllm <model>                 Start vLLM Docker backend (HF id or local path)
+  stop-vllm                          Stop vLLM Docker backend and release GPU
+  sync-and-start-vllm <hf-id>       Download model from HuggingFace then start vLLM
   start-nvidia                       Convenience: start-backend nvidia
   stop-nvidia                        Convenience: stop-backend nvidia
   restart-nvidia                     Convenience: stop + start nvidia
@@ -736,6 +794,8 @@ Starting one will stop the others automatically.
 Environment:
   OLLAMA_HOST, OLLAMA_PORT              (default: 127.0.0.1:11434)
   VLLM_HOST, VLLM_PORT                 (default: 127.0.0.1:8000)
+  VLLM_MAX_MODEL_LEN                   Max context length (default: 32768)
+  VLLM_MODEL                           Default model if none passed to start-vllm
   TRITON_HOST, TRITON_PORT             (default: 127.0.0.1:8020)
   MLX_HOST, MLX_PORT                    (default: 127.0.0.1:8321)
   COMFYUI_HOST, COMFYUI_PORT           (default: 127.0.0.1:8188)
