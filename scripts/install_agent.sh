@@ -24,7 +24,8 @@
 #   --dry-run             Show what would be done without doing it
 #   --skip-ollama         Skip Ollama installation
 #   --skip-comfyui        Skip ComfyUI installation
-#   --skip-vllm           Skip vLLM installation
+#   --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
+#   --install-vllm        Opt-in: install vLLM (disabled by default)
 
 set -euo pipefail
 
@@ -90,7 +91,7 @@ CLEANUP_SYSTEMD=false
 UPDATE_MODE=false
 SKIP_OLLAMA=false
 SKIP_COMFYUI=false
-SKIP_VLLM=false
+SKIP_VLLM=true
 INSTALL_SUDOERS=false
 
 AGENT_ID=""
@@ -851,8 +852,13 @@ PYCODE
 # ============================================================================
 
 install_or_update_vllm() {
+    # vLLM is opt-in (default: skip). Honor INSTALL_VLLM=true env var as override.
+    if [[ "${INSTALL_VLLM:-false}" == "true" ]]; then
+        SKIP_VLLM=false
+    fi
+
     if [[ "$SKIP_VLLM" == true ]]; then
-        log_info "Skipping vLLM installation (--skip-vllm)"
+        log_info "Skipping vLLM install (default). To enable: INSTALL_VLLM=true ./scripts/install_agent.sh  or pass --install-vllm"
         return 0
     fi
 
@@ -1164,7 +1170,11 @@ write_agent_config() {
         printf "  checkpoints_dir: \"agent/third_party/comfyui/models/checkpoints\"\n"
         printf "\n"
         printf "vllm:\n"
-        printf "  enabled: true\n"
+        if [[ "$SKIP_VLLM" == false ]]; then
+            printf "  enabled: true\n"
+        else
+            printf "  enabled: false\n"
+        fi
         printf "  host: \"127.0.0.1\"\n"
         printf "  port: 8000\n"
         printf "  install_dir: \"agent/third_party/vllm\"\n"
@@ -1495,7 +1505,8 @@ Options:
   --dry-run             Show what would be done without doing it
   --skip-ollama         Skip Ollama installation
   --skip-comfyui        Skip ComfyUI installation
-  --skip-vllm           Skip vLLM installation
+  --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
+  --install-vllm        Opt-in: install vLLM (disabled by default)
   --help                Show this help message
 
 EOF
@@ -1558,6 +1569,10 @@ parse_args() {
                 ;;
             --skip-vllm)
                 SKIP_VLLM=true
+                shift
+                ;;
+            --install-vllm)
+                SKIP_VLLM=false
                 shift
                 ;;
             --help)
@@ -1637,7 +1652,8 @@ main() {
     # Create agent directory structure
     log_step "Creating agent directory structure..."
     run_command mkdir -p "$MODELS_DIR" "$AGENT_RUN_DIR" "$AGENT_LOG_DIR"
-    run_command mkdir -p "$AGENT_DIR/third_party/comfyui" "$AGENT_DIR/third_party/vllm"
+    run_command mkdir -p "$AGENT_DIR/third_party/comfyui"
+    # vLLM dir is created by install_or_update_vllm only when opted in
 
     # Check prerequisites
     ensure_prereqs
