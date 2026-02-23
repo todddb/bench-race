@@ -33,6 +33,7 @@ LOG_DIR="${AGENT_DIR}/log"
 COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
 VLLM_DIR="${AGENT_DIR}/third_party/vllm"
 MLX_DIR="${AGENT_DIR}/backends/mlx"
+TRITON_DIR="${AGENT_DIR}/backends/triton"
 
 # PID files
 AGENT_PIDFILE="${RUN_DIR}/agent.pid"
@@ -40,6 +41,7 @@ OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
 VLLM_PIDFILE="${RUN_DIR}/vllm.pid"
 COMFYUI_PIDFILE="${RUN_DIR}/comfy.pid"
 MLX_PIDFILE="${RUN_DIR}/mlx.pid"
+TRITON_PIDFILE="${RUN_DIR}/triton.pid"
 
 # Log files
 AGENT_LOGFILE="${LOG_DIR}/agent.log"
@@ -47,12 +49,15 @@ OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
 VLLM_LOGFILE="${LOG_DIR}/vllm.log"
 COMFYUI_LOGFILE="${LOG_DIR}/comfy.log"
 MLX_LOGFILE="${LOG_DIR}/mlx.log"
+TRITON_LOGFILE="${LOG_DIR}/triton.log"
 
 # Configurable ports
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8000}"
+TRITON_HOST="${TRITON_HOST:-127.0.0.1}"
+TRITON_PORT="${TRITON_PORT:-8020}"
 COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 MLX_HOST="${MLX_HOST:-127.0.0.1}"
@@ -168,6 +173,10 @@ probe_mlx() {
     curl -fsS --max-time 2 "http://${MLX_HOST}:${MLX_PORT}/health" >/dev/null 2>&1
 }
 
+probe_triton() {
+    curl -fsS --max-time 2 "http://${TRITON_HOST}:${TRITON_PORT}/health" >/dev/null 2>&1
+}
+
 probe_agent() {
     curl -fsS --max-time 2 "http://127.0.0.1:${AGENT_PORT}/health" >/dev/null 2>&1
 }
@@ -269,6 +278,27 @@ stop_other_llm_backends() {
 # Backend start functions
 # ============================================================================
 
+
+maybe_suspend_ollama_for_custom_backend() {
+    local dry_run="${OLLAMA_SUSPEND_DRY_RUN:-0}"
+    local auto="${ALLOW_OLLAMA_AUTO_SUSPEND:-1}"
+    local threshold="${OLLAMA_VRAM_THRESHOLD_PCT:-1}"
+
+    if [[ "$auto" != "1" ]]; then
+        log_info "Auto-suspend disabled (ALLOW_OLLAMA_AUTO_SUSPEND=$auto)"
+        return 0
+    fi
+
+    if probe_ollama; then
+        log_warn "Ollama appears active; threshold=${threshold}%. Preparing to suspend before custom backend startup."
+        if [[ "$dry_run" == "1" ]]; then
+            log_info "Dry-run enabled; would run: ./scripts/agent stop-ollama"
+            return 0
+        fi
+        stop_ollama || true
+    fi
+}
+
 start_ollama() {
     # Enforce only-one-LLM
     stop_other_llm_backends "ollama"
@@ -300,6 +330,31 @@ start_ollama() {
     wait_ready probe_ollama "Ollama" "$OLLAMA_PIDFILE" 30
 }
 
+
+start_vllm_container() {
+    local model="${1:-${VLLM_MODEL:-facebook/opt-125m}}"
+    maybe_suspend_ollama_for_custom_backend
+    stop_other_llm_backends "vllm"
+    if ! command -v docker &>/dev/null; then
+        log_err "docker not found in PATH"
+        return 1
+    fi
+
+    docker rm -f bench-race-vllm >/dev/null 2>&1 || true
+    mkdir -p "${AGENT_DIR}/models/vllm"
+
+    local gpu_args=()
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        gpu_args=(--gpus all)
+    fi
+
+    log_info "Starting vLLM docker wrapper on ${VLLM_HOST}:${VLLM_PORT} (model: ${model})"
+    docker run -d --name bench-race-vllm         -p "${VLLM_PORT}:8010"         "${gpu_args[@]}"         -e VLLM_PORT=8010         -e VLLM_MODEL="${model}"         -v "${AGENT_DIR}/models/vllm:/models"         bench-race/vllm >/dev/null
+
+    local pid="$(docker inspect -f '{{.State.Pid}}' bench-race-vllm)"
+    write_pid "$VLLM_PIDFILE" "$pid"
+    wait_ready probe_vllm "vLLM (docker)" "$VLLM_PIDFILE" 180
+}
 
 start_vllm() {
     local model_arg="${1:-}"
@@ -456,13 +511,39 @@ start_mlx() {
 # ============================================================================
 
 stop_ollama()  { stop_process "$OLLAMA_PIDFILE" "Ollama"; }
-stop_vllm()    { stop_process "$VLLM_PIDFILE" "vLLM"; }
+stop_vllm()    { docker rm -f bench-race-vllm >/dev/null 2>&1 || true; stop_process "$VLLM_PIDFILE" "vLLM"; }
 stop_comfyui() { stop_process "$COMFYUI_PIDFILE" "ComfyUI"; }
 stop_mlx()     { stop_process "$MLX_PIDFILE" "MLX"; }
 
 restart_mlx() {
     stop_mlx
     start_mlx
+}
+
+start_nvidia() {
+    maybe_suspend_ollama_for_custom_backend
+    if ! command -v docker &>/dev/null; then
+        log_err "docker not found in PATH"
+        return 1
+    fi
+    docker rm -f bench-race-triton >/dev/null 2>&1 || true
+    mkdir -p "${AGENT_DIR}/models/triton"
+    log_info "Starting Triton wrapper on ${TRITON_HOST}:${TRITON_PORT}"
+    docker run -d --name bench-race-triton         --gpus all         -p "${TRITON_PORT}:8020"         -e TRITON_PORT=8020         -v "${AGENT_DIR}/models/triton:/models"         bench-race/triton >/dev/null
+    local pid="$(docker inspect -f '{{.State.Pid}}' bench-race-triton)"
+    write_pid "$TRITON_PIDFILE" "$pid"
+    wait_ready probe_triton "Triton (docker)" "$TRITON_PIDFILE" 120
+}
+
+stop_nvidia() {
+    docker rm -f bench-race-triton >/dev/null 2>&1 || true
+    remove_pid "$TRITON_PIDFILE"
+    log_ok "Triton container stopped"
+}
+
+restart_nvidia() {
+    stop_nvidia
+    start_nvidia
 }
 
 # ============================================================================
@@ -538,6 +619,7 @@ do_status() {
     status_backend "vLLM"    "$VLLM_PIDFILE"    probe_vllm    "$VLLM_PORT"
     status_backend "MLX"     "$MLX_PIDFILE"     probe_mlx     "$MLX_PORT"
     status_backend "ComfyUI" "$COMFYUI_PIDFILE" probe_comfyui "$COMFYUI_PORT"
+    status_backend "Triton" "$TRITON_PIDFILE" probe_triton "$TRITON_PORT"
     echo ""
     echo "=== Agent App ==="
     status_backend "Agent"   "$AGENT_PIDFILE"   probe_agent   "$AGENT_PORT"
@@ -567,7 +649,10 @@ do_start_backend() {
             start_ollama
             ;;
         vllm)
-            start_vllm "$model"
+            start_vllm_container "$model"
+            ;;
+        nvidia)
+            start_nvidia
             ;;
         comfyui)
             start_comfyui
@@ -577,7 +662,7 @@ do_start_backend() {
             ;;
         *)
             log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, mlx, comfyui"
+            log_err "Valid backends: ollama, vllm, mlx, comfyui, nvidia"
             return 1
             ;;
     esac
@@ -591,9 +676,10 @@ do_stop_backend() {
         vllm)    stop_vllm ;;
         comfyui) stop_comfyui ;;
         mlx)     stop_mlx ;;
+        nvidia) stop_nvidia ;;
         *)
             log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, mlx, comfyui"
+            log_err "Valid backends: ollama, vllm, mlx, comfyui, nvidia"
             return 1
             ;;
     esac
@@ -631,6 +717,9 @@ Commands:
   stop                               Stop agent app and all backends
   start-vllm <model>                 Convenience: start-backend vllm <model>
   stop-vllm                          Convenience: stop-backend vllm
+  start-nvidia                       Convenience: start-backend nvidia
+  stop-nvidia                        Convenience: stop-backend nvidia
+  restart-nvidia                     Convenience: stop + start nvidia
   start-ollama                       Convenience: start-backend ollama
   stop-ollama                        Convenience: stop-backend ollama
   start-comfyui                      Convenience: start-backend comfyui
@@ -639,7 +728,7 @@ Commands:
   stop-mlx                           Convenience: stop-backend mlx
   restart-mlx                        Convenience: stop + start mlx
 
-Backends: ollama, vllm, mlx, comfyui
+Backends: ollama, vllm, mlx, comfyui, nvidia
 
 Only one LLM backend (ollama, vllm, or mlx) can run at a time.
 Starting one will stop the others automatically.
@@ -647,11 +736,15 @@ Starting one will stop the others automatically.
 Environment:
   OLLAMA_HOST, OLLAMA_PORT              (default: 127.0.0.1:11434)
   VLLM_HOST, VLLM_PORT                 (default: 127.0.0.1:8000)
+  TRITON_HOST, TRITON_PORT             (default: 127.0.0.1:8020)
   MLX_HOST, MLX_PORT                    (default: 127.0.0.1:8321)
   COMFYUI_HOST, COMFYUI_PORT           (default: 127.0.0.1:8188)
   AGENT_HOST, AGENT_PORT               (default: 0.0.0.0:9001)
   AGENT_BACKEND_IDLE_SECS              Inactivity timeout (default: 0 = disabled)
   CUDA_VISIBLE_DEVICES                  Pin GPU(s) for backends
+  ALLOW_OLLAMA_AUTO_SUSPEND             Auto-stop Ollama for custom backend (default: 1)
+  OLLAMA_SUSPEND_DRY_RUN                Log-only mode for Ollama suspension (default: 0)
+  OLLAMA_VRAM_THRESHOLD_PCT             Policy threshold hint (default: 1)
 
 PID files: ${RUN_DIR}/
 Log files: ${LOG_DIR}/
@@ -682,7 +775,7 @@ case "$CMD" in
         do_stop
         ;;
     start-vllm)
-        start_vllm "$@"
+        start_vllm_container "$@"
         ;;
     sync-and-start-vllm)
         sync_and_start_vllm "$@"
@@ -710,6 +803,15 @@ case "$CMD" in
         ;;
     restart-mlx)
         restart_mlx
+        ;;
+    start-nvidia)
+        start_nvidia
+        ;;
+    stop-nvidia)
+        stop_nvidia
+        ;;
+    restart-nvidia)
+        restart_nvidia
         ;;
     ""|-h|--help|help)
         usage
@@ -761,5 +863,5 @@ sync_and_start_vllm() {
     fi
 
     # Start vLLM using the local model dir
-    start_vllm "${dest}"
+    start_vllm_container "${dest}"
 }

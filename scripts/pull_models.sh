@@ -269,6 +269,24 @@ echo ""
 echo "=============================================="
 echo ""
 
+# Create backend model folders + equivalence mapping artifact
+mkdir -p "$REPO_ROOT/agent/models/ollama" "$REPO_ROOT/agent/models/vllm" "$REPO_ROOT/agent/models/triton" "$REPO_ROOT/agent/models/mlx"
+if [ -f "$REPO_ROOT/agent/models/metadata.yaml" ]; then
+  PYTHON="python3"
+  [ -f "$REPO_ROOT/agent/.venv/bin/python" ] && PYTHON="$REPO_ROOT/agent/.venv/bin/python"
+  "$PYTHON" - "$REPO_ROOT/agent/models/metadata.yaml" "$REPO_ROOT/agent/models/equivalence_map.json" <<'PY'
+import json,sys,yaml
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data=yaml.safe_load(f) or {}
+out={}
+for m in data.get("models", []):
+    out.setdefault(m.get("equivalence_group", "unknown"), []).append(m)
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump(out, f, indent=2)
+print(f"[pull_models] Wrote equivalence map: {sys.argv[2]}")
+PY
+fi
+
 # Exit with error if any models failed
 if [ $fail_count -gt 0 ]; then
   exit 1

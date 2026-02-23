@@ -1150,3 +1150,48 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Additional backend installers (vLLM + Triton)
+
+### vLLM Docker backend (x64)
+
+```bash
+./scripts/install_x64_vllm.sh
+./scripts/agent start-vllm
+curl http://127.0.0.1:${VLLM_PORT:-8000}/health
+```
+
+Notes:
+- Image tag: `bench-race/vllm`
+- Wrapper implements Backend Contract endpoints: `/health`, `/models`, `/model/switch`, `/infer`, `WS /stream`
+- Model volume: `agent/models/vllm`
+
+### Triton / NVIDIA backend (GB10)
+
+```bash
+./scripts/install_gb10_inference.sh
+./scripts/agent start-nvidia
+curl http://127.0.0.1:${TRITON_PORT:-8020}/health
+```
+
+Notes:
+- Image tag: `bench-race/triton`
+- Model volume: `agent/models/triton`
+- Expected Triton model repository layout is printed by installer.
+
+### Ollama auto-suspend policy
+
+When starting custom backends (`start-vllm`, `start-nvidia`), the agent helper can auto-stop Ollama to avoid RAM/VRAM contention.
+
+Environment flags:
+- `ALLOW_OLLAMA_AUTO_SUSPEND=1` (default)
+- `OLLAMA_SUSPEND_DRY_RUN=1` (log-only policy test)
+- `OLLAMA_VRAM_THRESHOLD_PCT=1` (policy hint)
+
+### Backend smoke tests
+
+```bash
+./scripts/test_backends_smoke.sh
+```
+
+This script checks backend `/health` endpoints and optionally runs a websocket token stream check when `websocat` is present.

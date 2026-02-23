@@ -72,6 +72,7 @@ agent/config/agent.yaml
 # Downloaded model weights (large files, never commit)
 agent/models/*
 !agent/models/.gitkeep
+!agent/models/metadata.yaml
 
 # Per-backend virtual environments
 agent/third_party/*/.venv/
