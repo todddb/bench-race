@@ -1,0 +1,18 @@
+models:
+  - model_id: llama3.1:8b
+    equivalence_group: llama3.1-8b
+    supported_backends: [mlx, vllm, triton, ollama]
+    default_quant: fp16
+    preferred_quant_by_backend:
+      ollama: q8_0
+      vllm: fp16
+      triton: fp16
+      mlx: fp16
+  - model_id: mistral:7b
+    equivalence_group: mistral-7b
+    supported_backends: [vllm, triton, ollama]
+    default_quant: fp16
+    preferred_quant_by_backend:
+      ollama: q8_0
+      vllm: fp16
+      triton: fp16
