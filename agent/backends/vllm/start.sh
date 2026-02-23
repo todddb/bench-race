@@ -1,3 +1,4 @@
+python3 /app/monkeypatch_tokenizer.py || true
 #!/usr/bin/env bash
 set -euo pipefail
 
