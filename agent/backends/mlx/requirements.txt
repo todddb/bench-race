@@ -1,0 +1,15 @@
+# MLX backend dependencies for bench-race (macOS Apple Silicon only)
+#
+# Install into the backend venv:
+#   python -m pip install -r requirements.txt
+#
+# NOTE: mlx and mlx-lm require macOS with Apple Silicon (M1+).
+
+mlx>=0.16.0
+mlx-lm>=0.18.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+psutil>=5.9.0
+httpx>=0.27.0
+pydantic>=2.0

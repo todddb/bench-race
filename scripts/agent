@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/agent — Inference backend lifecycle manager
 #
-# Manages Ollama, vLLM and ComfyUI backends: start, stop, status.
-# Enforces only-one-active-LLM-backend: starting vLLM stops Ollama and vice versa.
+# Manages Ollama, vLLM, MLX and ComfyUI backends: start, stop, status.
+# Enforces only-one-active-LLM-backend: starting vLLM stops Ollama/MLX and vice versa.
 # ComfyUI is treated as an independent backend (image generation).
 #
 # Usage:
@@ -17,6 +17,9 @@
 #   ./scripts/agent stop-ollama              # convenience: stop-backend ollama
 #   ./scripts/agent start-comfyui            # convenience: start-backend comfyui
 #   ./scripts/agent stop-comfyui             # convenience: stop-backend comfyui
+#   ./scripts/agent start-mlx               # convenience: start-backend mlx
+#   ./scripts/agent stop-mlx                # convenience: stop-backend mlx
+#   ./scripts/agent restart-mlx             # convenience: stop + start mlx
 
 set -euo pipefail
 
@@ -29,18 +32,21 @@ LOG_DIR="${AGENT_DIR}/log"
 # Backend directories
 COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
 VLLM_DIR="${AGENT_DIR}/third_party/vllm"
+MLX_DIR="${AGENT_DIR}/backends/mlx"
 
 # PID files
 AGENT_PIDFILE="${RUN_DIR}/agent.pid"
 OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
 VLLM_PIDFILE="${RUN_DIR}/vllm.pid"
 COMFYUI_PIDFILE="${RUN_DIR}/comfy.pid"
+MLX_PIDFILE="${RUN_DIR}/mlx.pid"
 
 # Log files
 AGENT_LOGFILE="${LOG_DIR}/agent.log"
 OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
 VLLM_LOGFILE="${LOG_DIR}/vllm.log"
 COMFYUI_LOGFILE="${LOG_DIR}/comfy.log"
+MLX_LOGFILE="${LOG_DIR}/mlx.log"
 
 # Configurable ports
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
@@ -49,6 +55,8 @@ VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
+MLX_HOST="${MLX_HOST:-127.0.0.1}"
+MLX_PORT="${MLX_PORT:-8321}"
 AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
 AGENT_PORT="${AGENT_PORT:-9001}"
 
@@ -156,6 +164,10 @@ probe_comfyui() {
     curl -fsS --max-time 2 "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" >/dev/null 2>&1
 }
 
+probe_mlx() {
+    curl -fsS --max-time 2 "http://${MLX_HOST}:${MLX_PORT}/health" >/dev/null 2>&1
+}
+
 probe_agent() {
     curl -fsS --max-time 2 "http://127.0.0.1:${AGENT_PORT}/health" >/dev/null 2>&1
 }
@@ -194,7 +206,7 @@ wait_ready() {
 # LLM backends (mutually exclusive)
 # ============================================================================
 
-LLM_BACKENDS="ollama vllm"
+LLM_BACKENDS="ollama vllm mlx"
 
 active_llm_backend() {
     for backend in $LLM_BACKENDS; do
@@ -202,6 +214,7 @@ active_llm_backend() {
         case "$backend" in
             ollama) pidfile_var="$OLLAMA_PIDFILE" ;;
             vllm)   pidfile_var="$VLLM_PIDFILE" ;;
+            mlx)    pidfile_var="$MLX_PIDFILE" ;;
         esac
         local pid
         pid="$(read_pid "$pidfile_var")"
@@ -238,6 +251,14 @@ stop_other_llm_backends() {
                 if [[ -n "$pid" ]] && pid_is_running "$pid"; then
                     log_info "Stopping vllm (only-one-active-backend policy)..."
                     stop_process "$VLLM_PIDFILE" "vllm"
+                fi
+                ;;
+            mlx)
+                local pid
+                pid="$(read_pid "$MLX_PIDFILE")"
+                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+                    log_info "Stopping mlx (only-one-active-backend policy)..."
+                    stop_process "$MLX_PIDFILE" "mlx"
                 fi
                 ;;
         esac
@@ -396,6 +417,40 @@ start_comfyui() {
     wait_ready probe_comfyui "ComfyUI" "$COMFYUI_PIDFILE" 60
 }
 
+start_mlx() {
+    # Enforce only-one-LLM
+    stop_other_llm_backends "mlx"
+
+    if probe_mlx; then
+        log_ok "MLX already running at http://${MLX_HOST}:${MLX_PORT}"
+        return 0
+    fi
+
+    if [[ ! -d "$MLX_DIR/.venv" ]]; then
+        log_err "MLX venv not found at $MLX_DIR/.venv"
+        log_err "Run: ./scripts/install_macos_mlx.sh"
+        return 1
+    fi
+
+    local VENV_PY="$MLX_DIR/.venv/bin/python"
+
+    log_info "Starting MLX backend on ${MLX_HOST}:${MLX_PORT}..."
+
+    (
+        cd "$REPO_ROOT"
+        MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" \
+            nohup "$VENV_PY" -m uvicorn agent.backends.mlx.server:app \
+                --host "$MLX_HOST" \
+                --port "$MLX_PORT" \
+                >> "$MLX_LOGFILE" 2>&1 &
+        echo "$!" > "$MLX_PIDFILE"
+    )
+
+    log_info "MLX started (pid $(read_pid "$MLX_PIDFILE"))"
+
+    wait_ready probe_mlx "MLX" "$MLX_PIDFILE" 30
+}
+
 # ============================================================================
 # Backend stop functions
 # ============================================================================
@@ -403,6 +458,12 @@ start_comfyui() {
 stop_ollama()  { stop_process "$OLLAMA_PIDFILE" "Ollama"; }
 stop_vllm()    { stop_process "$VLLM_PIDFILE" "vLLM"; }
 stop_comfyui() { stop_process "$COMFYUI_PIDFILE" "ComfyUI"; }
+stop_mlx()     { stop_process "$MLX_PIDFILE" "MLX"; }
+
+restart_mlx() {
+    stop_mlx
+    start_mlx
+}
 
 # ============================================================================
 # Agent app (FastAPI) management
@@ -475,6 +536,7 @@ do_status() {
     echo "=== Backend Status ==="
     status_backend "Ollama"  "$OLLAMA_PIDFILE"  probe_ollama  "$OLLAMA_PORT"
     status_backend "vLLM"    "$VLLM_PIDFILE"    probe_vllm    "$VLLM_PORT"
+    status_backend "MLX"     "$MLX_PIDFILE"     probe_mlx     "$MLX_PORT"
     status_backend "ComfyUI" "$COMFYUI_PIDFILE" probe_comfyui "$COMFYUI_PORT"
     echo ""
     echo "=== Agent App ==="
@@ -510,9 +572,12 @@ do_start_backend() {
         comfyui)
             start_comfyui
             ;;
+        mlx)
+            start_mlx
+            ;;
         *)
             log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, comfyui"
+            log_err "Valid backends: ollama, vllm, mlx, comfyui"
             return 1
             ;;
     esac
@@ -525,9 +590,10 @@ do_stop_backend() {
         ollama)  stop_ollama ;;
         vllm)    stop_vllm ;;
         comfyui) stop_comfyui ;;
+        mlx)     stop_mlx ;;
         *)
             log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, comfyui"
+            log_err "Valid backends: ollama, vllm, mlx, comfyui"
             return 1
             ;;
     esac
@@ -545,6 +611,7 @@ do_stop() {
     stop_agent_app
     stop_ollama
     stop_vllm
+    stop_mlx
     stop_comfyui
 }
 
@@ -568,15 +635,19 @@ Commands:
   stop-ollama                        Convenience: stop-backend ollama
   start-comfyui                      Convenience: start-backend comfyui
   stop-comfyui                       Convenience: stop-backend comfyui
+  start-mlx                          Convenience: start-backend mlx
+  stop-mlx                           Convenience: stop-backend mlx
+  restart-mlx                        Convenience: stop + start mlx
 
-Backends: ollama, vllm, comfyui
+Backends: ollama, vllm, mlx, comfyui
 
-Only one LLM backend (ollama or vllm) can run at a time.
-Starting one will stop the other automatically.
+Only one LLM backend (ollama, vllm, or mlx) can run at a time.
+Starting one will stop the others automatically.
 
 Environment:
   OLLAMA_HOST, OLLAMA_PORT              (default: 127.0.0.1:11434)
   VLLM_HOST, VLLM_PORT                 (default: 127.0.0.1:8000)
+  MLX_HOST, MLX_PORT                    (default: 127.0.0.1:8321)
   COMFYUI_HOST, COMFYUI_PORT           (default: 127.0.0.1:8188)
   AGENT_HOST, AGENT_PORT               (default: 0.0.0.0:9001)
   AGENT_BACKEND_IDLE_SECS              Inactivity timeout (default: 0 = disabled)
@@ -630,6 +701,15 @@ case "$CMD" in
         ;;
     stop-comfyui)
         stop_comfyui
+        ;;
+    start-mlx)
+        start_mlx
+        ;;
+    stop-mlx)
+        stop_mlx
+        ;;
+    restart-mlx)
+        restart_mlx
         ;;
     ""|-h|--help|help)
         usage
