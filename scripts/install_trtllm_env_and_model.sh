@@ -4,7 +4,8 @@ set -euo pipefail
 # Usage: ./scripts/install_trtllm_env_and_model.sh
 # Edit the variables below to change model/image/paths.
 
-PROJECT_ROOT="${HOME}/projects/bench-race"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 SECRETS_FILE="${HOME}/.bench-race-secrets"
 
@@ -27,18 +28,11 @@ DTYPE="float16"
 # ensure dirs exist
 mkdir -p "$PROJECT_ROOT" "$MODEL_DIR" "$CHECKPOINT_DIR" "$ENGINE_OUT" "$(dirname "$VENV_DIR")"
 
-# load secrets
-if [ ! -f "$SECRETS_FILE" ]; then
-  echo "Secrets file missing: $SECRETS_FILE"
-  echo "Create it with HUGGINGFACE_TOKEN and NGC_API_KEY variables (see instructions)."
-  exit 1
-fi
-# shellcheck source=/dev/null
-source "$SECRETS_FILE"
-
-if [ -z "${HUGGINGFACE_TOKEN:-}" ]; then
-  echo "HUGGINGFACE_TOKEN is empty in $SECRETS_FILE"
-  exit 1
+if [ -f "$SECRETS_FILE" ]; then
+  # shellcheck source=/dev/null
+  source "$SECRETS_FILE"
+else
+  echo ">>> Secrets file not found at $SECRETS_FILE (continuing with unauthenticated HF access)."
 fi
 
 # create & activate venv
@@ -64,7 +58,6 @@ print("snapshot_download(repo_id={0}, out_dir={1})".format(repo_id, out_dir))
 snapshot_download(
     repo_id=repo_id,
     local_dir=out_dir,
-    local_dir_use_symlinks=False,
     token=token,
     ignore_patterns=["*.h5", "*.msgpack", "rust_model.ot", "*.tflite"],
 )
@@ -77,44 +70,50 @@ ls -la "${MODEL_DIR}" | egrep 'pytorch_model.bin|model.safetensors|config.json|t
 
 # pull the container image
 echo ">>> Pulling container image: $CONTAINER_IMAGE"
+
+if [ -n "${NGC_API_KEY:-}" ]; then
+  echo ">>> Logging in to nvcr.io using NGC_API_KEY from ${SECRETS_FILE}."
+  printf '%s' "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+else
+  echo ">>> NGC_API_KEY not set. Assuming Docker is already authenticated to nvcr.io."
+fi
+
 docker pull "$CONTAINER_IMAGE"
 
 # Convert from HF checkpoint to TensorRT-LLM checkpoint, then build engine.
 # NOTE: We do not use NVFP4 here. NVFP4 is optional and requires an explicit quantization pass.
 echo ">>> Converting HF model -> TensorRT-LLM checkpoint -> engine"
-docker run --rm --gpus all -it \
+docker run --rm --gpus all \
   -v "${MODEL_DIR}:/model:ro" \
   -v "${CHECKPOINT_DIR}:/checkpoint:rw" \
   -v "${ENGINE_OUT}:/output:rw" \
   -v "${HOME}/.cache/huggingface:/root/.cache/huggingface:rw" \
   --ipc=host \
   "${CONTAINER_IMAGE}" \
-  /bin/bash -lc "\
-    set -euo pipefail; \
-    CONVERT_SCRIPT=''; \
-    for p in /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/gpt/convert_checkpoint.py; do \
-      if [ -f \"$p\" ]; then CONVERT_SCRIPT=\"$p\"; break; fi; \
-    done; \
-    if [ -z \"$CONVERT_SCRIPT\" ]; then \
-      echo 'Could not find GPT convert_checkpoint.py inside image'; \
-      exit 1; \
-    fi; \
-    echo \"Using convert script: $CONVERT_SCRIPT\"; \
-    python \"$CONVERT_SCRIPT\" \
+  /bin/bash -lc "set -euo pipefail
+    CONVERT_SCRIPT=''
+    for p in /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/gpt/convert_checkpoint.py; do
+      if [ -f \"\$p\" ]; then CONVERT_SCRIPT=\"\$p\"; break; fi
+    done
+    if [ -z \"\$CONVERT_SCRIPT\" ]; then
+      echo 'Could not find GPT convert_checkpoint.py inside image'
+      exit 1
+    fi
+    echo \"Using convert script: \$CONVERT_SCRIPT\"
+    python \"\$CONVERT_SCRIPT\" \
       --model_dir /model \
       --output_dir /checkpoint \
       --dtype ${DTYPE} \
-      --tp_size ${NUM_GPUS}; \
-    echo 'Inside container: trtllm-build --checkpoint_dir /checkpoint --max_batch_size ${MAX_BATCH} --max_input_len ${MAX_INPUT_LEN} --max_seq_len ${MAX_SEQ_LEN} --output_dir /output --workers ${WORKERS}'; \
+      --tp_size ${NUM_GPUS}
+    echo 'Inside container: trtllm-build --checkpoint_dir /checkpoint --max_batch_size ${MAX_BATCH} --max_input_len ${MAX_INPUT_LEN} --max_seq_len ${MAX_SEQ_LEN} --output_dir /output --workers ${WORKERS}'
     trtllm-build --checkpoint_dir /checkpoint \
       --gemm_plugin float16 \
       --max_batch_size ${MAX_BATCH} \
       --max_input_len ${MAX_INPUT_LEN} \
       --max_seq_len ${MAX_SEQ_LEN} \
       --output_dir /output \
-      --workers ${WORKERS} ; \
-    echo 'trtllm-build finished (exit).' \
-"
+      --workers ${WORKERS}
+    echo 'trtllm-build finished (exit).'"
 
 echo ">>> Build finished."
 echo "    TensorRT-LLM checkpoint: $CHECKPOINT_DIR"
