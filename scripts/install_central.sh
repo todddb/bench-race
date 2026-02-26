@@ -75,12 +75,15 @@ REBUILD=false
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# On macOS, prefer the newest available Homebrew Python (3.14 > 3.13 > 3.12 > python3).
-# Python 3.12 has a known routing issue on macOS (EHOSTUNREACH for RFC1918 addresses)
-# that is not present in 3.14+, so we deliberately prefer the newer version.
+# On macOS, prefer Homebrew Python 3.13 first.
+#
+# Why: central currently depends on pydantic-core wheels/tooling that fail to build
+# on Python 3.14 in common setups (PyO3 version caps), which breaks installation.
+# Python 3.12 has had intermittent routing issues on some macOS environments, so we
+# keep it as a fallback behind 3.13.
 PYTHON_BIN=python3
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    for _ver in 3.14 3.13 3.12; do
+    for _ver in 3.13 3.12 3.14; do
         if [[ -x "/opt/homebrew/bin/python${_ver}" ]]; then
             PYTHON_BIN="/opt/homebrew/bin/python${_ver}"
             break
