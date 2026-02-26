@@ -75,11 +75,18 @@ REBUILD=false
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# Prefer Homebrew python3.12 on macOS if available
-# This sets PYTHON_BIN to a sensible python executable (defaults to python3)
+# On macOS, prefer the newest available Homebrew Python (3.14 > 3.13 > 3.12 > python3).
+# Python 3.12 has a known routing issue on macOS (EHOSTUNREACH for RFC1918 addresses)
+# that is not present in 3.14+, so we deliberately prefer the newer version.
 PYTHON_BIN=python3
-if [[ "$(uname -s)" == "Darwin" && -x /opt/homebrew/bin/python3.12 ]]; then
-    PYTHON_BIN=/opt/homebrew/bin/python3.12
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    for _ver in 3.14 3.13 3.12; do
+        if [[ -x "/opt/homebrew/bin/python${_ver}" ]]; then
+            PYTHON_BIN="/opt/homebrew/bin/python${_ver}"
+            break
+        fi
+    done
+    unset _ver
 fi
 # ---------------------------------------------------------------------------
 
@@ -177,14 +184,14 @@ ensure_prereqs() {
         exit 1
     fi
 
-    # Check Python version (reject 3.14+ per the existing setup_venv_central.sh logic)
+    # Check Python version (require 3.9+)
     local python_version
     python_version=$($PYTHON_BIN -c 'import sys; v=sys.version_info; print(str(v.major) + "." + str(v.minor))')
     local major minor
     IFS='.' read -r major minor <<< "$python_version"
 
-    if [[ "$major" -eq 3 && "$minor" -ge 14 ]]; then
-        log_error "Python 3.14+ is not yet supported. Please use Python 3.9-3.13."
+    if [[ "$major" -lt 3 || ( "$major" -eq 3 && "$minor" -lt 9 ) ]]; then
+        log_error "Python 3.9+ is required. Found Python ${python_version}."
         exit 1
     fi
 
