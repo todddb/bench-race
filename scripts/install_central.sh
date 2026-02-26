@@ -80,8 +80,8 @@ REBUILD=false
 # Python 3.12 has a confirmed routing bug on macOS: socket.connect() returns
 # EHOSTUNREACH ([Errno 65] No route to host) for RFC1918 addresses (192.168.x.x)
 # when the machine has multiple interfaces on the same subnet (e.g. wired + WiFi).
-# Python 3.14 does not exhibit this issue.  pydantic 2.11.7+ ships pre-built
-# wheels for Python 3.14, so the earlier PyO3 build concern no longer applies.
+# Python 3.14 does not exhibit this issue.  pydantic 2.12+ (pydantic-core 2.42+)
+# ships pre-built wheels for Python 3.14; earlier versions (2.11.x) do NOT.
 PYTHON_BIN=python3
 if [[ "$(uname -s)" == "Darwin" ]]; then
     for _ver in 3.14 3.13 3.12; do
