@@ -1,0 +1,224 @@
+{
+  "generated_from": "cleanup/agent-lifecycle",
+  "scripts": [
+    {
+      "path": "scripts/_common.sh",
+      "size_bytes": 1203
+    },
+    {
+      "path": "scripts/_python_pick.sh",
+      "size_bytes": 2997
+    },
+    {
+      "path": "scripts/_read_agent_config.py",
+      "size_bytes": 2078
+    },
+    {
+      "path": "scripts/agent",
+      "size_bytes": 28898
+    },
+    {
+      "path": "scripts/agents",
+      "size_bytes": 608
+    },
+    {
+      "path": "scripts/central",
+      "size_bytes": 2370
+    },
+    {
+      "path": "scripts/ensure_model_dirs.sh",
+      "size_bytes": 324
+    },
+    {
+      "path": "scripts/export_code.sh",
+      "size_bytes": 3638
+    },
+    {
+      "path": "scripts/install_agent.sh",
+      "size_bytes": 57205
+    },
+    {
+      "path": "scripts/install_central.sh",
+      "size_bytes": 15192
+    },
+    {
+      "path": "scripts/install_gb10_inference.sh",
+      "size_bytes": 1090
+    },
+    {
+      "path": "scripts/install_macos_mlx.sh",
+      "size_bytes": 8893
+    },
+    {
+      "path": "scripts/install_trtllm.sh",
+      "size_bytes": 23533
+    },
+    {
+      "path": "scripts/install_x64_vllm.sh",
+      "size_bytes": 6711
+    },
+    {
+      "path": "scripts/migrate_existing_models.sh",
+      "size_bytes": 859
+    },
+    {
+      "path": "scripts/model_sanitize.sh",
+      "size_bytes": 913
+    },
+    {
+      "path": "scripts/pull_models.sh",
+      "size_bytes": 8730
+    },
+    {
+      "path": "scripts/scaffold.sh",
+      "size_bytes": 15682
+    },
+    {
+      "path": "scripts/setup_venv_agent.sh",
+      "size_bytes": 690
+    },
+    {
+      "path": "scripts/setup_venv_central.sh",
+      "size_bytes": 665
+    },
+    {
+      "path": "scripts/start_agent",
+      "size_bytes": 491
+    },
+    {
+      "path": "scripts/start_central",
+      "size_bytes": 497
+    },
+    {
+      "path": "scripts/status_agent",
+      "size_bytes": 289
+    },
+    {
+      "path": "scripts/status_central",
+      "size_bytes": 295
+    },
+    {
+      "path": "scripts/stop_agent",
+      "size_bytes": 274
+    },
+    {
+      "path": "scripts/stop_central",
+      "size_bytes": 280
+    },
+    {
+      "path": "scripts/sync_models.sh",
+      "size_bytes": 8618
+    },
+    {
+      "path": "scripts/test_agent_smoke.sh",
+      "size_bytes": 7642
+    },
+    {
+      "path": "scripts/test_backends_smoke.sh",
+      "size_bytes": 1253
+    },
+    {
+      "path": "scripts/vllm_link_from_ollama.sh",
+      "size_bytes": 1108
+    }
+  ],
+  "agent_backends": [
+    {
+      "path": "agent/backends/comfyui_backend.py",
+      "type": "file"
+    },
+    {
+      "path": "agent/backends/mlx",
+      "type": "dir"
+    },
+    {
+      "path": "agent/backends/ollama_backend.py",
+      "type": "file"
+    },
+    {
+      "path": "agent/backends/triton",
+      "type": "dir"
+    },
+    {
+      "path": "agent/backends/trtllm_run.sh",
+      "type": "file"
+    },
+    {
+      "path": "agent/backends/vllm",
+      "type": "dir"
+    },
+    {
+      "path": "agent/backends/vllm_backend.py",
+      "type": "file"
+    },
+    {
+      "path": "agent/backends/whisper_backend.py",
+      "type": "file"
+    },
+    {
+      "path": "agent/backends/wrapper",
+      "type": "dir"
+    }
+  ],
+  "docs_referencing_backends": [
+    {
+      "path": "CHANGELOG.md",
+      "mentions": [
+        "comfyui",
+        "vllm",
+        "wrapper"
+      ]
+    },
+    {
+      "path": "README.md",
+      "mentions": [
+        "ollama",
+        "trtllm",
+        "comfyui",
+        "vllm",
+        "wrapper"
+      ]
+    },
+    {
+      "path": "agent/backends/wrapper/README.md",
+      "mentions": [
+        "mlx",
+        "trtllm",
+        "wrapper"
+      ]
+    },
+    {
+      "path": "docs/architecture.md",
+      "mentions": [
+        "ollama",
+        "comfyui",
+        "wrapper"
+      ]
+    },
+    {
+      "path": "docs/configuration-guide.md",
+      "mentions": [
+        "ollama",
+        "comfyui"
+      ]
+    },
+    {
+      "path": "docs/gpu-benchmarking-guide.md",
+      "mentions": [
+        "ollama",
+        "comfyui"
+      ]
+    },
+    {
+      "path": "docs/prime-algorithms.md",
+      "mentions": [
+        "wrapper"
+      ]
+    }
+  ],
+  "tests_referencing_vllm": [
+    "scripts/test_agent_smoke.sh",
+    "scripts/test_backends_smoke.sh",
+    "tests/test_model_sync_vllm.py"
+  ]
+}

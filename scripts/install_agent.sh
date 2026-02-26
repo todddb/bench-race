@@ -24,8 +24,6 @@
 #   --dry-run             Show what would be done without doing it
 #   --skip-ollama         Skip Ollama installation
 #   --skip-comfyui        Skip ComfyUI installation
-#   --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
-#   --install-vllm        Opt-in: install vLLM (disabled by default)
 #   --install-trtllm      Opt-in: install TensorRT-LLM (disabled by default)
 #   --skip-trtllm         Skip TensorRT-LLM installation
 
@@ -37,7 +35,6 @@ AGENT_DIR="${REPO_ROOT}/agent"
 CONFIG_DIR="${AGENT_DIR}/config"
 CONFIG_FILE="${CONFIG_DIR}/agent.yaml"
 COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
-VLLM_DIR="${AGENT_DIR}/third_party/vllm"
 MODELS_DIR="${AGENT_DIR}/models"
 AGENT_RUN_DIR="${AGENT_DIR}/run"
 AGENT_LOG_DIR="${AGENT_DIR}/log"
@@ -93,8 +90,6 @@ CLEANUP_SYSTEMD=false
 UPDATE_MODE=false
 SKIP_OLLAMA=false
 SKIP_COMFYUI=false
-SKIP_VLLM=true
-INSTALL_VLLM=false   # opt-in; override with --install-vllm or INSTALL_VLLM=true env var
 INSTALL_TRTLLM=false # opt-in; override with --install-trtllm or INSTALL_TRTLLM=true env var
 SKIP_TRTLLM=true
 INSTALL_SUDOERS=false
@@ -857,104 +852,8 @@ PYCODE
 # ============================================================================
 
 install_or_update_vllm() {
-    # vLLM is opt-in (default: skip). Honor INSTALL_VLLM=true env var as override.
-    # INSTALL_VLLM defaults to false (set in Global Variables section above).
-    if [[ "${INSTALL_VLLM}" == "true" ]]; then
-        SKIP_VLLM=false
-    fi
-
-    if [[ "$SKIP_VLLM" == true ]]; then
-        log_info "Skipping vLLM install (default). To enable: INSTALL_VLLM=true ./scripts/install_agent.sh  or pass --install-vllm"
-        return 0
-    fi
-
-    log_step "Installing/updating vLLM..."
-
-    # Create vLLM directory
-    run_command mkdir -p "$VLLM_DIR"
-
-    local VLLM_VENV_DIR="$VLLM_DIR/.venv"
-
-    # Create venv if not present; recreate in update mode for clean installs
-    if [[ "$UPDATE_MODE" == true && -d "$VLLM_VENV_DIR" ]]; then
-        log_info "Recreating vLLM virtualenv (--update provided)..."
-        run_command rm -rf "$VLLM_VENV_DIR"
-    fi
-
-    if [[ ! -d "$VLLM_VENV_DIR" ]]; then
-        log_info "Creating Python venv for vLLM..."
-        (
-            set -euo pipefail
-            if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
-                /opt/homebrew/bin/python3.12 -m venv "$VLLM_VENV_DIR"
-            else
-                python3 -m venv "$VLLM_VENV_DIR"
-            fi
-        ) || {
-            log_error "Failed to create vLLM venv"
-            return 1
-        }
-    else
-        log_info "vLLM venv already exists"
-    fi
-
-    local VENV_PY="$VLLM_VENV_DIR/bin/python"
-    local VENV_PIP="$VLLM_VENV_DIR/bin/pip"
-
-    if [[ "$DRY_RUN" == true ]]; then
-        log_info "[DRY-RUN] Would install vLLM dependencies"
-        return 0
-    fi
-
-    # Upgrade pip
-    (
-        set -euo pipefail
-        "$VENV_PY" -m pip install --quiet --upgrade pip
-    ) || {
-        log_error "Failed to upgrade pip in vLLM venv"
-        return 1
-    }
-
-    local has_cuda=false
-    if [[ "$OS_TYPE" == "linux" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi -L >/dev/null 2>&1; then
-        has_cuda=true
-    fi
-
-    log_info "Installing vLLM dependencies..."
-    if [[ "$OS_TYPE" == "linux" && "$has_cuda" == true ]]; then
-        log_info "Linux + CUDA detected: installing torch==2.9.1+cu130 and vllm==0.15.1"
-        "$VENV_PIP" install \
-            --index-url https://download.pytorch.org/whl/cu130 \
-            --extra-index-url https://pypi.org/simple \
-            torch==2.9.1+cu130 vllm==0.15.1 transformers safetensors tqdm
-    elif [[ "$OS_TYPE" == "macos" ]]; then
-        log_info "macOS detected: installing CPU wheels"
-        "$VENV_PIP" install torch vllm transformers safetensors tqdm
-    else
-        log_info "Non-macOS platform without CUDA detected: installing CPU wheels"
-        "$VENV_PIP" install torch vllm transformers safetensors tqdm
-    fi
-
-    # Smoke test
-    log_info "Running vLLM smoke test..."
-    "$VENV_PY" - <<'PYCODE'
-import sys
-
-import torch
-
-print(f"torch.__version__: {torch.__version__}")
-print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
-
-try:
-    import vllm._C  # noqa: F401
-except Exception as exc:
-    print(f"ERROR: Failed to import vllm._C: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-print("vLLM smoke test passed")
-PYCODE
-
-    log_success "vLLM installed at $VLLM_DIR"
+    log_info "vLLM install is archived and no longer managed by install_agent.sh"
+    return 0
 }
 
 # ============================================================================
@@ -1176,14 +1075,8 @@ write_agent_config() {
         printf "  checkpoints_dir: \"agent/third_party/comfyui/models/checkpoints\"\n"
         printf "\n"
         printf "vllm:\n"
-        if [[ "$SKIP_VLLM" == false ]]; then
-            printf "  enabled: true\n"
-        else
-            printf "  enabled: false\n"
-        fi
-        printf "  host: \"127.0.0.1\"\n"
-        printf "  port: 8000\n"
-        printf "  install_dir: \"agent/third_party/vllm\"\n"
+        printf "  enabled: false\n"
+        printf "  archived: true\n"
     } > "$tmp_file"
 
     # Move temp file to final location
@@ -1511,8 +1404,6 @@ Options:
   --dry-run             Show what would be done without doing it
   --skip-ollama         Skip Ollama installation
   --skip-comfyui        Skip ComfyUI installation
-  --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
-  --install-vllm        Opt-in: install vLLM (disabled by default)
   --install-trtllm      Opt-in: install TensorRT-LLM (disabled by default)
   --skip-trtllm         Skip TensorRT-LLM installation
   --help                Show this help message
@@ -1573,15 +1464,6 @@ parse_args() {
                 ;;
             --skip-comfyui)
                 SKIP_COMFYUI=true
-                shift
-                ;;
-            --skip-vllm)
-                SKIP_VLLM=true
-                shift
-                ;;
-            --install-vllm)
-                SKIP_VLLM=false
-                INSTALL_VLLM=true
                 shift
                 ;;
             --install-trtllm)
@@ -1672,7 +1554,6 @@ main() {
     log_step "Creating agent directory structure..."
     run_command mkdir -p "$MODELS_DIR" "$AGENT_RUN_DIR" "$AGENT_LOG_DIR"
     run_command mkdir -p "$AGENT_DIR/third_party/comfyui"
-    # vLLM dir is created by install_or_update_vllm only when opted in
 
     # Check prerequisites
     ensure_prereqs
@@ -1683,7 +1564,7 @@ main() {
     # Install components
     install_or_update_ollama || log_warning "Ollama installation had issues"
     install_or_update_comfyui || log_warning "ComfyUI installation had issues"
-    install_or_update_vllm || log_warning "vLLM installation had issues"
+    log_info "vLLM installer is archived. See archive/vllm/."
     # TensorRT-LLM is opt-in and only runs when explicitly enabled.
     if [[ "${INSTALL_TRTLLM:-false}" == "true" ]]; then
         local trtllm_args=()
