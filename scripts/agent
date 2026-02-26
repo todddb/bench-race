@@ -136,6 +136,16 @@ start_agent(){
   write_pid "$AGENT_PIDFILE" "$!"
   wait_ready probe_agent "agent" 20
 }
+
+start_agent_fg(){
+  local py="${AGENT_DIR}/.venv/bin/uvicorn"
+  [[ -x "$py" ]] || { err "agent venv missing. Run ./scripts/install_agent.sh"; return 4; }
+  if probe_agent; then
+    err "agent already running on ${AGENT_HOST}:${AGENT_PORT}; stop it before start-fg"
+    return 1
+  fi
+  "$py" agent.agent_app:app --host "$AGENT_HOST" --port "$AGENT_PORT" 2>&1 | tee -a "$AGENT_LOGFILE"
+}
 stop_agent(){ stop_process "$AGENT_PIDFILE" "agent"; }
 
 show_status_line(){
@@ -161,6 +171,7 @@ Usage: ./scripts/agent <command>
 Commands:
   status
   start
+  start-fg
   stop
   start-backend <ollama|mlx|trtllm|comfyui> [model]
   stop-backend <ollama|mlx|trtllm|comfyui>
@@ -181,6 +192,7 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
   status) status ;;
   start) start_agent ;;
+  start-fg) start_agent_fg ;;
   stop) stop_agent; stop_ollama; stop_mlx; stop_trtllm; stop_comfyui ;;
   start-backend) case "${1:-}" in ollama) start_ollama ;; mlx) start_mlx ;; trtllm) start_trtllm ;; comfyui) start_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
   stop-backend) case "${1:-}" in ollama) stop_ollama ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
