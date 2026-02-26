@@ -26,6 +26,8 @@
 #   --skip-comfyui        Skip ComfyUI installation
 #   --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
 #   --install-vllm        Opt-in: install vLLM (disabled by default)
+#   --install-trtllm      Opt-in: install TensorRT-LLM (disabled by default)
+#   --skip-trtllm         Skip TensorRT-LLM installation
 
 set -euo pipefail
 
@@ -93,6 +95,8 @@ SKIP_OLLAMA=false
 SKIP_COMFYUI=false
 SKIP_VLLM=true
 INSTALL_VLLM=false   # opt-in; override with --install-vllm or INSTALL_VLLM=true env var
+INSTALL_TRTLLM=false # opt-in; override with --install-trtllm or INSTALL_TRTLLM=true env var
+SKIP_TRTLLM=true
 INSTALL_SUDOERS=false
 
 AGENT_ID=""
@@ -1509,6 +1513,8 @@ Options:
   --skip-comfyui        Skip ComfyUI installation
   --skip-vllm           Skip vLLM installation (default; vLLM is opt-in)
   --install-vllm        Opt-in: install vLLM (disabled by default)
+  --install-trtllm      Opt-in: install TensorRT-LLM (disabled by default)
+  --skip-trtllm         Skip TensorRT-LLM installation
   --help                Show this help message
 
 EOF
@@ -1576,6 +1582,16 @@ parse_args() {
             --install-vllm)
                 SKIP_VLLM=false
                 INSTALL_VLLM=true
+                shift
+                ;;
+            --install-trtllm)
+                SKIP_TRTLLM=false
+                INSTALL_TRTLLM=true
+                shift
+                ;;
+            --skip-trtllm)
+                SKIP_TRTLLM=true
+                INSTALL_TRTLLM=false
                 shift
                 ;;
             --help)
@@ -1668,6 +1684,19 @@ main() {
     install_or_update_ollama || log_warning "Ollama installation had issues"
     install_or_update_comfyui || log_warning "ComfyUI installation had issues"
     install_or_update_vllm || log_warning "vLLM installation had issues"
+    # TensorRT-LLM is opt-in and only runs when explicitly enabled.
+    if [[ "${INSTALL_TRTLLM:-false}" == "true" ]]; then
+        local trtllm_args=()
+        if [[ "$YES_MODE" == true ]]; then
+            trtllm_args+=(--yes)
+        fi
+        if [[ "$SYSTEM_SERVICE" == true ]]; then
+            trtllm_args+=(--system-service)
+        fi
+        "$SCRIPT_DIR/install_trtllm.sh" "${trtllm_args[@]}" || log_warning "TensorRT-LLM installation had issues"
+    elif [[ "${SKIP_TRTLLM}" == "true" ]]; then
+        log_info "Skipping TensorRT-LLM install (default). To enable: INSTALL_TRTLLM=true ./scripts/install_agent.sh or pass --install-trtllm"
+    fi
     install_or_update_agent_venv || {
         log_error "Failed to setup Agent Python environment"
         exit 1
