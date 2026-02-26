@@ -312,9 +312,33 @@ UNIT
 }
 
 # -------------------------------------------------------------------
-# Detect GPT variant for convert_checkpoint.py
-# Returns a --gpt_variant flag value, or empty string if not needed
+# Detect model family — determines which convert script to use
+# Returns: gpt, llama, falcon, mpt, baichuan, chatglm, qwen, phi,
+#          gemma, mixtral, dbrx, recurrentgemma, mamba, etc.
 # -------------------------------------------------------------------
+detect_model_family() {
+  local model_lower
+  model_lower="$(echo "${MODEL_ID}" | tr '[:upper:]' '[:lower:]')"
+  case "${model_lower}" in
+    *llama*|*meta-llama*|*codellama*|*vicuna*|*alpaca*)  echo "llama" ;;
+    *mistral*|*mixtral*)     echo "llama" ;;   # Mistral/Mixtral use llama converter
+    *gpt2*|*distilgpt*)      echo "gpt" ;;
+    *starcoder*)             echo "gpt" ;;
+    *falcon*)                echo "falcon" ;;
+    *mpt*)                   echo "mpt" ;;
+    *phi-3*|*phi-2*|*phi-1*) echo "phi" ;;
+    *gemma*)                 echo "gemma" ;;
+    *qwen*)                  echo "qwen" ;;
+    *baichuan*)              echo "baichuan" ;;
+    *chatglm*|*glm*)         echo "chatglm" ;;
+    *bloom*)                 echo "bloom" ;;
+    *opt-*)                  echo "opt" ;;
+    *mamba*)                 echo "mamba" ;;
+    *)                       echo "auto" ;;
+  esac
+}
+
+# For GPT-family models, detect the specific variant
 detect_gpt_variant() {
   local model_lower
   model_lower="$(echo "${MODEL_ID}" | tr '[:upper:]' '[:lower:]')"
@@ -341,13 +365,18 @@ prepare_and_build_model() {
     return 0
   fi
 
-  local gpt_variant
-  gpt_variant="$(detect_gpt_variant)"
+  local model_family
+  model_family="$(detect_model_family)"
+  local gpt_variant=""
+  if [[ "${model_family}" == "gpt" ]]; then
+    gpt_variant="$(detect_gpt_variant)"
+  fi
 
   log_step "Building TRT-LLM engines inside container"
   log_info "  Model:          ${MODEL_ID}"
+  log_info "  Model family:   ${model_family}"
   log_info "  Precision:      ${PRECISION}"
-  log_info "  GPT variant:    ${gpt_variant:-<auto>}"
+  [[ -n "${gpt_variant}" ]] && log_info "  GPT variant:    ${gpt_variant}"
   log_info "  Max batch size: ${MAX_BATCH_SIZE}"
   log_info "  Max input len:  ${MAX_INPUT_LEN}"
   log_info "  Max seq len:    ${MAX_SEQ_LEN}"
@@ -360,6 +389,7 @@ prepare_and_build_model() {
 set -euo pipefail
 
 MODEL_ID="${MODEL_ENV}"
+MODEL_FAMILY="${MODEL_FAMILY_ENV}"
 PRECISION="${PRECISION_ENV}"
 GPT_VARIANT="${GPT_VARIANT_ENV}"
 MAX_BATCH="${MAX_BATCH_ENV}"
@@ -390,21 +420,100 @@ print("[build] Download complete")
 PY
 
 echo "============================================"
-echo "[build] Step 2/4: Converting checkpoint"
+echo "[build] Step 2/4: Converting checkpoint (family=${MODEL_FAMILY})"
 echo "============================================"
-# Find the convert script
-CONVERT=""
-for p in \
-  /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py \
-  /app/tensorrt_llm/examples/gpt/convert_checkpoint.py \
-  ; do
-  if [ -f "$p" ]; then CONVERT="$p"; break; fi
-done
 
-if [ -z "$CONVERT" ]; then
-  echo "[build] ERROR: convert_checkpoint.py not found in container"
+# Find the right convert script based on model family.
+# TRT-LLM organizes converters by model architecture under /app/tensorrt_llm/examples/
+# The path structure varies by TRT-LLM version so we search multiple locations.
+find_convert_script() {
+  local family="$1"
+  local candidates=()
+
+  case "${family}" in
+    llama)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/llama/convert_checkpoint.py
+        /app/tensorrt_llm/examples/llama/convert_checkpoint.py
+      )
+      ;;
+    gpt)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py
+        /app/tensorrt_llm/examples/gpt/convert_checkpoint.py
+      )
+      ;;
+    falcon)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/falcon/convert_checkpoint.py
+        /app/tensorrt_llm/examples/falcon/convert_checkpoint.py
+      )
+      ;;
+    phi)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/phi/convert_checkpoint.py
+        /app/tensorrt_llm/examples/phi/convert_checkpoint.py
+      )
+      ;;
+    gemma)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/gemma/convert_checkpoint.py
+        /app/tensorrt_llm/examples/gemma/convert_checkpoint.py
+      )
+      ;;
+    qwen)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/qwen/convert_checkpoint.py
+        /app/tensorrt_llm/examples/qwen/convert_checkpoint.py
+      )
+      ;;
+    bloom)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/bloom/convert_checkpoint.py
+        /app/tensorrt_llm/examples/bloom/convert_checkpoint.py
+      )
+      ;;
+    opt)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/opt/convert_checkpoint.py
+        /app/tensorrt_llm/examples/opt/convert_checkpoint.py
+      )
+      ;;
+    mpt)
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/mpt/convert_checkpoint.py
+        /app/tensorrt_llm/examples/mpt/convert_checkpoint.py
+      )
+      ;;
+    auto|*)
+      # Fallback: try to find any convert script and hope for the best
+      candidates=(
+        /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py
+        /app/tensorrt_llm/examples/gpt/convert_checkpoint.py
+      )
+      echo "[build] WARNING: Unknown model family '${family}', falling back to GPT converter"
+      ;;
+  esac
+
+  for p in "${candidates[@]}"; do
+    if [ -f "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+
+  # Last resort: search the filesystem
+  echo "[build] Searching for any convert_checkpoint.py in /app/tensorrt_llm/examples/..." >&2
+  find /app/tensorrt_llm/examples/ -name "convert_checkpoint.py" -print >&2 || true
+  return 1
+}
+
+CONVERT="$(find_convert_script "${MODEL_FAMILY}")" || {
+  echo "[build] ERROR: Could not find convert_checkpoint.py for family '${MODEL_FAMILY}'"
+  echo "[build] Available convert scripts in container:"
+  find /app/tensorrt_llm/examples/ -name "convert_checkpoint.py" 2>/dev/null || true
   exit 2
-fi
+}
 echo "[build] Using convert script: ${CONVERT}"
 
 CONVERT_ARGS=(
@@ -413,7 +522,9 @@ CONVERT_ARGS=(
   --dtype "${PRECISION}"
   --tp_size 1
 )
-if [ -n "${GPT_VARIANT}" ]; then
+
+# Only add --gpt_variant for GPT-family models
+if [ "${MODEL_FAMILY}" = "gpt" ] && [ -n "${GPT_VARIANT}" ]; then
   CONVERT_ARGS+=(--gpt_variant "${GPT_VARIANT}")
 fi
 
@@ -458,6 +569,7 @@ INNER_SCRIPT
     -v "${engine_out}:/output:rw"
     -v "${HOME}/.cache/huggingface:/root/.cache/huggingface:rw"
     -e "MODEL_ENV=${MODEL_ID}"
+    -e "MODEL_FAMILY_ENV=${model_family}"
     -e "PRECISION_ENV=${PRECISION}"
     -e "GPT_VARIANT_ENV=${gpt_variant}"
     -e "MAX_BATCH_ENV=${MAX_BATCH_SIZE}"
