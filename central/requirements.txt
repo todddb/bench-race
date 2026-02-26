@@ -1,6 +1,6 @@
 flask==3.0.2
 flask-socketio==5.3.6
 requests==2.31.0
-pydantic==2.11.7
+pydantic==2.12.5
 pyyaml==6.0.1
 websockets==12.0
