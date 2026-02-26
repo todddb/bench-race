@@ -1,0 +1,19 @@
+{
+  "default_backend": "mlx",
+  "mappings": [
+    {"prefix": "mlx-community/", "backend": "mlx"},
+    {"prefix": "mlx/", "backend": "mlx"},
+    {"prefix": "meta-llama/", "backend": "trt"},
+    {"prefix": "meta-llama__", "backend": "trt"},
+    {"prefix": "distilgpt2", "backend": "trt"}
+  ],
+  "backends": {
+    "mlx": {
+      "base_url": "http://127.0.0.1:8321"
+    },
+    "trt": {
+      "base_url": "http://127.0.0.1:8000",
+      "run_script": "agent/backends/trtllm_run.sh"
+    }
+  }
+}
