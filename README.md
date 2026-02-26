@@ -92,18 +92,23 @@ bench-race provides automated installer scripts for both agent and central compo
 ### Quick Start
 
 ```bash
-# Clone the repository
 git clone https://github.com/todddb/bench-race.git
 cd bench-race
 
-# Install agent (with Ollama and ComfyUI)
 ./scripts/install_agent.sh --central-url http://<central-host>:8080
-
-# Install central server
 ./scripts/install_central.sh
+
+# Lifecycle manager
+./scripts/agent status
+./scripts/agent start-ollama
+./scripts/agent start-mlx     # macOS Apple Silicon (after ./scripts/install_macos_mlx.sh)
+./scripts/agent start-trtllm  # Linux + NVIDIA (after ./scripts/install_trtllm.sh)
+./scripts/agent stop-backend ollama
 ```
 
-The installers are **idempotent** - you can safely re-run them to update your installation.
+The lifecycle manager enforces one active LLM backend at a time (`ollama`, `mlx`, `trtllm`).
+
+vLLM has been archived under `archive/vllm/` and is no longer a first-class lifecycle target.
 
 ### Agent Installation
 
@@ -158,6 +163,11 @@ Options:
 TensorRT-LLM engines/models are stored under `agent/models/trtllm`, and the backend helper is `agent/backends/trtllm_run.sh` (supports `start|stop|status|restart`).
 
 The unified wrapper service is available at `agent/backends/wrapper` and exposes a consistent API on `127.0.0.1:9002` (`/v1/health`, `/v1/models`, `/v1/infer`, `/v1/infer/stream`). Run it with `python -m agent.backends.wrapper` or `uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002`. Smoke checks are in `agent/backends/wrapper/tests/smoke_tests.sh`.
+
+## Backend lifecycle architecture
+
+See `docs/BACKEND_ARCHITECTURE.md` for the authoritative backend matrix and lifecycle commands.
+See `docs/MAINTENANCE.md` for archived component history and rollback steps.
 
 ### Central Installation
 

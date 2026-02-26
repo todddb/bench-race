@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# scripts/agent — Inference backend lifecycle manager
-#
-# Manages Ollama, vLLM, MLX and ComfyUI backends: start, stop, status.
-# Enforces only-one-active-LLM-backend: starting vLLM stops Ollama/MLX and vice versa.
-# ComfyUI is treated as an independent backend (image generation).
-#
-# Usage:
-#   ./scripts/agent status
-#   ./scripts/agent start-backend <backend> [<model-path-or-name>]
-#   ./scripts/agent stop-backend <backend>
-#   ./scripts/agent start                    # start agent app (FastAPI)
-#   ./scripts/agent stop                     # stop agent app + all backends
-#   ./scripts/agent start-vllm <model>       # convenience: start-backend vllm <model>
-#   ./scripts/agent stop-vllm                # convenience: stop-backend vllm
-#   ./scripts/agent start-ollama             # convenience: start-backend ollama
-#   ./scripts/agent stop-ollama              # convenience: stop-backend ollama
-#   ./scripts/agent start-comfyui            # convenience: start-backend comfyui
-#   ./scripts/agent stop-comfyui             # convenience: stop-backend comfyui
-#   ./scripts/agent start-mlx               # convenience: start-backend mlx
-#   ./scripts/agent stop-mlx                # convenience: stop-backend mlx
-#   ./scripts/agent restart-mlx             # convenience: stop + start mlx
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,899 +7,195 @@ AGENT_DIR="${REPO_ROOT}/agent"
 RUN_DIR="${AGENT_DIR}/run"
 LOG_DIR="${AGENT_DIR}/log"
 
-# Backend directories
-COMFY_DIR="${AGENT_DIR}/third_party/comfyui"
-VLLM_DIR="${AGENT_DIR}/third_party/vllm"
-MLX_DIR="${AGENT_DIR}/backends/mlx"
-TRITON_DIR="${AGENT_DIR}/backends/triton"
-
-# PID files
 AGENT_PIDFILE="${RUN_DIR}/agent.pid"
 OLLAMA_PIDFILE="${RUN_DIR}/ollama.pid"
-VLLM_PIDFILE="${RUN_DIR}/vllm.pid"
-COMFYUI_PIDFILE="${RUN_DIR}/comfy.pid"
 MLX_PIDFILE="${RUN_DIR}/mlx.pid"
-TRITON_PIDFILE="${RUN_DIR}/triton.pid"
+TRTLLM_PIDFILE="${RUN_DIR}/trtllm.pid"
+COMFYUI_PIDFILE="${RUN_DIR}/comfyui.pid"
 
-# Log files
 AGENT_LOGFILE="${LOG_DIR}/agent.log"
 OLLAMA_LOGFILE="${LOG_DIR}/ollama.log"
-VLLM_LOGFILE="${LOG_DIR}/vllm.log"
-COMFYUI_LOGFILE="${LOG_DIR}/comfy.log"
 MLX_LOGFILE="${LOG_DIR}/mlx.log"
-TRITON_LOGFILE="${LOG_DIR}/triton.log"
+TRTLLM_LOGFILE="${LOG_DIR}/trtllm.log"
+COMFYUI_LOGFILE="${LOG_DIR}/comfyui.log"
 
-# Configurable ports
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
-VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
-VLLM_PORT="${VLLM_PORT:-8000}"
-TRITON_HOST="${TRITON_HOST:-127.0.0.1}"
-TRITON_PORT="${TRITON_PORT:-8020}"
-COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
-COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 MLX_HOST="${MLX_HOST:-127.0.0.1}"
 MLX_PORT="${MLX_PORT:-8321}"
+TRTLLM_HOST="${TRTLLM_HOST:-127.0.0.1}"
+TRTLLM_PORT="${TRTLLM_PORT:-8000}"
+COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
+COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 AGENT_HOST="${AGENT_HOST:-0.0.0.0}"
 AGENT_PORT="${AGENT_PORT:-9001}"
 
-# Inactivity timeout (seconds); 0 = disabled
-AGENT_BACKEND_IDLE_SECS="${AGENT_BACKEND_IDLE_SECS:-0}"
-
-# GPU pinning
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
-
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
-# ============================================================================
-# Logging
-# ============================================================================
+log(){ echo "[$(date '+%H:%M:%S')] $*" | tee -a "${LOG_DIR}/agent-actions.log" >/dev/null; }
+err(){ echo "[ERROR] $*" >&2; }
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+pid_is_running(){ [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
+read_pid(){ [[ -f "$1" ]] && cat "$1"; }
+write_pid(){ echo "$2" > "$1"; }
+rm_pid(){ rm -f "$1"; }
 
-log()      { echo -e "[$(date '+%H:%M:%S')] $*"; }
-log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_err()  { echo -e "${RED}[ERROR]${NC} $*"; }
+probe_url(){ curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
+probe_ollama(){ probe_url "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags"; }
+probe_mlx(){ probe_url "http://${MLX_HOST}:${MLX_PORT}/health"; }
+probe_trtllm(){ probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/v1/models" || probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/health"; }
+probe_comfyui(){ probe_url "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats"; }
+probe_agent(){ probe_url "http://127.0.0.1:${AGENT_PORT}/health"; }
 
-# ============================================================================
-# PID helpers
-# ============================================================================
-
-pid_is_running() {
-    local pid="$1"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+wait_ready(){
+  local fn="$1" name="$2" tries="${3:-45}"
+  for _ in $(seq 1 "$tries"); do
+    if "$fn"; then log "$name ready"; return 0; fi
+    sleep 1
+  done
+  err "$name failed health check"
+  return 1
 }
 
-read_pid() {
-    local pidfile="$1"
-    if [[ -f "$pidfile" ]]; then
-        cat "$pidfile"
-    fi
+stop_process(){
+  local pidfile="$1" name="$2" pid
+  pid="$(read_pid "$pidfile")"
+  if [[ -z "$pid" ]]; then log "$name not running"; return 0; fi
+  if ! pid_is_running "$pid"; then rm_pid "$pidfile"; log "$name stale pidfile cleaned"; return 0; fi
+  kill "$pid" 2>/dev/null || true
+  sleep 1
+  if pid_is_running "$pid"; then kill -9 "$pid" 2>/dev/null || true; fi
+  rm_pid "$pidfile"
+  log "$name stopped"
 }
 
-write_pid() {
-    echo "$2" > "$1"
+active_llm(){
+  probe_ollama && { echo ollama; return 0; }
+  probe_mlx && { echo mlx; return 0; }
+  probe_trtllm && { echo trtllm; return 0; }
+  return 1
 }
 
-remove_pid() {
-    rm -f "$1"
+stop_other_llm_backends(){
+  local keep="$1"
+  [[ "$keep" == "ollama" ]] || stop_ollama
+  [[ "$keep" == "mlx" ]] || stop_mlx
+  [[ "$keep" == "trtllm" ]] || stop_trtllm
 }
 
-# Graceful stop: SIGTERM, wait, then SIGKILL
-stop_process() {
-    local pidfile="$1"
-    local name="$2"
-    local pid
-    pid="$(read_pid "$pidfile")"
-    if [[ -z "$pid" ]]; then
-        log_info "$name: not running (no pidfile)"
-        return 0
-    fi
-    if ! pid_is_running "$pid"; then
-        log_info "$name: stale pidfile (pid $pid not running)"
-        remove_pid "$pidfile"
-        return 0
-    fi
+start_ollama(){
+  stop_other_llm_backends ollama
+  if probe_ollama; then log "ollama already running"; return 0; fi
+  command -v ollama >/dev/null 2>&1 || { err "ollama not installed. Install: https://ollama.com/download"; return 4; }
+  nohup ollama serve >>"$OLLAMA_LOGFILE" 2>&1 &
+  write_pid "$OLLAMA_PIDFILE" "$!"
+  wait_ready probe_ollama "ollama" 30
+}
+stop_ollama(){ stop_process "$OLLAMA_PIDFILE" "ollama"; }
 
-    log_info "Stopping $name (pid $pid)..."
-    kill "$pid" 2>/dev/null || true
+start_mlx(){
+  stop_other_llm_backends mlx
+  local py="${AGENT_DIR}/backends/mlx/.venv/bin/python"
+  [[ -x "$py" ]] || { err "mlx not installed. Run ./scripts/install_macos_mlx.sh"; return 4; }
+  nohup "$py" -m uvicorn agent.backends.mlx.server:app --host "$MLX_HOST" --port "$MLX_PORT" >>"$MLX_LOGFILE" 2>&1 &
+  write_pid "$MLX_PIDFILE" "$!"
+  wait_ready probe_mlx "mlx" 30
+}
+stop_mlx(){ stop_process "$MLX_PIDFILE" "mlx"; }
 
-    local i=0
-    while [[ $i -lt 30 ]]; do
-        if ! pid_is_running "$pid"; then
-            break
-        fi
-        sleep 0.3
-        ((i++))
-    done
-
-    if pid_is_running "$pid"; then
-        log_warn "$name still running after 9s; sending SIGKILL..."
-        kill -9 "$pid" 2>/dev/null || true
-        sleep 1
-    fi
-
-    remove_pid "$pidfile"
-    log_ok "$name stopped"
+start_trtllm(){
+  stop_other_llm_backends trtllm
+  local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
+  [[ -x "$launcher" ]] || { err "Missing ${launcher}. Run ./scripts/install_trtllm.sh"; return 4; }
+  TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start >>"$TRTLLM_LOGFILE" 2>&1
+  local cpid
+  cpid="$(docker inspect -f '{{.State.Pid}}' "${TRTLLM_CONTAINER_NAME:-bench-race-trtllm}" 2>/dev/null || true)"
+  [[ -n "$cpid" ]] && write_pid "$TRTLLM_PIDFILE" "$cpid"
+  wait_ready probe_trtllm "trtllm" 45 || true
+}
+stop_trtllm(){
+  local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
+  [[ -x "$launcher" ]] && TRTLLM_PORT="$TRTLLM_PORT" "$launcher" stop >>"$TRTLLM_LOGFILE" 2>&1 || true
+  rm_pid "$TRTLLM_PIDFILE"
+  log "trtllm stopped"
 }
 
-# ============================================================================
-# Health probes
-# ============================================================================
+start_comfyui(){
+  local dir="${AGENT_DIR}/third_party/comfyui"
+  local py="${dir}/.venv/bin/python"
+  [[ -x "$py" ]] || { err "comfyui not installed. Run ./scripts/install_agent.sh"; return 4; }
+  (cd "$dir" && nohup "$py" main.py --listen "$COMFYUI_HOST" --port "$COMFYUI_PORT" >>"$COMFYUI_LOGFILE" 2>&1 & echo $! >"$COMFYUI_PIDFILE")
+  wait_ready probe_comfyui "comfyui" 30
+}
+stop_comfyui(){ stop_process "$COMFYUI_PIDFILE" "comfyui"; }
 
-probe_ollama() {
-    curl -fsS --max-time 2 "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1
+start_agent(){
+  local py="${AGENT_DIR}/.venv/bin/uvicorn"
+  [[ -x "$py" ]] || { err "agent venv missing. Run ./scripts/install_agent.sh"; return 4; }
+  nohup "$py" agent.agent_app:app --host "$AGENT_HOST" --port "$AGENT_PORT" >>"$AGENT_LOGFILE" 2>&1 &
+  write_pid "$AGENT_PIDFILE" "$!"
+  wait_ready probe_agent "agent" 20
+}
+stop_agent(){ stop_process "$AGENT_PIDFILE" "agent"; }
+
+show_status_line(){
+  local name="$1" pidf="$2" probe="$3"
+  local pid="$(read_pid "$pidf")"
+  if "$probe"; then echo "- $name: healthy"; return; fi
+  if [[ -n "$pid" ]] && pid_is_running "$pid"; then echo "- $name: running (unhealthy)"; else echo "- $name: stopped"; fi
 }
 
-probe_vllm() {
-    curl -fsS --max-time 2 "http://${VLLM_HOST}:${VLLM_PORT}/health" >/dev/null 2>&1 || \
-    curl -fsS --max-time 2 "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" >/dev/null 2>&1
+status(){
+  echo "Backend status"
+  show_status_line ollama "$OLLAMA_PIDFILE" probe_ollama
+  show_status_line mlx "$MLX_PIDFILE" probe_mlx
+  show_status_line trtllm "$TRTLLM_PIDFILE" probe_trtllm
+  show_status_line comfyui "$COMFYUI_PIDFILE" probe_comfyui
+  show_status_line agent "$AGENT_PIDFILE" probe_agent
+  if active=$(active_llm 2>/dev/null); then echo "Active LLM backend: $active"; else echo "Active LLM backend: none"; fi
 }
 
-probe_comfyui() {
-    curl -fsS --max-time 2 "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" >/dev/null 2>&1
-}
-
-probe_mlx() {
-    curl -fsS --max-time 2 "http://${MLX_HOST}:${MLX_PORT}/health" >/dev/null 2>&1
-}
-
-probe_triton() {
-    curl -fsS --max-time 2 "http://${TRITON_HOST}:${TRITON_PORT}/health" >/dev/null 2>&1
-}
-
-probe_agent() {
-    curl -fsS --max-time 2 "http://127.0.0.1:${AGENT_PORT}/health" >/dev/null 2>&1
-}
-
-# Wait for a probe to succeed
-wait_ready() {
-    local probe_fn="$1"
-    local name="$2"
-    local pidfile="$3"
-    local max_wait="${4:-60}"
-
-    local i=0
-    while [[ $i -lt $max_wait ]]; do
-        if $probe_fn; then
-            log_ok "$name is ready"
-            return 0
-        fi
-        # Check if process died
-        if [[ -n "$pidfile" ]]; then
-            local pid
-            pid="$(read_pid "$pidfile")"
-            if [[ -n "$pid" ]] && ! pid_is_running "$pid"; then
-                log_err "$name process exited unexpectedly"
-                return 1
-            fi
-        fi
-        sleep 1
-        ((i++))
-    done
-
-    log_err "$name did not become ready within ${max_wait}s"
-    return 1
-}
-
-# ============================================================================
-# LLM backends (mutually exclusive)
-# ============================================================================
-
-LLM_BACKENDS="ollama vllm mlx"
-
-active_llm_backend() {
-    for backend in $LLM_BACKENDS; do
-        local pidfile_var
-        case "$backend" in
-            ollama) pidfile_var="$OLLAMA_PIDFILE" ;;
-            vllm)   pidfile_var="$VLLM_PIDFILE" ;;
-            mlx)    pidfile_var="$MLX_PIDFILE" ;;
-        esac
-        local pid
-        pid="$(read_pid "$pidfile_var")"
-        if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-            echo "$backend"
-            return 0
-        fi
-    done
-    # Also check if ollama is running externally (system service)
-    if probe_ollama; then
-        echo "ollama"
-        return 0
-    fi
-}
-
-stop_other_llm_backends() {
-    local keep="$1"
-    for backend in $LLM_BACKENDS; do
-        if [[ "$backend" == "$keep" ]]; then
-            continue
-        fi
-        case "$backend" in
-            ollama)
-                local pid
-                pid="$(read_pid "$OLLAMA_PIDFILE")"
-                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-                    log_info "Stopping ollama (only-one-active-backend policy)..."
-                    stop_process "$OLLAMA_PIDFILE" "ollama"
-                fi
-                ;;
-            vllm)
-                local pid
-                pid="$(read_pid "$VLLM_PIDFILE")"
-                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-                    log_info "Stopping vllm (only-one-active-backend policy)..."
-                    stop_process "$VLLM_PIDFILE" "vllm"
-                fi
-                ;;
-            mlx)
-                local pid
-                pid="$(read_pid "$MLX_PIDFILE")"
-                if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-                    log_info "Stopping mlx (only-one-active-backend policy)..."
-                    stop_process "$MLX_PIDFILE" "mlx"
-                fi
-                ;;
-        esac
-    done
-}
-
-# ============================================================================
-# Backend start functions
-# ============================================================================
-
-
-maybe_suspend_ollama_for_custom_backend() {
-    local dry_run="${OLLAMA_SUSPEND_DRY_RUN:-0}"
-    local auto="${ALLOW_OLLAMA_AUTO_SUSPEND:-1}"
-    local threshold="${OLLAMA_VRAM_THRESHOLD_PCT:-1}"
-
-    if [[ "$auto" != "1" ]]; then
-        log_info "Auto-suspend disabled (ALLOW_OLLAMA_AUTO_SUSPEND=$auto)"
-        return 0
-    fi
-
-    if probe_ollama; then
-        log_warn "Ollama appears active; threshold=${threshold}%. Preparing to suspend before custom backend startup."
-        if [[ "$dry_run" == "1" ]]; then
-            log_info "Dry-run enabled; would run: ./scripts/agent stop-ollama"
-            return 0
-        fi
-        stop_ollama || true
-    fi
-}
-
-start_ollama() {
-    # Enforce only-one-LLM
-    stop_other_llm_backends "ollama"
-
-    if probe_ollama; then
-        log_ok "Ollama already running at http://${OLLAMA_HOST}:${OLLAMA_PORT}"
-        return 0
-    fi
-
-    if ! command -v ollama &>/dev/null; then
-        log_err "ollama not found in PATH"
-        return 1
-    fi
-
-    local pid
-    pid="$(read_pid "$OLLAMA_PIDFILE")"
-    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-        log_info "Ollama process exists (pid $pid); waiting for API..."
-    else
-        log_info "Starting ollama serve..."
-        local env_args=()
-        if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
-            env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
-        fi
-        env "${env_args[@]}" nohup ollama serve >> "$OLLAMA_LOGFILE" 2>&1 &
-        write_pid "$OLLAMA_PIDFILE" "$!"
-    fi
-
-    wait_ready probe_ollama "Ollama" "$OLLAMA_PIDFILE" 30
-}
-
-
-start_vllm_container() {
-    local model="${1:-${VLLM_MODEL:-}}"
-    if [[ -z "$model" ]]; then
-        log_err "Usage: ./scripts/agent start-vllm <model>"
-        log_err "Example (HuggingFace): ./scripts/agent start-vllm Qwen/Qwen2.5-72B-Instruct"
-        log_err "Example (local path):  ./scripts/agent start-vllm agent/models/my-model"
-        return 1
-    fi
-
-    maybe_suspend_ollama_for_custom_backend
-    stop_other_llm_backends "vllm"
-
-    if ! command -v docker &>/dev/null; then
-        log_err "docker not found in PATH"
-        return 1
-    fi
-
-    # Check image exists - if not, tell user to build it
-    local image
-    if docker image inspect bench-race/vllm:blackwell >/dev/null 2>&1; then
-        image="bench-race/vllm:blackwell"
-    elif docker image inspect bench-race/vllm:latest >/dev/null 2>&1; then
-        image="bench-race/vllm:latest"
-    else
-        log_err "vLLM Docker image not found. Build it first:"
-        log_err "  ./scripts/install_x64_vllm.sh"
-        return 1
-    fi
-
-    docker rm -f bench-race-vllm >/dev/null 2>&1 || true
-    mkdir -p "${AGENT_DIR}/models/vllm"
-
-    # Resolve model path: if it's a local directory, mount it and use /models/<name>
-    local model_arg="$model"
-    local extra_vol_args=()
-    if [[ -d "$model" ]]; then
-        local model_name
-        model_name="$(basename "$model")"
-        extra_vol_args=(-v "$(realpath "$model"):/models/${model_name}")
-        model_arg="/models/${model_name}"
-    elif [[ -d "${AGENT_DIR}/models/${model}" ]]; then
-        local model_name="$model"
-        extra_vol_args=(-v "${AGENT_DIR}/models/${model}:/models/${model_name}")
-        model_arg="/models/${model_name}"
-    fi
-
-    local gpu_args=()
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        gpu_args=(--gpus all)
-    fi
-
-    # Determine max_model_len from env or default
-    local max_len="${VLLM_MAX_MODEL_LEN:-32768}"
-
-    log_info "Starting vLLM (${image}) on ${VLLM_HOST}:${VLLM_PORT} (model: ${model_arg})"
-
-    docker run -d \
-        --name bench-race-vllm \
-        --runtime nvidia \
-        --ipc host \
-        -p "${VLLM_PORT}:8000" \
-        "${gpu_args[@]}" \
-        "${extra_vol_args[@]}" \
-        -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
-        -v "${AGENT_DIR}/models/vllm:/agent-models" \
-        "$image" \
-        --model "$model_arg" \
-        --host 0.0.0.0 \
-        --port 8000 \
-        --max-model-len "$max_len" \
-        >/dev/null
-
-    local pid
-    pid="$(docker inspect -f '{{.State.Pid}}' bench-race-vllm)"
-    write_pid "$VLLM_PIDFILE" "$pid"
-    wait_ready probe_vllm "vLLM (docker)" "$VLLM_PIDFILE" 300
-}
-
-start_vllm() {
-    local model_arg="${1:-}"
-    if [[ -z "$model_arg" ]]; then
-        log_err "Usage: start-backend vllm <model-path-or-name>"
-        log_err "Example (local dir): ./scripts/agent start-backend vllm agent/models/llama-8b"
-        log_err "To download from HF and start in one step, run:"
-        log_err "  ./scripts/agent sync-and-start-vllm <huggingface-id>"
-        return 1
-    fi
-
-    # Enforce only-one-LLM
-    stop_other_llm_backends "vllm"
-
-    # If vLLM already running, show helpful message
-    if probe_vllm; then
-        log_warn "vLLM already running at http://${VLLM_HOST}:${VLLM_PORT}"
-        log_warn "Stop it first to switch models: ./scripts/agent stop-backend vllm"
-        return 0
-    fi
-
-    # Prefer absolute/local path if it exists
-    local model_path="$model_arg"
-    if [[ ! -d "$model_path" && -d "${AGENT_DIR}/models/${model_arg}" ]]; then
-        model_path="${AGENT_DIR}/models/${model_arg}"
-    fi
-
-    # If model_path is still not a directory, decide next step
-    if [[ ! -d "$model_path" ]]; then
-        # If the user passed something that looks like a HF id (contains '/', or ':', or non-safe chars),
-        # do not auto-download by default — tell user how to proceed.
-        if echo "$model_arg" | grep -E '[/:]' >/dev/null 2>&1; then
-            local sanitized
-            sanitized="$("${SCRIPT_DIR}/model_sanitize.sh" "$model_arg")"
-            log_err "Model path not found: $model_arg"
-            log_err "It looks like a HuggingFace model id. To download and start it, run:"
-            log_err "  ./scripts/agent sync-and-start-vllm \"$model_arg\""
-            log_err "This will create agent/models/${sanitized} and then start vLLM."
-            return 2
-        else
-            log_err "Model path not found: $model_path"
-            log_err "Make sure the local model dir exists (contains config.json / model files),"
-            log_err "or use sync-and-start-vllm to download from HuggingFace."
-            return 1
-        fi
-    fi
-
-    # At this point model_path is a directory
-    if [[ ! -d "$VLLM_DIR/.venv" ]]; then
-        log_err "vLLM venv not found at $VLLM_DIR/.venv"
-        log_err "Run: ./scripts/install_agent.sh"
-        return 1
-    fi
-
-    local VENV_PY="$VLLM_DIR/.venv/bin/python"
-
-    log_info "Starting vLLM with model: $model_path"
-    log_info "  Host: ${VLLM_HOST}:${VLLM_PORT}"
-
-    local env_args=()
-    if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
-        env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
-    fi
-
-    env "${env_args[@]}" nohup "$VENV_PY" -m vllm.entrypoints.openai.api_server \
-        --model "$model_path" \
-        --host "$VLLM_HOST" \
-        --port "$VLLM_PORT" \
-        --trust-remote-code \
-        >> "$VLLM_LOGFILE" 2>&1 &
-    write_pid "$VLLM_PIDFILE" "$!"
-
-    log_info "vLLM started (pid $(read_pid "$VLLM_PIDFILE"))"
-    log_info "Model loading may take several minutes for large models..."
-
-    wait_ready probe_vllm "vLLM" "$VLLM_PIDFILE" 300
-}
-
-
-start_comfyui() {
-    if probe_comfyui; then
-        log_ok "ComfyUI already running at http://${COMFYUI_HOST}:${COMFYUI_PORT}"
-        return 0
-    fi
-
-    if [[ ! -d "$COMFY_DIR" ]]; then
-        log_err "ComfyUI not found at $COMFY_DIR"
-        log_err "Run: ./scripts/install_agent.sh"
-        return 1
-    fi
-
-    if [[ ! -d "$COMFY_DIR/.venv" ]]; then
-        log_err "ComfyUI venv not found at $COMFY_DIR/.venv"
-        return 1
-    fi
-
-    local VENV_PY="$COMFY_DIR/.venv/bin/python"
-
-    log_info "Starting ComfyUI on ${COMFYUI_HOST}:${COMFYUI_PORT}..."
-
-    local env_args=()
-    if [[ -n "$CUDA_VISIBLE_DEVICES" ]]; then
-        env_args+=(CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
-    fi
-
-    (
-        cd "$COMFY_DIR"
-        env "${env_args[@]}" nohup "$VENV_PY" main.py \
-            --listen "$COMFYUI_HOST" \
-            --port "$COMFYUI_PORT" \
-            >> "$COMFYUI_LOGFILE" 2>&1 &
-        echo "$!" > "$COMFYUI_PIDFILE"
-    )
-
-    wait_ready probe_comfyui "ComfyUI" "$COMFYUI_PIDFILE" 60
-}
-
-start_mlx() {
-    # Enforce only-one-LLM
-    stop_other_llm_backends "mlx"
-
-    if probe_mlx; then
-        log_ok "MLX already running at http://${MLX_HOST}:${MLX_PORT}"
-        return 0
-    fi
-
-    if [[ ! -d "$MLX_DIR/.venv" ]]; then
-        log_err "MLX venv not found at $MLX_DIR/.venv"
-        log_err "Run: ./scripts/install_macos_mlx.sh"
-        return 1
-    fi
-
-    local VENV_PY="$MLX_DIR/.venv/bin/python"
-
-    log_info "Starting MLX backend on ${MLX_HOST}:${MLX_PORT}..."
-
-    (
-        cd "$REPO_ROOT"
-        MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" \
-            nohup "$VENV_PY" -m uvicorn agent.backends.mlx.server:app \
-                --host "$MLX_HOST" \
-                --port "$MLX_PORT" \
-                >> "$MLX_LOGFILE" 2>&1 &
-        echo "$!" > "$MLX_PIDFILE"
-    )
-
-    log_info "MLX started (pid $(read_pid "$MLX_PIDFILE"))"
-
-    wait_ready probe_mlx "MLX" "$MLX_PIDFILE" 30
-}
-
-# ============================================================================
-# Backend stop functions
-# ============================================================================
-
-stop_ollama()  { stop_process "$OLLAMA_PIDFILE" "Ollama"; }
-stop_vllm()    {
-    # docker rm -f handles container cleanup; --ipc host is released automatically on container exit
-    docker rm -f bench-race-vllm >/dev/null 2>&1 || true
-    stop_process "$VLLM_PIDFILE" "vLLM"
-}
-stop_comfyui() { stop_process "$COMFYUI_PIDFILE" "ComfyUI"; }
-stop_mlx()     { stop_process "$MLX_PIDFILE" "MLX"; }
-
-restart_mlx() {
-    stop_mlx
-    start_mlx
-}
-
-start_nvidia() {
-    maybe_suspend_ollama_for_custom_backend
-    if ! command -v docker &>/dev/null; then
-        log_err "docker not found in PATH"
-        return 1
-    fi
-    docker rm -f bench-race-triton >/dev/null 2>&1 || true
-    mkdir -p "${AGENT_DIR}/models/triton"
-    log_info "Starting Triton wrapper on ${TRITON_HOST}:${TRITON_PORT}"
-    docker run -d --name bench-race-triton         --gpus all         -p "${TRITON_PORT}:8020"         -e TRITON_PORT=8020         -v "${AGENT_DIR}/models/triton:/models"         bench-race/triton >/dev/null
-    local pid="$(docker inspect -f '{{.State.Pid}}' bench-race-triton)"
-    write_pid "$TRITON_PIDFILE" "$pid"
-    wait_ready probe_triton "Triton (docker)" "$TRITON_PIDFILE" 120
-}
-
-stop_nvidia() {
-    docker rm -f bench-race-triton >/dev/null 2>&1 || true
-    remove_pid "$TRITON_PIDFILE"
-    log_ok "Triton container stopped"
-}
-
-restart_nvidia() {
-    stop_nvidia
-    start_nvidia
-}
-
-# ============================================================================
-# Agent app (FastAPI) management
-# ============================================================================
-
-start_agent_app() {
-    local pid
-    pid="$(read_pid "$AGENT_PIDFILE")"
-    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-        log_ok "Agent app already running (pid $pid)"
-        return 0
-    fi
-
-    if [[ ! -d "$AGENT_DIR/.venv" ]]; then
-        log_err "Agent venv not found at $AGENT_DIR/.venv"
-        return 1
-    fi
-
-    # shellcheck disable=SC1091
-    source "$AGENT_DIR/.venv/bin/activate"
-
-    log_info "Starting agent app on ${AGENT_HOST}:${AGENT_PORT}..."
-    nohup uvicorn agent.agent_app:app \
-        --host "$AGENT_HOST" \
-        --port "$AGENT_PORT" \
-        >> "$AGENT_LOGFILE" 2>&1 &
-    write_pid "$AGENT_PIDFILE" "$!"
-
-    wait_ready probe_agent "Agent app" "$AGENT_PIDFILE" 15
-}
-
-stop_agent_app() {
-    stop_process "$AGENT_PIDFILE" "Agent app"
-}
-
-# ============================================================================
-# Status
-# ============================================================================
-
-status_backend() {
-    local name="$1"
-    local pidfile="$2"
-    local probe_fn="$3"
-    local port="$4"
-
-    local pid
-    pid="$(read_pid "$pidfile")"
-    local running=false
-    local healthy=false
-
-    if [[ -n "$pid" ]] && pid_is_running "$pid"; then
-        running=true
-    fi
-
-    if $probe_fn 2>/dev/null; then
-        healthy=true
-    fi
-
-    if $healthy; then
-        echo -e "  ${GREEN}${name}${NC}: running (healthy) on port ${port}"
-    elif $running; then
-        echo -e "  ${YELLOW}${name}${NC}: running (pid $pid) but not healthy on port ${port}"
-    else
-        echo -e "  ${RED}${name}${NC}: stopped"
-    fi
-}
-
-do_status() {
-    echo ""
-    echo "=== Backend Status ==="
-    status_backend "Ollama"  "$OLLAMA_PIDFILE"  probe_ollama  "$OLLAMA_PORT"
-    status_backend "vLLM"    "$VLLM_PIDFILE"    probe_vllm    "$VLLM_PORT"
-    status_backend "MLX"     "$MLX_PIDFILE"     probe_mlx     "$MLX_PORT"
-    status_backend "ComfyUI" "$COMFYUI_PIDFILE" probe_comfyui "$COMFYUI_PORT"
-    status_backend "Triton" "$TRITON_PIDFILE" probe_triton "$TRITON_PORT"
-    echo ""
-    echo "=== Agent App ==="
-    status_backend "Agent"   "$AGENT_PIDFILE"   probe_agent   "$AGENT_PORT"
-    echo ""
-
-    local active
-    active="$(active_llm_backend)"
-    if [[ -n "$active" ]]; then
-        log_info "Active LLM backend: $active"
-    else
-        log_info "No active LLM backend"
-    fi
-    echo ""
-}
-
-# ============================================================================
-# Dispatch: start-backend / stop-backend
-# ============================================================================
-
-do_start_backend() {
-    local backend="${1:-}"
-    shift || true
-    local model="${1:-}"
-
-    case "$backend" in
-        ollama)
-            start_ollama
-            ;;
-        vllm)
-            start_vllm_container "$model"
-            ;;
-        nvidia)
-            start_nvidia
-            ;;
-        comfyui)
-            start_comfyui
-            ;;
-        mlx)
-            start_mlx
-            ;;
-        *)
-            log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, mlx, comfyui, nvidia"
-            return 1
-            ;;
-    esac
-}
-
-do_stop_backend() {
-    local backend="${1:-}"
-
-    case "$backend" in
-        ollama)  stop_ollama ;;
-        vllm)    stop_vllm ;;
-        comfyui) stop_comfyui ;;
-        mlx)     stop_mlx ;;
-        nvidia) stop_nvidia ;;
-        *)
-            log_err "Unknown backend: $backend"
-            log_err "Valid backends: ollama, vllm, mlx, comfyui, nvidia"
-            return 1
-            ;;
-    esac
-}
-
-# ============================================================================
-# Convenience: start / stop all
-# ============================================================================
-
-do_start() {
-    start_agent_app
-}
-
-do_stop() {
-    stop_agent_app
-    stop_ollama
-    stop_vllm
-    stop_mlx
-    stop_comfyui
-}
-
-# ============================================================================
-# Usage
-# ============================================================================
-
-usage() {
-    cat <<EOF
-Usage: $(basename "$0") <command> [args...]
-
+usage(){
+cat <<USAGE
+Usage: ./scripts/agent <command>
 Commands:
-  status                             Show backend and agent status
-  start-backend <backend> [model]    Start an inference backend
-  stop-backend <backend>             Stop an inference backend
-  start                              Start the agent app (FastAPI)
-  stop                               Stop agent app and all backends
-  start-vllm <model>                 Start vLLM Docker backend (HF id or local path)
-  stop-vllm                          Stop vLLM Docker backend and release GPU
-  sync-and-start-vllm <hf-id>       Download model from HuggingFace then start vLLM
-  start-nvidia                       Convenience: start-backend nvidia
-  stop-nvidia                        Convenience: stop-backend nvidia
-  restart-nvidia                     Convenience: stop + start nvidia
-  start-ollama                       Convenience: start-backend ollama
-  stop-ollama                        Convenience: stop-backend ollama
-  start-comfyui                      Convenience: start-backend comfyui
-  stop-comfyui                       Convenience: stop-backend comfyui
-  start-mlx                          Convenience: start-backend mlx
-  stop-mlx                           Convenience: stop-backend mlx
-  restart-mlx                        Convenience: stop + start mlx
+  status
+  start
+  stop
+  start-backend <ollama|mlx|trtllm|comfyui> [model]
+  stop-backend <ollama|mlx|trtllm|comfyui>
+  start-ollama | stop-ollama
+  start-mlx | stop-mlx
+  start-trtllm | stop-trtllm
+  start-comfyui | stop-comfyui
 
-Backends: ollama, vllm, mlx, comfyui, nvidia
-
-Only one LLM backend (ollama, vllm, or mlx) can run at a time.
-Starting one will stop the others automatically.
-
-Environment:
-  OLLAMA_HOST, OLLAMA_PORT              (default: 127.0.0.1:11434)
-  VLLM_HOST, VLLM_PORT                 (default: 127.0.0.1:8000)
-  VLLM_MAX_MODEL_LEN                   Max context length (default: 32768)
-  VLLM_MODEL                           Default model if none passed to start-vllm
-  TRITON_HOST, TRITON_PORT             (default: 127.0.0.1:8020)
-  MLX_HOST, MLX_PORT                    (default: 127.0.0.1:8321)
-  COMFYUI_HOST, COMFYUI_PORT           (default: 127.0.0.1:8188)
-  AGENT_HOST, AGENT_PORT               (default: 0.0.0.0:9001)
-  AGENT_BACKEND_IDLE_SECS              Inactivity timeout (default: 0 = disabled)
-  CUDA_VISIBLE_DEVICES                  Pin GPU(s) for backends
-  ALLOW_OLLAMA_AUTO_SUSPEND             Auto-stop Ollama for custom backend (default: 1)
-  OLLAMA_SUSPEND_DRY_RUN                Log-only mode for Ollama suspension (default: 0)
-  OLLAMA_VRAM_THRESHOLD_PCT             Policy threshold hint (default: 1)
-
-PID files: ${RUN_DIR}/
-Log files: ${LOG_DIR}/
-EOF
+Notes:
+  - Only one LLM backend can be active at a time: ollama, mlx, trtllm.
+  - Logs: agent/log/*.log
+  - PID files: agent/run/*.pid
+  - vLLM was archived; see archive/vllm/README.md
+USAGE
 }
 
-# ============================================================================
-# Main dispatch
-# ============================================================================
-
-CMD="${1:-}"
-shift || true
-
-case "$CMD" in
-    status)
-        do_status
-        ;;
-    start-backend)
-        do_start_backend "$@"
-        ;;
-    stop-backend)
-        do_stop_backend "$@"
-        ;;
-    start)
-        do_start
-        ;;
-    stop)
-        do_stop
-        ;;
-    start-vllm)
-        start_vllm_container "$@"
-        ;;
-    sync-and-start-vllm)
-        sync_and_start_vllm "$@"
-        ;;
-    stop-vllm)
-        stop_vllm
-        ;;
-    start-ollama)
-        start_ollama
-        ;;
-    stop-ollama)
-        stop_ollama
-        ;;
-    start-comfyui)
-        start_comfyui
-        ;;
-    stop-comfyui)
-        stop_comfyui
-        ;;
-    start-mlx)
-        start_mlx
-        ;;
-    stop-mlx)
-        stop_mlx
-        ;;
-    restart-mlx)
-        restart_mlx
-        ;;
-    start-nvidia)
-        start_nvidia
-        ;;
-    stop-nvidia)
-        stop_nvidia
-        ;;
-    restart-nvidia)
-        restart_nvidia
-        ;;
-    ""|-h|--help|help)
-        usage
-        exit 0
-        ;;
-    *)
-        log_err "Unknown command: $CMD"
-        usage
-        exit 2
-        ;;
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  status) status ;;
+  start) start_agent ;;
+  stop) stop_agent; stop_ollama; stop_mlx; stop_trtllm; stop_comfyui ;;
+  start-backend) case "${1:-}" in ollama) start_ollama ;; mlx) start_mlx ;; trtllm) start_trtllm ;; comfyui) start_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
+  stop-backend) case "${1:-}" in ollama) stop_ollama ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
+  start-ollama) start_ollama ;;
+  stop-ollama) stop_ollama ;;
+  start-mlx) start_mlx ;;
+  stop-mlx) stop_mlx ;;
+  start-trtllm) start_trtllm ;;
+  stop-trtllm) stop_trtllm ;;
+  start-comfyui) start_comfyui ;;
+  stop-comfyui) stop_comfyui ;;
+  start-vllm|stop-vllm|sync-and-start-vllm)
+    err "vLLM lifecycle commands were archived. See archive/vllm/README.md"
+    exit 3
+    ;;
+  help|-h|--help|"") usage ;;
+  *) err "Unknown command: $cmd"; usage; exit 2 ;;
 esac
-
-
-# ============================================================================
-# sync-and-start-vllm: download a model from HF into agent/models/<sanitized>
-# then start vllm pointing at that directory.
-# ============================================================================
-sync_and_start_vllm() {
-    local hf_id="${1:-}"
-    if [[ -z "$hf_id" ]]; then
-        log_err "Usage: sync-and-start-vllm <huggingface-model-id>"
-        return 1
-    fi
-
-    # Sanitize the HF id to a filesystem-safe local name
-    local sanitized
-    sanitized="$("${SCRIPT_DIR}/model_sanitize.sh" "$hf_id")"
-    local dest="${AGENT_DIR}/models/${sanitized}"
-
-    # Ensure sync_models.sh exists and is executable
-    local sync_script="${SCRIPT_DIR}/sync_models.sh"
-    if [[ ! -x "$sync_script" && ! -f "$sync_script" ]]; then
-        log_err "sync_models.sh not found at ${sync_script}. Please ensure it exists and is executable."
-        return 2
-    fi
-
-    # Call the sync utility to download model into agent/models/<sanitized>
-    log_info "Syncing HuggingFace model '$hf_id' -> ${dest} (sanitized: ${sanitized})"
-    "${sync_script}" "$hf_id" --local-name "${sanitized}" || {
-        log_err "Model sync failed for $hf_id"
-        return 3
-    }
-
-    # Verify model dir has a config file (basic validation)
-    if [[ ! -f "${dest}/config.json" && -z "$(ls -A "${dest}" 2>/dev/null)" ]]; then
-        log_err "Downloaded model directory looks empty or missing config.json: ${dest}"
-        log_err "Inspect the download or try a different HF model id."
-        return 4
-    fi
-
-    # Start vLLM using the local model dir
-    start_vllm_container "${dest}"
-}
