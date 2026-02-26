@@ -147,7 +147,15 @@ Options:
 
 # Install without Ollama or ComfyUI (minimal agent only)
 ./scripts/install_agent.sh --skip-ollama --skip-comfyui
+
+# Opt-in TensorRT-LLM backend install (Linux + NVIDIA Docker)
+./scripts/install_agent.sh --install-trtllm --yes
+
+# Or run installer directly with image/port overrides
+./scripts/install_trtllm.sh --yes --image nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3 --port 8000
 ```
+
+TensorRT-LLM engines/models are stored under `agent/models/trtllm`, and the backend helper is `agent/backends/trtllm_run.sh` (supports `start|stop|status|restart`).
 
 ### Central Installation
 
