@@ -17,6 +17,7 @@
 #   --update              Update existing installation
 #   --dry-run             Show what would be done without doing it
 #   --platform PLATFORM   Override platform detection (macos|linux)
+#   --rebuild             Delete and recreate central/.venv
 
 set -euo pipefail
 
@@ -67,6 +68,7 @@ DRY_RUN=false
 YES_MODE=false
 NO_SERVICE=false
 UPDATE_MODE=false
+REBUILD=false
 
 # ============================================================================
 # Helper Functions
@@ -177,7 +179,7 @@ ensure_prereqs() {
 
     # Check Python version (reject 3.14+ per the existing setup_venv_central.sh logic)
     local python_version
-    python_version=$($PYTHON_BIN -c \'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")\')
+    python_version=$($PYTHON_BIN -c 'import sys; v=sys.version_info; print(str(v.major) + "." + str(v.minor))')
     local major minor
     IFS='.' read -r major minor <<< "$python_version"
 
@@ -414,6 +416,7 @@ Options:
   --update              Update existing installation
   --dry-run             Show what would be done without doing it
   --platform PLATFORM   Override platform detection (macos|linux)
+  --rebuild             Delete and recreate central/.venv
   --help                Show this help message
 
 EOF
@@ -441,6 +444,10 @@ parse_args() {
             --platform)
                 PLATFORM="$2"
                 shift 2
+                ;;
+            --rebuild)
+                REBUILD=true
+                shift
                 ;;
             --help)
                 print_usage
@@ -486,6 +493,37 @@ main() {
 
     # Check prerequisites
     ensure_prereqs
+
+    if [ "$REBUILD" = true ]; then
+        echo "[STEP] Rebuilding central virtual environment"
+
+        VENV_DIR="${REPO_ROOT}/central/.venv"
+
+        if [ -d "$VENV_DIR" ]; then
+            echo "[INFO] Removing existing venv at $VENV_DIR"
+            rm -rf "$VENV_DIR"
+        fi
+
+        echo "[INFO] Creating new venv"
+        "$PYTHON_BIN" -m venv "$VENV_DIR" || {
+            echo "[ERROR] Failed to create venv"
+            exit 1
+        }
+
+        echo "[INFO] Upgrading pip/setuptools/wheel"
+        "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel || exit 1
+
+        if [ -f "${REPO_ROOT}/central/requirements.txt" ]; then
+            echo "[INFO] Installing central requirements"
+            "$VENV_DIR/bin/python" -m pip install -r "${REPO_ROOT}/central/requirements.txt" || exit 1
+        else
+            echo "[ERROR] central/requirements.txt not found"
+            exit 1
+        fi
+
+        echo "[INFO] Rebuild complete"
+        exit 0
+    fi
 
     # Install Python environment
     install_or_update_central_venv || {
