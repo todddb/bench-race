@@ -339,7 +339,8 @@ PY
   fi
 
   echo "[container] Running trtllm-build"
-  trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 1 --max_input_len 128 --max_seq_len 512 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
+  #trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 1 --max_input_len 128 --max_seq_len 512 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
+  trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 2048 --max_input_len 512 --max_seq_len 2048 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
 
   echo "[container] build finished"
 INNER_EOF
