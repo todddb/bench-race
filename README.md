@@ -157,6 +157,8 @@ Options:
 
 TensorRT-LLM engines/models are stored under `agent/models/trtllm`, and the backend helper is `agent/backends/trtllm_run.sh` (supports `start|stop|status|restart`).
 
+The unified wrapper service is available at `agent/backends/wrapper` and exposes a consistent API on `127.0.0.1:9002` (`/v1/health`, `/v1/models`, `/v1/infer`, `/v1/infer/stream`). Run it with `python -m agent.backends.wrapper` or `uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002`. Smoke checks are in `agent/backends/wrapper/tests/smoke_tests.sh`.
+
 ### Central Installation
 
 The central installer (`scripts/install_central.sh`) sets up the central server:
