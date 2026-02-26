@@ -75,15 +75,16 @@ REBUILD=false
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# On macOS, prefer Homebrew Python 3.13 first.
+# On macOS, prefer the newest available Homebrew Python (3.14 > 3.13 > 3.12).
 #
-# Why: central currently depends on pydantic-core wheels/tooling that fail to build
-# on Python 3.14 in common setups (PyO3 version caps), which breaks installation.
-# Python 3.12 has had intermittent routing issues on some macOS environments, so we
-# keep it as a fallback behind 3.13.
+# Python 3.12 has a confirmed routing bug on macOS: socket.connect() returns
+# EHOSTUNREACH ([Errno 65] No route to host) for RFC1918 addresses (192.168.x.x)
+# when the machine has multiple interfaces on the same subnet (e.g. wired + WiFi).
+# Python 3.14 does not exhibit this issue.  pydantic 2.11.7+ ships pre-built
+# wheels for Python 3.14, so the earlier PyO3 build concern no longer applies.
 PYTHON_BIN=python3
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    for _ver in 3.13 3.12 3.14; do
+    for _ver in 3.14 3.13 3.12; do
         if [[ -x "/opt/homebrew/bin/python${_ver}" ]]; then
             PYTHON_BIN="/opt/homebrew/bin/python${_ver}"
             break
