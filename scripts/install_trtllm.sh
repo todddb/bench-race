@@ -4,16 +4,18 @@
 #
 # One-stop installer for TensorRT-LLM backend (containerized)
 # - Pulls NVIDIA TRT-LLM container (configurable)
-# - Downloads HF model snapshot inside the container (no host venv)
+# - Downloads HF model snapshot inside the container
 # - Converts HF checkpoint -> TRT-LLM checkpoint -> builds TensorRT engines inside container
+# - Copies tokenizer files into engine directory so trtllm-serve can find them
 # - Persists artifacts under agent/models/trtllm/
 # - Installs agent/backends/trtllm_run.sh launcher (start/stop/status/logs/restart)
 # - Starts TRT-LLM server (serving from engines) and runs smoke test
 #
 # Usage:
 #   ./scripts/install_trtllm.sh [--yes] [--image IMAGE] [--port PORT] [--model MODEL_ID]
-#                               [--precision fp16|fp32|fp8] [--system-service]
+#                               [--precision float16|bfloat16|float32] [--system-service]
 #                               [--skip-docker-login] [--no-detach] [--keep-artifacts]
+#                               [--max-batch-size N] [--max-input-len N] [--max-seq-len N]
 #
 set -euo pipefail
 
@@ -29,8 +31,11 @@ SECRETS_FILE="${HOME}/.bench-race-secrets"
 DEFAULT_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
 DEFAULT_PORT="8000"
 DEFAULT_CONTAINER_NAME="bench-race-trtllm"
-DEFAULT_MODEL="meta-llama/Meta-Llama-3-8B"   # default: Llama-3 8B (FP16-compatible)
-DEFAULT_PRECISION="fp16"     # build precision: fp16 recommended for speed/size
+DEFAULT_MODEL="distilgpt2"
+DEFAULT_PRECISION="float16"        # must match convert_checkpoint.py choices: auto, float16, bfloat16, float32
+DEFAULT_MAX_BATCH_SIZE="2048"
+DEFAULT_MAX_INPUT_LEN="512"
+DEFAULT_MAX_SEQ_LEN="1024"
 
 # CLI flags (defaults)
 YES_MODE=false
@@ -39,10 +44,13 @@ PORT="${DEFAULT_PORT}"
 CONTAINER_NAME="${DEFAULT_CONTAINER_NAME}"
 MODEL_ID="${DEFAULT_MODEL}"
 PRECISION="${DEFAULT_PRECISION}"
+MAX_BATCH_SIZE="${DEFAULT_MAX_BATCH_SIZE}"
+MAX_INPUT_LEN="${DEFAULT_MAX_INPUT_LEN}"
+MAX_SEQ_LEN="${DEFAULT_MAX_SEQ_LEN}"
 SYSTEM_SERVICE=false
 SKIP_DOCKER_LOGIN=false
 NO_DETACH=false
-KEEP_ARTIFACTS=false   # if true, don't remove intermediate checkpoint dir after build
+KEEP_ARTIFACTS=false
 
 # Colors for logs
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -57,17 +65,21 @@ print_usage() {
 Usage: $0 [OPTIONS]
 
 Options:
-  --yes                     Assume yes for prompts
-  --image IMAGE             TRT-LLM container image (default: ${DEFAULT_IMAGE})
-  --port PORT               Host port to map container 8000 to (default: ${DEFAULT_PORT})
-  --container-name NAME     Docker container name (default: ${DEFAULT_CONTAINER_NAME})
-  --model MODEL_ID          HuggingFace model id to download/build (default: ${DEFAULT_MODEL})
-  --precision fp16|fp32|fp8 Precision for engine build (default: ${DEFAULT_PRECISION})
-  --system-service          Install user-level systemd unit to manage backend
-  --skip-docker-login       Skip docker login to nvcr.io (NGC)
-  --no-detach               Start server in foreground during install
-  --keep-artifacts          Keep intermediate checkpoint dirs after engine build
-  -h, --help                Show this help
+  --yes                         Assume yes for prompts
+  --image IMAGE                 TRT-LLM container image (default: ${DEFAULT_IMAGE})
+  --port PORT                   Host port to map container 8000 to (default: ${DEFAULT_PORT})
+  --container-name NAME         Docker container name (default: ${DEFAULT_CONTAINER_NAME})
+  --model MODEL_ID              HuggingFace model id (default: ${DEFAULT_MODEL})
+  --precision float16|bfloat16|float32
+                                Precision for checkpoint conversion (default: ${DEFAULT_PRECISION})
+  --max-batch-size N            Max batch size for engine build (default: ${DEFAULT_MAX_BATCH_SIZE})
+  --max-input-len N             Max input length for engine build (default: ${DEFAULT_MAX_INPUT_LEN})
+  --max-seq-len N               Max sequence length for engine build (default: ${DEFAULT_MAX_SEQ_LEN})
+  --system-service              Install user-level systemd unit
+  --skip-docker-login           Skip docker login to nvcr.io (NGC)
+  --no-detach                   Start server in foreground during install
+  --keep-artifacts              Keep intermediate checkpoint dirs after engine build
+  -h, --help                    Show this help
 EOF
 }
 
@@ -80,6 +92,9 @@ while [[ $# -gt 0 ]]; do
     --container-name) CONTAINER_NAME="$2"; shift 2 ;;
     --model) MODEL_ID="$2"; shift 2 ;;
     --precision) PRECISION="$2"; shift 2 ;;
+    --max-batch-size) MAX_BATCH_SIZE="$2"; shift 2 ;;
+    --max-input-len) MAX_INPUT_LEN="$2"; shift 2 ;;
+    --max-seq-len) MAX_SEQ_LEN="$2"; shift 2 ;;
     --system-service) SYSTEM_SERVICE=true; shift ;;
     --skip-docker-login) SKIP_DOCKER_LOGIN=true; shift ;;
     --no-detach) NO_DETACH=true; shift ;;
@@ -89,19 +104,31 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Validate precision
+case "${PRECISION}" in
+  float16|bfloat16|float32|auto) ;;
+  fp16)  log_warn "--precision fp16 is not valid for convert_checkpoint.py; using 'float16' instead."; PRECISION="float16" ;;
+  bf16)  log_warn "--precision bf16 is not valid for convert_checkpoint.py; using 'bfloat16' instead."; PRECISION="bfloat16" ;;
+  fp32)  log_warn "--precision fp32 is not valid for convert_checkpoint.py; using 'float32' instead."; PRECISION="float32" ;;
+  *)     log_error "Invalid precision '${PRECISION}'. Choose from: auto, float16, bfloat16, float32"; exit 2 ;;
+esac
+
 # Platform guard
 if [[ "$(uname -s)" != "Linux" ]]; then
-  log_error "This installer targets Linux hosts with NVIDIA GPUs (nvidia-docker). Exiting."
+  log_error "This installer targets Linux hosts with NVIDIA GPUs. Exiting."
   exit 3
 fi
 
+# Flatten model name for directory paths (meta-llama/Meta-Llama-3-8B -> meta-llama--Meta-Llama-3-8B)
+MODEL_FLAT="${MODEL_ID//\//__}"
+
 # Load secrets (HUGGINGFACE_TOKEN, NGC_API_KEY) if present
 if [[ -r "${SECRETS_FILE}" ]]; then
-  log_info "Loading secrets from ${SECRETS_FILE} (not echoed)"
+  log_info "Loading secrets from ${SECRETS_FILE}"
   # shellcheck disable=SC1090
   source "${SECRETS_FILE}"
 else
-  log_warn "Secrets file ${SECRETS_FILE} not readable; ensure HUGGINGFACE_TOKEN/NGC_API_KEY are available in environment if needed."
+  log_warn "Secrets file ${SECRETS_FILE} not found; ensure HUGGINGFACE_TOKEN/NGC_API_KEY are in environment if needed."
 fi
 
 # Basic checks
@@ -111,31 +138,33 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   log_info "Detected local GPUs:"
   nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
 else
-  log_warn "nvidia-smi not present; host GPU detection limited (but docker container may still access GPUs via toolkit)."
+  log_warn "nvidia-smi not present on host (container may still access GPUs via nvidia-docker toolkit)."
 fi
 
 # Create dirs
-mkdir -p "${MODELS_ROOT}"
+mkdir -p "${MODELS_ROOT}/engines/${MODEL_FLAT}"
 mkdir -p "${BACKENDS_DIR}"
 mkdir -p "${HOME}/.cache/huggingface"
 
+# -------------------------------------------------------------------
 # Helper: docker login to nvcr if key present
+# -------------------------------------------------------------------
 docker_login_ngc() {
   if [[ "${SKIP_DOCKER_LOGIN}" == "true" ]]; then
     log_info "--skip-docker-login set; skipping nvcr.io login"
     return 0
   fi
   if [[ -n "${NGC_API_KEY:-}" ]]; then
-    log_info "Attempting docker login to nvcr.io with NGC_API_KEY (username literal '\$oauthtoken')"
+    log_info "Attempting docker login to nvcr.io"
     if printf '%s' "${NGC_API_KEY}" | docker login nvcr.io --username '$oauthtoken' --password-stdin >/dev/null 2>&1; then
       log_success "Logged into nvcr.io"
       return 0
     else
-      log_warn "docker login to nvcr.io failed. If image is cached locally that may be ok; otherwise re-run with a valid NGC_API_KEY."
+      log_warn "docker login to nvcr.io failed."
       return 2
     fi
   else
-    log_warn "NGC_API_KEY not set; relying on local cache or public access."
+    log_warn "NGC_API_KEY not set; relying on local image cache."
     return 1
   fi
 }
@@ -144,72 +173,86 @@ docker_login_ngc() {
 pull_image() {
   log_step "Pulling image: ${IMAGE}"
   if docker pull "${IMAGE}"; then
-    log_success "Image: ${IMAGE}"
-    return 0
+    log_success "Image pulled: ${IMAGE}"
   else
-    log_warn "docker pull failed for ${IMAGE}. If image exists locally this may be OK; otherwise container run will likely fail."
-    return 2
+    log_warn "docker pull failed; if image exists locally this may be OK."
   fi
 }
 
+# -------------------------------------------------------------------
 # Install launcher script (idempotent)
+# -------------------------------------------------------------------
 install_launcher() {
-  local launcher="${LAUNCHER}"
-  log_step "Installing launcher: ${launcher}"
-  cat > "${launcher}" <<'LAUNCHER_EOF'
+  log_step "Installing launcher: ${LAUNCHER}"
+
+  # We write the launcher with the build-time values baked in as defaults,
+  # but every value can be overridden via environment variables at runtime.
+  cat > "${LAUNCHER}" <<LAUNCHER_EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MODELS_DIR="${REPO_ROOT}/agent/models/trtllm"
-HF_CACHE_DIR="${HOME}/.cache/huggingface"
-CONTAINER_NAME="${TRTLLM_CONTAINER_NAME:-bench-race-trtllm}"
-TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3}"
-TRTLLM_PORT="${TRTLLM_PORT:-8000}"
-DETACH="${TRTLLM_DETACH:-true}"
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
+MODELS_DIR="\${REPO_ROOT}/agent/models/trtllm"
+HF_CACHE_DIR="\${HOME}/.cache/huggingface"
 
-mkdir -p "${MODELS_DIR}" "${HF_CACHE_DIR}"
+# Overridable via environment
+CONTAINER_NAME="\${TRTLLM_CONTAINER_NAME:-${CONTAINER_NAME}}"
+TRTLLM_IMAGE="\${TRTLLM_IMAGE:-${IMAGE}}"
+TRTLLM_PORT="\${TRTLLM_PORT:-${PORT}}"
+TRTLLM_MODEL="\${TRTLLM_MODEL:-${MODEL_FLAT}}"
+TRTLLM_MAX_BATCH_SIZE="\${TRTLLM_MAX_BATCH_SIZE:-${MAX_BATCH_SIZE}}"
+DETACH="\${TRTLLM_DETACH:-true}"
+
+mkdir -p "\${MODELS_DIR}" "\${HF_CACHE_DIR}"
 
 start() {
-  # remove stopped container if exists (avoid name clashes)
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-      echo "Container ${CONTAINER_NAME} already running."
+  # Remove stopped container if exists
+  if docker ps -a --format '{{.Names}}' | grep -qx "\${CONTAINER_NAME}"; then
+    if docker ps --format '{{.Names}}' | grep -qx "\${CONTAINER_NAME}"; then
+      echo "Container \${CONTAINER_NAME} already running."
       return 0
     else
-      echo "Removing existing stopped container ${CONTAINER_NAME}..."
-      docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+      echo "Removing stopped container \${CONTAINER_NAME}..."
+      docker rm -f "\${CONTAINER_NAME}" >/dev/null 2>&1 || true
     fi
   fi
 
-  local docker_args=(run --name "${CONTAINER_NAME}" --gpus=all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p "${TRTLLM_PORT}:8000" -v "${MODELS_DIR}:/workspace/trtllm:rw" -v "${HF_CACHE_DIR}:/root/.cache/huggingface:rw")
+  local docker_args=(
+    run --name "\${CONTAINER_NAME}"
+    --gpus=all --ipc=host
+    --ulimit memlock=-1 --ulimit stack=67108864
+    -p "\${TRTLLM_PORT}:8000"
+    -v "\${MODELS_DIR}:/workspace/trtllm:ro"
+    -v "\${HF_CACHE_DIR}:/root/.cache/huggingface:ro"
+  )
 
-  if [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
-    docker_args+=( -e "HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}" )
-  fi
-  if [[ "${DETACH}" == "true" ]]; then
-    docker_args+=( -d )
-  fi
+  [[ -n "\${HUGGINGFACE_TOKEN:-}" ]] && docker_args+=( -e "HUGGINGFACE_TOKEN=\${HUGGINGFACE_TOKEN}" )
+  [[ "\${DETACH}" == "true" ]] && docker_args+=( -d )
 
-  docker "${docker_args[@]}" "${TRTLLM_IMAGE}" /bin/bash -c "trtllm-serve serve --host 0.0.0.0 --port 8000"
+  docker "\${docker_args[@]}" "\${TRTLLM_IMAGE}" \
+    trtllm-serve serve \
+      --backend tensorrt \
+      --max_batch_size "\${TRTLLM_MAX_BATCH_SIZE}" \
+      --host 0.0.0.0 --port 8000 \
+      "/workspace/trtllm/engines/\${TRTLLM_MODEL}"
 }
 
 stop() {
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-    echo "Stopped ${CONTAINER_NAME}."
+  if docker ps -a --format '{{.Names}}' | grep -qx "\${CONTAINER_NAME}"; then
+    docker rm -f "\${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    echo "Stopped \${CONTAINER_NAME}."
   else
-    echo "Container ${CONTAINER_NAME} not present."
+    echo "Container \${CONTAINER_NAME} not present."
   fi
 }
 
 status() {
-  docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+  docker ps -a --filter "name=\${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 }
 
 logs() {
-  docker logs -f "${CONTAINER_NAME}"
+  docker logs -f "\${CONTAINER_NAME}"
 }
 
 restart() {
@@ -217,25 +260,27 @@ restart() {
   start
 }
 
-case "${1:-start}" in
+case "\${1:-start}" in
   start) start ;;
   stop) stop ;;
   restart) restart ;;
   status) status ;;
   logs) logs ;;
-  *) echo "Usage: $0 {start|stop|restart|status|logs}" >&2; exit 2 ;;
+  *) echo "Usage: \$0 {start|stop|restart|status|logs}" >&2; exit 2 ;;
 esac
 LAUNCHER_EOF
 
-  chmod +x "${launcher}"
-  log_success "Launcher installed at ${launcher}"
+  chmod +x "${LAUNCHER}"
+  log_success "Launcher installed at ${LAUNCHER}"
 }
 
+# -------------------------------------------------------------------
 # Create systemd user unit (optional)
+# -------------------------------------------------------------------
 install_systemd() {
   if [[ "${SYSTEM_SERVICE}" != "true" ]]; then return 0; fi
   if ! command -v systemctl >/dev/null 2>&1; then
-    log_warn "systemctl not available; skipping systemd unit installation"
+    log_warn "systemctl not available; skipping systemd unit"
     return 0
   fi
   local unit_dir="${HOME}/.config/systemd/user"
@@ -252,6 +297,8 @@ RemainAfterExit=yes
 WorkingDirectory=${REPO_ROOT}
 Environment=TRTLLM_PORT=${PORT}
 Environment=TRTLLM_IMAGE=${IMAGE}
+Environment=TRTLLM_MODEL=${MODEL_FLAT}
+Environment=TRTLLM_MAX_BATCH_SIZE=${MAX_BATCH_SIZE}
 ExecStart=${LAUNCHER} start
 ExecStop=${LAUNCHER} stop
 
@@ -264,113 +311,180 @@ UNIT
   log_success "Installed systemd user unit at ${unit_file}"
 }
 
-# Run model download + convert + build inside container (idempotent)
-# Layout under MODELS_ROOT:
-#   models/<MODEL_ID>    <- HF snapshot (tokenizer/config)
-#   checkpoints/<MODEL_ID>/checkpoint  <- converted checkpoint (trt-llm format)
-#   engines/<MODEL_ID>   <- output engines (trt plans etc.)
+# -------------------------------------------------------------------
+# Detect GPT variant for convert_checkpoint.py
+# Returns a --gpt_variant flag value, or empty string if not needed
+# -------------------------------------------------------------------
+detect_gpt_variant() {
+  local model_lower
+  model_lower="$(echo "${MODEL_ID}" | tr '[:upper:]' '[:lower:]')"
+  case "${model_lower}" in
+    *gpt2*|*distilgpt*)  echo "gpt2" ;;
+    *starcoder2*)        echo "starcoder2" ;;
+    *starcoder*)         echo "starcoder" ;;
+    *santacoder*)        echo "santacoder" ;;
+    *persimmon*)         echo "persimmon" ;;
+    *nemotron*)          echo "nemotron" ;;
+    *)                   echo "" ;;
+  esac
+}
+
+# -------------------------------------------------------------------
+# Build model: download, convert, build engines — all inside container
+# -------------------------------------------------------------------
 prepare_and_build_model() {
-  local model="${MODEL_ID}"
-  local precision="${PRECISION}"
-  local model_dir="${MODELS_ROOT}/models/${model}"
-  local checkpoint_dir="${MODELS_ROOT}/checkpoints/${model}"
-  local engine_out="${MODELS_ROOT}/engines/${model}"
-  local tmp_checkpoint="${checkpoint_dir}/checkpoint"   # trtllm examples expect --output_dir to be /checkpoint
+  local engine_out="${MODELS_ROOT}/engines/${MODEL_FLAT}"
 
-  mkdir -p "${model_dir}" "${checkpoint_dir}" "${engine_out}"
-
-  # If engines already exist, skip build
-  if [[ -n "$(ls -A "${engine_out}" 2>/dev/null || true)" ]]; then
-    log_info "Engines already exist for model ${model} at ${engine_out}; skipping build."
+  # Skip if engines already exist
+  if ls "${engine_out}"/*.engine 2>/dev/null | head -1 >/dev/null 2>&1; then
+    log_info "Engine files already exist at ${engine_out}; skipping build."
     return 0
   fi
 
-  log_step "Starting containerized flow to download model and build TensorRT engines (model=${model}, precision=${precision})"
-  # Build command that will run inside the container
-  # 1) try to use huggingface_hub.snapshot_download to fetch model into /workspace/trtllm/models/<model>
-  # 2) locate convert_checkpoint.py inside container
-  # 3) run conversion -> checkpoint_dir
-  # 4) run trtllm-build to produce engines into /workspace/trtllm/engines/<model>
-  #
-  # NOTE: Pass HUGGINGFACE_TOKEN via env if available.
-  docker_args=(--rm --gpus=all -v "${model_dir}:/workspace/trtllm/models/${model}:rw" -v "${checkpoint_dir}:/workspace/trtllm/checkpoints/${model}:rw" -v "${engine_out}:/workspace/trtllm/engines/${model}:rw" -v "${HOME}/.cache/huggingface:/root/.cache/huggingface:rw" --ipc=host)
+  local gpt_variant
+  gpt_variant="$(detect_gpt_variant)"
 
-  # Compose inner script that reads the model from the environment variable $MODEL_ENV.
-  # The inner container script references $MODEL_ENV and $PRECISION directly.
-  read -r -d '' INNER <<'INNER_EOF' || true
-  set -euo pipefail
-  MODEL="${MODEL_ENV:-}"
-  if [ -z "$MODEL" ]; then
-    echo "[container] ERROR: MODEL_ENV not set"
-    exit 2
-  fi
-  BUILD_PRECISION="${PRECISION:-fp16}"
-  MODEL_DIR="/workspace/trtllm/models/${MODEL}"
-  CHECKPOINT_DIR="/workspace/trtllm/checkpoints/${MODEL}"
-  ENGINE_OUT="/workspace/trtllm/engines/${MODEL}"
+  log_step "Building TRT-LLM engines inside container"
+  log_info "  Model:          ${MODEL_ID}"
+  log_info "  Precision:      ${PRECISION}"
+  log_info "  GPT variant:    ${gpt_variant:-<auto>}"
+  log_info "  Max batch size: ${MAX_BATCH_SIZE}"
+  log_info "  Max input len:  ${MAX_INPUT_LEN}"
+  log_info "  Max seq len:    ${MAX_SEQ_LEN}"
 
-  echo "[container] model env: $MODEL"
-  echo "[container] python snapshot_download for $MODEL (if not present)"
-  python - <<PY
+  # Build the inner script.
+  # Everything runs inside the container under /tmp/build.
+  # Only the final engine + tokenizer files get written to /output (which is volume-mounted).
+  local INNER
+  read -r -d '' INNER <<'INNER_SCRIPT' || true
+set -euo pipefail
+
+MODEL_ID="${MODEL_ENV}"
+PRECISION="${PRECISION_ENV}"
+GPT_VARIANT="${GPT_VARIANT_ENV}"
+MAX_BATCH="${MAX_BATCH_ENV}"
+MAX_INPUT="${MAX_INPUT_ENV}"
+MAX_SEQ="${MAX_SEQ_ENV}"
+
+WORK="/tmp/build"
+HF_DIR="${WORK}/hf_model"
+CKPT_DIR="${WORK}/checkpoint"
+ENGINE_DIR="/output"   # volume-mounted to host
+
+mkdir -p "${HF_DIR}" "${CKPT_DIR}"
+
+echo "============================================"
+echo "[build] Step 1/4: Downloading model ${MODEL_ID}"
+echo "============================================"
+python3 - <<PY
 from huggingface_hub import snapshot_download
-import os,sys
-
-repo_id = os.getenv("MODEL_ENV")
-out_dir = "/workspace/trtllm/models/%s" % repo_id
-token = os.getenv("HUGGINGFACE_TOKEN")
-if not os.path.exists(out_dir) or not os.listdir(out_dir):
-    print("Downloading model snapshot to", out_dir)
-    snapshot_download(repo_id=repo_id, local_dir=out_dir, cache_dir="/root/.cache/huggingface", token=token, ignore_patterns=["*.h5","*.msgpack","*.tflite"])
-else:
-    print("Model dir exists and is non-empty; skipping download")
+import os
+snapshot_download(
+    repo_id="${MODEL_ID}",
+    local_dir="${HF_DIR}",
+    cache_dir="/root/.cache/huggingface",
+    token=os.getenv("HUGGINGFACE_TOKEN"),
+    ignore_patterns=["*.h5", "*.msgpack", "*.tflite", "*.ot"]
+)
+print("[build] Download complete")
 PY
 
-  # find convert script
-  CONVERT=""
-  for p in /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/gpt/convert_checkpoint.py; do
-    if [ -f "$p" ]; then CONVERT="$p"; break; fi
-  done
-  echo "[container] convert script: $CONVERT"
-  mkdir -p "${CHECKPOINT_DIR}" "${ENGINE_OUT}"
-  if [ -n "$CONVERT" ]; then
-    python "$CONVERT" --model_dir "$MODEL_DIR" --output_dir "$CHECKPOINT_DIR" --dtype "${BUILD_PRECISION}" --tp_size 1 || echo "[container] convert may have failed (continuing if checkpoint exists)"
-  else
-    echo "[container] convert script not found; skipping convert step"
+echo "============================================"
+echo "[build] Step 2/4: Converting checkpoint"
+echo "============================================"
+# Find the convert script
+CONVERT=""
+for p in \
+  /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py \
+  /app/tensorrt_llm/examples/gpt/convert_checkpoint.py \
+  ; do
+  if [ -f "$p" ]; then CONVERT="$p"; break; fi
+done
+
+if [ -z "$CONVERT" ]; then
+  echo "[build] ERROR: convert_checkpoint.py not found in container"
+  exit 2
+fi
+echo "[build] Using convert script: ${CONVERT}"
+
+CONVERT_ARGS=(
+  --model_dir "${HF_DIR}"
+  --output_dir "${CKPT_DIR}"
+  --dtype "${PRECISION}"
+  --tp_size 1
+)
+if [ -n "${GPT_VARIANT}" ]; then
+  CONVERT_ARGS+=(--gpt_variant "${GPT_VARIANT}")
+fi
+
+python3 "${CONVERT}" "${CONVERT_ARGS[@]}"
+echo "[build] Checkpoint conversion complete"
+
+echo "============================================"
+echo "[build] Step 3/4: Building TensorRT engines"
+echo "============================================"
+trtllm-build \
+  --checkpoint_dir "${CKPT_DIR}" \
+  --gemm_plugin float16 \
+  --output_dir "${ENGINE_DIR}" \
+  --max_batch_size "${MAX_BATCH}" \
+  --max_input_len "${MAX_INPUT}" \
+  --max_seq_len "${MAX_SEQ}" \
+  --workers 1
+
+echo "[build] Engine build complete"
+
+echo "============================================"
+echo "[build] Step 4/4: Copying tokenizer files"
+echo "============================================"
+# Copy tokenizer + generation config into engine dir so trtllm-serve finds them
+for f in tokenizer.json tokenizer_config.json vocab.json merges.txt \
+         special_tokens_map.json generation_config.json tokenizer.model; do
+  if [ -f "${HF_DIR}/${f}" ]; then
+    cp "${HF_DIR}/${f}" "${ENGINE_DIR}/"
+    echo "  copied ${f}"
   fi
+done
 
-  echo "[container] Running trtllm-build"
-  #trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 1 --max_input_len 128 --max_seq_len 512 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
-  trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 2048 --max_input_len 512 --max_seq_len 2048 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
+echo "============================================"
+echo "[build] ALL DONE — engine files in ${ENGINE_DIR}"
+echo "============================================"
+ls -lh "${ENGINE_DIR}/"
+INNER_SCRIPT
 
-  echo "[container] build finished"
-INNER_EOF
+  # Docker args: mount only the engine output dir (rw) and HF cache
+  local docker_args=(
+    --rm --gpus=all --ipc=host
+    -v "${engine_out}:/output:rw"
+    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface:rw"
+    -e "MODEL_ENV=${MODEL_ID}"
+    -e "PRECISION_ENV=${PRECISION}"
+    -e "GPT_VARIANT_ENV=${gpt_variant}"
+    -e "MAX_BATCH_ENV=${MAX_BATCH_SIZE}"
+    -e "MAX_INPUT_ENV=${MAX_INPUT_LEN}"
+    -e "MAX_SEQ_ENV=${MAX_SEQ_LEN}"
+  )
+  [[ -n "${HUGGINGFACE_TOKEN:-}" ]] && docker_args+=( -e "HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}" )
 
-  # Run the container with MODEL_ENV passed (and HUGGINGFACE_TOKEN if present).
-  log_info "Running conversion & build in container (this can take time; logs will stream here)"
-  if [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
-    docker run "${docker_args[@]}" -e HUGGINGFACE_TOKEN="${HUGGINGFACE_TOKEN}" -e MODEL_ENV="${model}" -e PRECISION="${precision}" "${IMAGE}" /bin/bash -lc "${INNER}"
-  else
-    docker run "${docker_args[@]}" -e MODEL_ENV="${model}" -e PRECISION="${precision}" "${IMAGE}" /bin/bash -lc "${INNER}"
-  fi
+  log_info "Running build container (this can take a while)..."
+  docker run "${docker_args[@]}" "${IMAGE}" /bin/bash -c "${INNER}"
 
-  # If KEEP_ARTIFACTS is false we could remove large intermediate files; leave them by default
-  if [[ "${KEEP_ARTIFACTS}" == "false" ]]; then
-    log_info "Keeping engine artifacts at ${engine_out} and checkpoint at ${checkpoint_dir} (KEEP_ARTIFACTS=false means we DO NOT delete them)."
-  else
-    log_info "KEEP_ARTIFACTS=true; preserving all artifacts."
-  fi
-
-  # Verify engines output
-  if [[ -n "$(ls -A "${engine_out}" 2>/dev/null || true)" ]]; then
+  # Verify engines
+  if ls "${engine_out}"/*.engine 2>/dev/null | head -1 >/dev/null 2>&1; then
     log_success "Engine files present at ${engine_out}"
+    ls -lh "${engine_out}/"
   else
-    log_warn "No engine files found at ${engine_out} after build; check container logs for errors."
+    log_error "No .engine files found at ${engine_out} after build!"
+    log_error "Check the build output above for errors."
+    exit 5
   fi
 }
 
-# Robust smoke test (tries v1/models and /health)
+# -------------------------------------------------------------------
+# Smoke test
+# -------------------------------------------------------------------
 run_smoke() {
-  log_step "Waiting for TRT-LLM server on http://127.0.0.1:${PORT} (may take while engines load)"
+  log_step "Waiting for TRT-LLM server on http://127.0.0.1:${PORT}"
   for i in $(seq 1 30); do
     if curl -fsS "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
       log_success "Server responded to /v1/models"
@@ -383,69 +497,70 @@ run_smoke() {
     log_info "Waiting for server... (${i}/30)"
     sleep 2
   done
-  log_warn "Server did not respond after retries."
+  log_warn "Server did not respond after 60s."
   return 1
 }
 
-# MAIN flow
-log_info "Starting TRT-LLM installer (combined: container + model build + launcher)"
-log_info "Repo root: ${REPO_ROOT}"
-log_info "Model: ${MODEL_ID}  Precision: ${PRECISION}"
+# ===================================================================
+# MAIN
+# ===================================================================
+log_info "Starting TRT-LLM installer"
+log_info "Repo root:        ${REPO_ROOT}"
+log_info "Model:            ${MODEL_ID} (flat: ${MODEL_FLAT})"
+log_info "Precision:        ${PRECISION}"
+log_info "Max batch size:   ${MAX_BATCH_SIZE}"
+log_info "Max input len:    ${MAX_INPUT_LEN}"
+log_info "Max seq len:      ${MAX_SEQ_LEN}"
 
-# login/pull
-docker_login_ngc || log_warn "NGC login did not succeed or skipped"
+# Login + pull
+docker_login_ngc || log_warn "NGC login did not succeed or was skipped"
+pull_image
 
-if ! pull_image; then
-  log_warn "Image pull failed or warned; ensure image is present locally or fix NGC auth if necessary."
-fi
-
-# create launcher and layout
+# Install launcher
 install_launcher
-mkdir -p "${MODELS_ROOT}/models" "${MODELS_ROOT}/checkpoints" "${MODELS_ROOT}/engines"
 
-# Build model if necessary (idempotent)
+# Build model (idempotent — skips if engines already present)
 prepare_and_build_model
 
-# Export envs for launcher / run
+# Export for launcher
 export TRTLLM_IMAGE="${IMAGE}"
 export TRTLLM_PORT="${PORT}"
 export TRTLLM_CONTAINER_NAME="${CONTAINER_NAME}"
-# HUGGINGFACE_TOKEN already exported if present
+export TRTLLM_MODEL="${MODEL_FLAT}"
+export TRTLLM_MAX_BATCH_SIZE="${MAX_BATCH_SIZE}"
 
-# Start container via launcher
+# Start server
 if [[ "${NO_DETACH}" == "true" ]]; then
-  log_info "Starting TRT-LLM server in foreground (no detach). Ctrl-C to stop."
-  TRTLLM_DETACH=false TRTLLM_IMAGE="${IMAGE}" TRTLLM_PORT="${PORT}" TRTLLM_CONTAINER_NAME="${CONTAINER_NAME}" "${LAUNCHER}" start
-  # foreground mode -> skip smoke test (user watches logs)
+  log_info "Starting TRT-LLM server in foreground (Ctrl-C to stop)"
+  TRTLLM_DETACH=false "${LAUNCHER}" start
   exit 0
 else
   log_step "Starting TRT-LLM server (detached)"
-  TRTLLM_DETACH=true TRTLLM_IMAGE="${IMAGE}" TRTLLM_PORT="${PORT}" TRTLLM_CONTAINER_NAME="${CONTAINER_NAME}" "${LAUNCHER}" start >/dev/null 2>&1 || {
-    log_warn "Initial start failed; attempting retry after cleanup"
-    TRTLLM_DETACH=true "${LAUNCHER}" stop || true
+  TRTLLM_DETACH=true "${LAUNCHER}" start >/dev/null 2>&1 || {
+    log_warn "Start failed; retrying after cleanup..."
+    "${LAUNCHER}" stop || true
     sleep 1
-    TRTLLM_DETACH=true TRTLLM_IMAGE="${IMAGE}" TRTLLM_PORT="${PORT}" TRTLLM_CONTAINER_NAME="${CONTAINER_NAME}" "${LAUNCHER}" start >/dev/null 2>&1 || {
-      log_error "Failed to start container. Check docker logs for container ${CONTAINER_NAME} and ensure image ${IMAGE} exists."
+    TRTLLM_DETACH=true "${LAUNCHER}" start >/dev/null 2>&1 || {
+      log_error "Failed to start container. Check: docker logs ${CONTAINER_NAME}"
       exit 6
     }
   }
 fi
 
-# optionally systemd
-if [[ "${SYSTEM_SERVICE}" == "true" ]]; then
-  install_systemd
-fi
+# Systemd (optional)
+install_systemd
 
-# smoke test
+# Smoke test
 if ! run_smoke; then
-  log_warn "Smoke test failed. Engines may still be building or server may need more time. Check logs with: ${LAUNCHER} logs"
-  log_info "You can inspect GPU activity via: nvidia-smi"
+  log_warn "Smoke test failed. Check logs: ${LAUNCHER} logs"
   exit 6
 fi
 
-log_success "TRT-LLM server is up and responding. Test a chat request with:
-curl -sS -X POST \"http://localhost:${PORT}/v1/chat/completions\" -H \"Content-Type: application/json\" -d '{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi\"}],\"max_tokens\":16}' | jq .
-"
-
-log_info "Installer finished. You can safely delete the old install_trtllm_env_and_model.sh file if you want (artifacts are under ${MODELS_ROOT})."
+log_success "TRT-LLM server is up! Test with:"
+echo ""
+echo "  curl -s http://localhost:${PORT}/v1/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\":\"${MODEL_ID}\",\"prompt\":\"Hello world\",\"max_tokens\":32}' | python3 -m json.tool"
+echo ""
+log_info "Manage with: ${LAUNCHER} {start|stop|restart|status|logs}"
 exit 0
