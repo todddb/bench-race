@@ -29,7 +29,7 @@ SECRETS_FILE="${HOME}/.bench-race-secrets"
 DEFAULT_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
 DEFAULT_PORT="8000"
 DEFAULT_CONTAINER_NAME="bench-race-trtllm"
-DEFAULT_MODEL="distilgpt2"   # small test model (fast to download/build)
+DEFAULT_MODEL="meta-llama/Meta-Llama-3-8B"   # default: Llama-3 8B (FP16-compatible)
 DEFAULT_PRECISION="fp16"     # build precision: fp16 recommended for speed/size
 
 # CLI flags (defaults)
@@ -295,62 +295,61 @@ prepare_and_build_model() {
   # NOTE: Pass HUGGINGFACE_TOKEN via env if available.
   docker_args=(--rm --gpus=all -v "${model_dir}:/workspace/trtllm/models/${model}:rw" -v "${checkpoint_dir}:/workspace/trtllm/checkpoints/${model}:rw" -v "${engine_out}:/workspace/trtllm/engines/${model}:rw" -v "${HOME}/.cache/huggingface:/root/.cache/huggingface:rw" --ipc=host)
 
-  # Compose inner script (here-doc)
+  # Compose inner script that reads the model from the environment variable $MODEL_ENV.
+  # The inner container script references $MODEL_ENV and $PRECISION directly.
   read -r -d '' INNER <<'INNER_EOF' || true
-set -euo pipefail
-MODEL_ID="'${MODEL_PLACEHOLDER}'"
-MODEL_DIR="/workspace/trtllm/models/${MODEL_PLACEHOLDER}"
-CHECKPOINT_DIR="/workspace/trtllm/checkpoints/${MODEL_PLACEHOLDER}"
-ENGINE_OUT="/workspace/trtllm/engines/${MODEL_PLACEHOLDER}"
+  set -euo pipefail
+  MODEL="${MODEL_ENV:-}"
+  if [ -z "$MODEL" ]; then
+    echo "[container] ERROR: MODEL_ENV not set"
+    exit 2
+  fi
+  BUILD_PRECISION="${PRECISION:-fp16}"
+  MODEL_DIR="/workspace/trtllm/models/${MODEL}"
+  CHECKPOINT_DIR="/workspace/trtllm/checkpoints/${MODEL}"
+  ENGINE_OUT="/workspace/trtllm/engines/${MODEL}"
 
-echo "[container] python snapshot_download for ${MODEL_PLACEHOLDER} (if not present)"
-python - <<PY
+  echo "[container] model env: $MODEL"
+  echo "[container] python snapshot_download for $MODEL (if not present)"
+  python - <<PY
 from huggingface_hub import snapshot_download
 import os,sys
-repo_id = os.getenv("MODEL_ENV", "${MODEL_PLACEHOLDER}")
-out_dir = "${MODEL_DIR}"
+
+repo_id = os.getenv("MODEL_ENV")
+out_dir = "/workspace/trtllm/models/%s" % repo_id
 token = os.getenv("HUGGINGFACE_TOKEN")
 if not os.path.exists(out_dir) or not os.listdir(out_dir):
     print("Downloading model snapshot to", out_dir)
-    snapshot_download(repo_id=repo_id, local_dir=out_dir, cache_dir='/root/.cache/huggingface', token=token, ignore_patterns=['*.h5','*.msgpack','*.tflite'])
+    snapshot_download(repo_id=repo_id, local_dir=out_dir, cache_dir="/root/.cache/huggingface", token=token, ignore_patterns=["*.h5","*.msgpack","*.tflite"])
 else:
     print("Model dir exists and is non-empty; skipping download")
 PY
 
-# find convert script (GPT examples vary across image versions)
-CONVERT=""
-for p in /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py; do
-  if [ -f "$p" ]; then CONVERT="$p"; break; fi
-done
-if [ -z "$CONVERT" ]; then
-  echo "[container] convert_checkpoint.py not found; attempting to use generic convert script"
-fi
-echo "[container] convert script: $CONVERT"
+  # find convert script
+  CONVERT=""
+  for p in /app/tensorrt_llm/examples/models/core/gpt/convert_checkpoint.py /app/tensorrt_llm/examples/gpt/convert_checkpoint.py; do
+    if [ -f "$p" ]; then CONVERT="$p"; break; fi
+  done
+  echo "[container] convert script: $CONVERT"
+  mkdir -p "${CHECKPOINT_DIR}" "${ENGINE_OUT}"
+  if [ -n "$CONVERT" ]; then
+    python "$CONVERT" --model_dir "$MODEL_DIR" --output_dir "$CHECKPOINT_DIR" --dtype "${BUILD_PRECISION}" --tp_size 1 || echo "[container] convert may have failed (continuing if checkpoint exists)"
+  else
+    echo "[container] convert script not found; skipping convert step"
+  fi
 
-# Create checkpoint dir and run conversion (idempotent)
-mkdir -p "${CHECKPOINT_DIR}"
-python "${CONVERT}" --model_dir "${MODEL_DIR}" --output_dir "${CHECKPOINT_DIR}" --dtype ${PRECISION} --tp_size 1 || {
-  echo "[container] convert step may have failed (continuing if checkpoint exists)"
-}
+  echo "[container] Running trtllm-build"
+  trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 1 --max_input_len 128 --max_seq_len 512 --workers 1 || echo "[container] trtllm-build returned non-zero (check logs)"
 
-echo "[container] Running trtllm-build (may take time)"
-trtllm-build --checkpoint_dir "${CHECKPOINT_DIR}" --gemm_plugin float16 --output_dir "${ENGINE_OUT}" --max_batch_size 1 --max_input_len 128 --max_seq_len 512 --workers 1 || {
-  echo "[container] trtllm-build reported non-zero exit; check logs. If engines exist at ${ENGINE_OUT} they may still be usable."
-}
-
-echo "[container] build finished"
+  echo "[container] build finished"
 INNER_EOF
 
-  # Replace placeholder MODEL_PLACEHOLDER with actual model name; and set precision placeholder
-  INNER="${INNER//MODEL_PLACEHOLDER/${model}}"
-  INNER="${INNER//PRECISION/${precision}}"
-
-  # Run the container with environment to pass HUGGINGFACE_TOKEN and MODEL
+  # Run the container with MODEL_ENV passed (and HUGGINGFACE_TOKEN if present).
   log_info "Running conversion & build in container (this can take time; logs will stream here)"
   if [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
-    docker run "${docker_args[@]}" -e HUGGINGFACE_TOKEN="${HUGGINGFACE_TOKEN}" -e MODEL_ENV="${model}" "${IMAGE}" /bin/bash -lc "${INNER}"
+    docker run "${docker_args[@]}" -e HUGGINGFACE_TOKEN="${HUGGINGFACE_TOKEN}" -e MODEL_ENV="${model}" -e PRECISION="${precision}" "${IMAGE}" /bin/bash -lc "${INNER}"
   else
-    docker run "${docker_args[@]}" -e MODEL_ENV="${model}" "${IMAGE}" /bin/bash -lc "${INNER}"
+    docker run "${docker_args[@]}" -e MODEL_ENV="${model}" -e PRECISION="${precision}" "${IMAGE}" /bin/bash -lc "${INNER}"
   fi
 
   # If KEEP_ARTIFACTS is false we could remove large intermediate files; leave them by default
