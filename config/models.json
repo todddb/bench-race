@@ -1,0 +1,68 @@
+{
+  "version": 2,
+  "description": "Bench-Race standardized model registry (FP16 only for NVIDIA)",
+
+  "shared_baseline": [
+    {
+      "id": "llama3.1-8b-q4",
+      "display_name": "Llama 3.1 8B Instruct (Q4_K_M)",
+      "engine": "ollama",
+      "ollama_tag": "llama3.1:8b-instruct-q4_K_M",
+      "params_b": 8,
+      "quant": "q4_K_M"
+    },
+    {
+      "id": "llama3.1-70b-q4",
+      "display_name": "Llama 3.1 70B Instruct (Q4_K_M)",
+      "engine": "ollama",
+      "ollama_tag": "llama3.1:70b-instruct-q4_K_M",
+      "params_b": 70,
+      "quant": "q4_K_M"
+    }
+  ],
+
+  "architectures": {
+
+    "apple_silicon": {
+      "backend": "mlx",
+      "models": [
+        {
+          "id": "llama3.1-8b-mlx-4bit",
+          "display_name": "Llama 3.1 8B MLX (4bit)",
+          "hf_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+          "params_b": 8,
+          "quant": "4bit"
+        },
+        {
+          "id": "llama3.1-70b-mlx-4bit",
+          "display_name": "Llama 3.1 70B MLX (4bit)",
+          "hf_id": "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit",
+          "params_b": 70,
+          "quant": "4bit"
+        }
+      ]
+    },
+
+    "nvidia_blackwell": {
+      "backend": "trtllm",
+      "models": [
+        {
+          "id": "llama3.1-8b-trt-fp16",
+          "display_name": "Llama 3.1 8B TRT (FP16)",
+          "hf_id": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+          "engine_dir": "meta-llama__Meta-Llama-3.1-8B-Instruct--float16",
+          "params_b": 8,
+          "precision": "float16"
+        },
+        {
+          "id": "llama3.1-70b-trt-fp16",
+          "display_name": "Llama 3.1 70B TRT (FP16)",
+          "hf_id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+          "engine_dir": "meta-llama__Meta-Llama-3.1-70B-Instruct--float16",
+          "params_b": 70,
+          "precision": "float16"
+        }
+      ]
+    }
+  }
+}
