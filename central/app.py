@@ -1744,8 +1744,9 @@ def _missing_models_for_policy(models: List[str]) -> Dict[str, List[str]]:
     return {model: machines for model, machines in missing.items() if machines}
 
 
-def _available_llm_models(cap: Dict[str, Any]) -> List[str]:
-    if cap.get("ollama_models"):
+def _available_llm_models(cap: Dict[str, Any], backend: Optional[str] = None) -> List[str]:
+    selected_backend = (backend or cap.get("active_backend") or "ollama").lower()
+    if selected_backend == "ollama":
         return list(cap.get("ollama_models") or [])
     return list(cap.get("llm_models") or [])
 
@@ -2130,35 +2131,121 @@ def api_reset_agent(machine_id: str):
 @app.get("/api/models")
 def api_models():
     backend = (request.args.get("backend") or "ollama").strip().lower()
-    if backend not in {"ollama", "custom"}:
+    if backend not in {"ollama", "mlx", "trtllm"}:
         return jsonify([])
     models = load_models_map()
     filtered = [m for m in models if m.get("backend") == backend]
     return jsonify(filtered)
 
 
+def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return {"phase": "error", "detail": "missing agent_base_url", "backend": None}
+    try:
+        response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
+        payload = response.json()
+        if not response.ok:
+            return {"phase": "error", "detail": payload.get("error") or "backend status failed", "backend": None}
+        active = payload.get("active_backend")
+        if active in {"ollama", "mlx", "trtllm"}:
+            return {"phase": "ready", "detail": "Ready", "backend": active}
+        return {"phase": "starting", "detail": "Loading model...", "backend": active}
+    except Exception as exc:
+        return {"phase": "error", "detail": str(exc), "backend": None}
+
+
+BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
+BACKEND_SWITCH_LOCK = threading.Lock()
+
+
 @app.post("/api/backend/switch")
 def api_backend_switch():
     payload = request.get_json(silent=True) or {}
     backend = str(payload.get("backend") or "").strip().lower()
-    if backend not in {"ollama", "custom"}:
-        return jsonify({"ok": False, "error": "backend must be ollama or custom"}), 400
+    if backend not in {"ollama", "mlx", "trtllm"}:
+        return jsonify({"ok": False, "error": "backend must be ollama, mlx, or trtllm"}), 400
 
     result = do_backend_switch(MACHINES, backend)
+    switch_id = result.get("request_id")
     dispatch = result.get("dispatch", [])
+    with BACKEND_SWITCH_LOCK:
+        BACKEND_SWITCH_JOBS[switch_id] = {
+            "backend": backend,
+            "created_at": int(time.time()),
+            "agents": {m.get("machine_id"): "starting" for m in MACHINES if m.get("machine_id")},
+            "dispatch": dispatch,
+        }
     for item in dispatch:
         if not item.get("ok"):
             socketio.emit("agent_event", {
                 "machine_id": item.get("machine_id"),
                 "type": "backend_switch_status",
                 "payload": {
-                    "request_id": result.get("request_id"),
+                    "switch_id": switch_id,
                     "phase": "error",
                     "detail": f"Dispatch failed: {item.get('error')}",
                     "timestamp": int(time.time()),
                 },
             })
-    return jsonify({"ok": True, "request_id": result.get("request_id"), "dispatch": dispatch})
+    return jsonify({"ok": True, "switch_id": switch_id, "dispatch": dispatch})
+
+
+@app.get("/api/backend/switch/<switch_id>/status")
+def api_backend_switch_status(switch_id: str):
+    with BACKEND_SWITCH_LOCK:
+        job = BACKEND_SWITCH_JOBS.get(switch_id)
+    if not job:
+        return jsonify({"ok": False, "error": "unknown switch_id"}), 404
+
+    states: Dict[str, str] = {}
+    details: Dict[str, Any] = {}
+    for machine in MACHINES:
+        machine_id = machine.get("machine_id")
+        if not machine_id:
+            continue
+        status = _proxy_backend_status(machine)
+        phase = status.get("phase")
+        if phase == "ready" and status.get("backend") != job.get("backend"):
+            phase = "starting"
+        states[machine_id] = phase
+        details[machine_id] = status
+    with BACKEND_SWITCH_LOCK:
+        job["agents"] = states
+
+    return jsonify({"ok": True, "switch_id": switch_id, "agents": states, "details": details})
+
+
+@app.get("/api/agent/<machine_id>/status")
+def api_agent_status(machine_id: str):
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"ok": False, "error": f"Unknown machine_id: {machine_id}"}), 404
+    status = _proxy_backend_status(machine)
+    return jsonify({"ok": True, "machine_id": machine_id, **status})
+
+
+@app.get("/api/agent/<machine_id>/models")
+def api_agent_models(machine_id: str):
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"ok": False, "error": f"Unknown machine_id: {machine_id}"}), 404
+
+    backend_status = _proxy_backend_status(machine)
+    backend = backend_status.get("backend") or "ollama"
+    try:
+        cap_resp = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=5)
+        cap_resp.raise_for_status()
+        cap = cap_resp.json()
+    except Exception:
+        return jsonify({"backend": backend, "models": []})
+
+    if backend == "ollama":
+        models = cap.get("ollama_models") or []
+    else:
+        models = cap.get("llm_models") or []
+    return jsonify({"backend": backend, "models": models})
+
 
 @app.post("/api/agents/<machine_id>/backend/select")
 def api_backend_select(machine_id: str):
@@ -2270,7 +2357,8 @@ def api_status():
             r.raise_for_status()
             cap = r.json()
             cap["agent_reachable"] = True
-            available_llm = _available_llm_models(cap)
+            active_backend = (cap.get("active_backend") or "ollama").lower()
+            available_llm = _available_llm_models(cap, active_backend)
             has_selected_model = bool(selected_model and selected_model in available_llm)
             missing_required = {
                 "llm": [model for model in required["llm"] if model not in available_llm],
@@ -2295,6 +2383,8 @@ def api_status():
                     "agent_reachable": True,
                     "selected_model": selected_model,
                     "has_selected_model": has_selected_model,
+                    "backend": active_backend,
+                    "available_models_for_current_backend": available_llm,
                     "available_llm_models": available_llm,
                     "missing_required": missing_required,
                     "last_checked": last_checked,
@@ -2324,6 +2414,8 @@ def api_status():
                     "agent_reachable": False,
                     "selected_model": selected_model,
                     "has_selected_model": False,
+                    "backend": "ollama",
+                    "available_models_for_current_backend": [],
                     "available_llm_models": [],
                     "missing_required": required,
                     "last_checked": last_checked,

@@ -41,4 +41,4 @@ def test_api_backend_switch_dispatch(monkeypatch):
         resp = client.post("/api/backend/switch", json={"backend": "ollama"})
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["request_id"] == "req-1"
+        assert data["switch_id"] == "req-1"

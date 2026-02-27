@@ -46,7 +46,7 @@ button { font-family: inherit; }
 .btn-secondary:hover { background: #a5a5a5; }
 .btn-small { padding: 6px 10px; font-size: 12px; border-radius: 8px; }
 .controls-grid { display: flex; flex-direction: column; gap: 12px; }
-.controls-columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.controls-columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; align-items: center; }
 .controls-left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .controls-right { display: flex; flex-direction: column; gap: 12px; }
 .prompt-section { display: flex; flex-direction: column; gap: 8px; }
@@ -84,7 +84,11 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .main-layout { display: flex; gap: 16px; align-items: flex-start; }
 .main-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .pane { overflow: hidden; }
-.pane-title { font-weight: 700; margin-bottom: 0; font-size: 18px; color: var(--title-blue); }
+.agent-dimmed {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.pane-title { font-weight: 700; margin-bottom: 0; font-size: 18px; color: var(--title-blue); white-space: normal; word-break: break-word; }
 .pane-title-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .agent-switch-status {
   display: inline-flex;
@@ -525,10 +529,10 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 /* Update pane header layout - 2-row grid with logo spanning both rows */
 .pane-header {
   display: grid;
-  grid-template-columns: 56px 1fr auto;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   gap: 8px 12px;
-  align-items: start;
+  align-items: center;
   margin-bottom: 12px;
   padding-bottom: 0;
   border-bottom: none;
@@ -1241,10 +1245,6 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* --- vLLM sync button --- */
-.btn-sync-vllm { padding: 6px 10px; font-size: 12px; border-radius: 8px; background: #7c3aed; color: #fff; border: none; cursor: pointer; }
-.btn-sync-vllm:hover { background: #6d28d9; }
-.btn-sync-vllm:disabled { opacity: 0.6; cursor: not-allowed; }
-.btn-sync-vllm.hidden { display: none; }
 
 /* --- Missing models banner --- */
 .missing-models-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #78350f; border-radius: 6px; margin: 4px 0; font-size: 13px; color: #fde68a; }

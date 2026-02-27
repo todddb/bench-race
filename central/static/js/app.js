@@ -508,7 +508,7 @@ const ENGINE_BADGE_CLASSES = { ollama: "ollama", mlx: "mlx", triton: "triton", m
 
 const renderEngineBadge = (engine, fallbackReason) => {
   const rawEngine = engine ?? "n/a";
-  const engineValue = rawEngine === "vllm" ? "triton" : rawEngine;
+  const engineValue = rawEngine;
   const isMock = engineValue === "mock";
   const badgeClass = isMock ? "mock" : (ENGINE_BADGE_CLASSES[engineValue] ?? "ollama");
   let badge = `<span class="engine-badge ${badgeClass}">${engineValue}</span>`;
@@ -1181,15 +1181,12 @@ function updateSyncButton(machine) {
     btn.classList.add("hidden");
     return;
   }
-  const missingRequired = machine.missing_required || {};
-  const missingCount = Object.values(missingRequired)
-    .flat()
-    .filter(Boolean).length;
   const syncing = syncState.get(machine.machine_id)?.active;
-  if (missingCount > 0) {
+  const modelAvailable = machine.has_selected_model !== false;
+  if (!modelAvailable) {
     btn.classList.remove("hidden");
-    btn.disabled = Boolean(syncing);
-    btn.title = `Missing required models: ${Object.values(missingRequired).flat().join(", ")}`;
+    btn.disabled = Boolean(syncing) || backendSwitch?.inProgress;
+    btn.title = `Selected model is unavailable for ${machine.backend || "current"} backend`;
   } else {
     btn.classList.add("hidden");
   }
@@ -1401,113 +1398,6 @@ async function testModels() {
   } finally {
     if (btn) btn.disabled = false;
     if (spinner) spinner.classList.add("hidden");
-  }
-}
-
-// ---- vLLM Sync + job polling ----
-const vllmSyncJobs = new Map(); // machineId -> { jobId, pollTimer }
-
-function initVllmSyncButtons(machines) {
-  machines.forEach((machine) => {
-    const btn = document.getElementById(`sync-vllm-${machine.machine_id}`);
-    if (!btn) return;
-    btn.classList.remove("hidden");
-    btn.addEventListener("click", () => startVllmSync(machine.machine_id));
-
-    // Missing models banner sync button
-    const bannerBtn = document.querySelector(`#missing-models-${machine.machine_id} .missing-models-sync`);
-    if (bannerBtn) {
-      bannerBtn.addEventListener("click", () => startVllmSync(machine.machine_id));
-    }
-  });
-}
-
-async function startVllmSync(machineId) {
-  const btn = document.getElementById(`sync-vllm-${machineId}`);
-  if (btn) btn.disabled = true;
-  updateSyncUI(machineId, { message: "Starting vLLM sync..." });
-
-  try {
-    const resp = await fetch(`/api/agents/${machineId}/sync_models`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error || "Sync request failed");
-
-    if (data.job_id) {
-      vllmSyncJobs.set(machineId, { jobId: data.job_id });
-      pollVllmSyncStatus(machineId, data.job_id);
-    } else {
-      completeSyncUI(machineId, "Up to date");
-    }
-  } catch (err) {
-    completeSyncUI(machineId, err.message, true);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function pollVllmSyncStatus(machineId, jobId) {
-  const poll = async () => {
-    try {
-      const resp = await fetch(`/api/agents/${machineId}/sync_status/${jobId}`);
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Status check failed");
-
-      const models = data.models || {};
-      const total = Object.keys(models).length;
-      const done = Object.values(models).filter((m) => m.status === "success" || m.status === "failed").length;
-      const percent = total > 0 ? Math.round((done / total) * 100) : 0;
-
-      updateSyncUI(machineId, {
-        message: `Syncing models (${done}/${total})`,
-        percent: percent,
-      });
-
-      if (data.status === "completed" || data.status === "partial" || data.status === "failed") {
-        const failed = Object.values(models).filter((m) => m.status === "failed");
-        if (failed.length > 0) {
-          completeSyncUI(machineId, `Sync done: ${failed.length} failed`, true);
-        } else {
-          completeSyncUI(machineId, "Sync complete");
-        }
-        vllmSyncJobs.delete(machineId);
-        checkMissingModels(machineId);
-        await fetchStatus();
-        return;
-      }
-
-      setTimeout(poll, 3000);
-    } catch (err) {
-      completeSyncUI(machineId, err.message, true);
-      vllmSyncJobs.delete(machineId);
-    }
-  };
-  poll();
-}
-
-async function checkMissingModels(machineId) {
-  const banner = document.getElementById(`missing-models-${machineId}`);
-  if (!banner) return;
-
-  try {
-    const resp = await fetch(`/api/agents/${machineId}/model_status`);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const missingVllm = data.missing_vllm || [];
-    const missingOllama = data.missing_ollama || [];
-    const totalMissing = new Set([...missingVllm, ...missingOllama]).size;
-
-    if (totalMissing > 0) {
-      banner.classList.remove("hidden");
-      banner.querySelector(".missing-models-text").textContent = `Missing ${totalMissing} model${totalMissing !== 1 ? "s" : ""}`;
-    } else {
-      banner.classList.add("hidden");
-    }
-  } catch {
-    // Silently ignore — banner stays hidden
   }
 }
 
@@ -2048,9 +1938,6 @@ socket.on("connect", async () => {
       }
     });
     initSyncButtons(machines);
-    initVllmSyncButtons(machines);
-    // Check missing models for each machine
-    machines.forEach((m) => checkMissingModels(m.machine_id));
     await fetchStatus();
     await loadBaselineRun();
     await fetchRecentRuns();
@@ -2178,13 +2065,15 @@ socket.on("agent_event", (evt) => {
 
   if (evt.type === "backend_switch_status") {
     const payload = evt.payload || {};
-    if (!activeBackendRequestId || payload.request_id !== activeBackendRequestId) return;
+    const incomingSwitchId = payload.switch_id || payload.request_id;
+    if (!backendSwitch.inProgress || incomingSwitchId !== backendSwitch.switchId) return;
     const phase = payload.phase || "starting";
     const detail = payload.detail || "";
-    backendSwitchState.set(evt.machine_id, phase);
+    backendSwitch.perAgentState.set(evt.machine_id, phase);
     const selectedBackend = backendSelect?.value || "ollama";
     const { text, statusClass, backendClass } = phaseToAgentStatus(selectedBackend, phase, detail);
     setAgentSwitchStatus(evt.machine_id, text, statusClass, backendClass);
+    setAgentDimmed(evt.machine_id, phase !== "ready");
     maybeCompleteBackendSwitch();
   }
 });
@@ -2824,33 +2713,19 @@ document.getElementById("model")?.addEventListener("change", () => {
 const backendSelect = document.getElementById("backend-select");
 const backendStatusEl = document.getElementById("backend-status");
 const backendApplyBtn = document.getElementById("backend-apply");
-const backendSwitchOverlay = document.getElementById("backend-switch-overlay");
-const backendSwitchMessage = document.getElementById("backend-switch-message");
-const backendSwitchErrors = document.getElementById("backend-switch-errors");
 
-let activeBackendRequestId = null;
-const backendSwitchState = new Map();
+const backendSwitch = {
+  inProgress: false,
+  switchId: null,
+  perAgentState: new Map(),
+  pollTimer: null,
+};
 const agentStatusTimers = new Map();
 
 const updateBackendStatus = (state, text) => {
   if (!backendStatusEl) return;
   backendStatusEl.className = "backend-status-indicator " + state;
   backendStatusEl.textContent = text || state;
-};
-
-const setInferenceControlsDisabled = (disabled) => {
-  ["run", "model", "backend-select", "backend-apply"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = !!disabled;
-  });
-};
-
-const showBackendOverlay = (show, message = "") => {
-  if (!backendSwitchOverlay) return;
-  backendSwitchOverlay.classList.toggle("hidden", !show);
-  backendSwitchOverlay.classList.toggle("open", !!show);
-  backendSwitchOverlay.setAttribute("aria-hidden", show ? "false" : "true");
-  if (backendSwitchMessage && message) backendSwitchMessage.textContent = message;
 };
 
 const clearAgentSwitchStatus = (machineId) => {
@@ -2861,6 +2736,12 @@ const clearAgentSwitchStatus = (machineId) => {
   statusEl.classList.remove("status-ready", "status-stopping", "status-starting", "status-loading", "status-error", "backend-mlx", "backend-trtllm");
 };
 
+const setAgentDimmed = (machineId, dimmed) => {
+  const pane = document.getElementById(`pane-${machineId}`);
+  if (!pane) return;
+  pane.classList.toggle("agent-dimmed", !!dimmed);
+};
+
 const setAgentSwitchStatus = (machineId, text, statusClass = "status-starting", backendClass = "") => {
   const statusEl = document.getElementById(`agent-switch-status-${machineId}`);
   if (!statusEl) return;
@@ -2869,27 +2750,26 @@ const setAgentSwitchStatus = (machineId, text, statusClass = "status-starting", 
   const existing = agentStatusTimers.get(machineId);
   if (existing) clearTimeout(existing);
   if (statusClass === "status-ready" || statusClass === "status-error") {
-    const timer = setTimeout(() => clearAgentSwitchStatus(machineId), 3000);
+    const timer = setTimeout(() => clearAgentSwitchStatus(machineId), 5000);
     agentStatusTimers.set(machineId, timer);
   }
 };
 
 const phaseToAgentStatus = (backend, phase, detail = "") => {
   const lowerDetail = String(detail || "").toLowerCase();
-  const backendClass = backend === "custom" ? "backend-trtllm" : "";
-  if (phase === "stopping" || lowerDetail.includes("stop-ollama")) {
+  const backendClass = backend === "mlx" ? "backend-mlx" : (backend === "trtllm" ? "backend-trtllm" : "");
+  if (phase === "stopping" || lowerDetail.includes("stop")) {
     return { text: "Stopping Ollama", statusClass: "status-stopping", backendClass };
   }
   if (phase === "starting") {
-    if (lowerDetail.includes("start-mlx")) {
-      return { text: "Starting MLX", statusClass: "status-starting", backendClass: "backend-mlx" };
-    }
-    if (lowerDetail.includes("start-trtllm")) {
-      return { text: "Starting TRT-LLM", statusClass: "status-starting", backendClass: "backend-trtllm" };
-    }
+    if (backend === "mlx") return { text: "Starting MLX", statusClass: "status-starting", backendClass };
+    if (backend === "trtllm") return { text: "Starting TensorRT-LLM", statusClass: "status-starting", backendClass };
+    return { text: "Starting Ollama", statusClass: "status-starting", backendClass };
+  }
+  if (phase === "loading_model") {
     return { text: "Loading model...", statusClass: "status-loading", backendClass };
   }
-  if (phase === "running") {
+  if (phase === "ready" || phase === "running") {
     return { text: "Ready", statusClass: "status-ready", backendClass };
   }
   if (phase === "error") {
@@ -2916,24 +2796,74 @@ const refreshModelsForBackend = async (backend) => {
   }
 };
 
+const validateModelAvailability = async (machineId, selectedModel) => {
+  const btn = document.getElementById(`sync-${machineId}`);
+  if (!btn || !selectedModel) return;
+  try {
+    const resp = await fetch(`/api/agent/${encodeURIComponent(machineId)}/models`);
+    if (!resp.ok) throw new Error("model list failed");
+    const data = await resp.json();
+    const models = data.models || [];
+    const available = models.includes(selectedModel);
+    btn.classList.toggle("hidden", available);
+    btn.disabled = backendSwitch.inProgress;
+    btn.title = available ? "" : `Selected model unavailable on ${data.backend || "current backend"}`;
+  } catch {
+    btn.classList.remove("hidden");
+    btn.disabled = backendSwitch.inProgress;
+    btn.title = "Unable to verify model availability";
+  }
+};
+
+const refreshAllModelAvailability = async () => {
+  const selectedModel = document.getElementById("model")?.value;
+  if (!selectedModel) return;
+  const ids = getActiveMachineIds();
+  await Promise.all(ids.map((id) => validateModelAvailability(id, selectedModel)));
+};
+
 backendSelect?.addEventListener("change", async () => {
   await refreshModelsForBackend(backendSelect.value || "ollama");
+  await refreshAllModelAvailability();
 });
+
+document.getElementById("model")?.addEventListener("change", async () => {
+  await refreshAllModelAvailability();
+});
+
+const pollBackendSwitchState = async () => {
+  if (!backendSwitch.inProgress || !backendSwitch.switchId) return;
+  try {
+    const resp = await fetch(`/api/backend/switch/${encodeURIComponent(backendSwitch.switchId)}/status`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Switch poll failed");
+    const selectedBackend = backendSelect?.value || "ollama";
+    Object.entries(data.agents || {}).forEach(([machineId, phase]) => {
+      backendSwitch.perAgentState.set(machineId, phase);
+      const { text, statusClass, backendClass } = phaseToAgentStatus(selectedBackend, phase);
+      setAgentSwitchStatus(machineId, text, statusClass, backendClass);
+      setAgentDimmed(machineId, phase !== "ready");
+    });
+    maybeCompleteBackendSwitch();
+  } catch (err) {
+    updateBackendStatus("error", `Error: ${err.message}`);
+  }
+  backendSwitch.pollTimer = setTimeout(pollBackendSwitchState, 1500);
+};
 
 backendApplyBtn?.addEventListener("click", async () => {
   const backend = backendSelect?.value || "ollama";
-  activeBackendRequestId = null;
-  backendSwitchState.clear();
-  backendSwitchErrors?.classList.add("hidden");
-  backendSwitchErrors.textContent = "";
+  backendSwitch.inProgress = true;
+  backendSwitch.switchId = null;
+  backendSwitch.perAgentState.clear();
 
   getActiveMachineIds().forEach((machineId) => {
+    backendSwitch.perAgentState.set(machineId, "stopping");
     setAgentSwitchStatus(machineId, "Stopping Ollama", "status-stopping");
+    setAgentDimmed(machineId, true);
   });
 
   updateBackendStatus("starting", "Switching...");
-  showBackendOverlay(true, "Switching backend — pausing inference");
-  setInferenceControlsDisabled(true);
 
   try {
     const resp = await fetch("/api/backend/switch", {
@@ -2942,43 +2872,45 @@ backendApplyBtn?.addEventListener("click", async () => {
       body: JSON.stringify({ backend }),
     });
     const data = await resp.json();
-    if (!resp.ok || !data.request_id) {
+    if (!resp.ok || !data.switch_id) {
       throw new Error(data.error || "Failed to start backend switch");
     }
-    activeBackendRequestId = data.request_id;
+    backendSwitch.switchId = data.switch_id;
+    pollBackendSwitchState();
   } catch (err) {
-    backendSwitchErrors.classList.remove("hidden");
-    backendSwitchErrors.textContent = `Switch failed: ${err.message}`;
-    updateBackendStatus("error", "Error");
-    setInferenceControlsDisabled(false);
+    backendSwitch.inProgress = false;
+    if (backendSwitch.pollTimer) { clearTimeout(backendSwitch.pollTimer); backendSwitch.pollTimer = null; }
+    updateBackendStatus("error", `Error: ${err.message}`);
+    getActiveMachineIds().forEach((machineId) => setAgentDimmed(machineId, false));
   }
 });
 
 function maybeCompleteBackendSwitch() {
-  if (!activeBackendRequestId) return;
+  if (!backendSwitch.inProgress) return;
   const machineIds = getActiveMachineIds();
   if (!machineIds.length) {
-    showBackendOverlay(false);
-    setInferenceControlsDisabled(false);
+    backendSwitch.inProgress = false;
+    if (backendSwitch.pollTimer) { clearTimeout(backendSwitch.pollTimer); backendSwitch.pollTimer = null; }
+    updateBackendStatus("ready", "Ready");
     return;
   }
-  const statuses = machineIds.map((id) => backendSwitchState.get(id));
+  const statuses = machineIds.map((id) => backendSwitch.perAgentState.get(id));
   if (statuses.some((phase) => !phase)) return;
 
   const hasError = statuses.some((phase) => phase === "error");
-  const allRunning = statuses.every((phase) => phase === "running");
+  const allReady = statuses.every((phase) => phase === "ready" || phase === "running");
 
   if (hasError) {
-    backendSwitchErrors.classList.remove("hidden");
-    backendSwitchErrors.textContent = "One or more agents failed. Fix agent errors and click Apply to retry.";
     updateBackendStatus("error", "Error");
+    backendSwitch.inProgress = false;
     return;
   }
-  if (allRunning) {
-    showBackendOverlay(false);
-    setInferenceControlsDisabled(false);
+  if (allReady) {
+    backendSwitch.inProgress = false;
+    if (backendSwitch.pollTimer) { clearTimeout(backendSwitch.pollTimer); backendSwitch.pollTimer = null; }
     updateBackendStatus("ready", "Ready");
-    activeBackendRequestId = null;
+    machineIds.forEach((id) => setAgentDimmed(id, false));
+    refreshAllModelAvailability();
   }
 }
 // Run view banner actions
