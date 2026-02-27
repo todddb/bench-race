@@ -50,7 +50,7 @@ if str(ROOT_DIR) not in sys.path:
 from central.services import controller as service_controller
 from central.fit_util import compute_model_fit_score, get_model_size_bytes
 from central.runtime_metrics import normalize_runtime_metrics, normalize_runtime_metrics_map
-from central.config_loader import load_models_map
+from central.config_loader import load_models_manifest, load_models_map
 from central.agent_protocol import do_backend_switch
 
 # -----------------------------------------------------------------------------
@@ -2130,12 +2130,17 @@ def api_reset_agent(machine_id: str):
 
 @app.get("/api/models")
 def api_models():
-    backend = (request.args.get("backend") or "ollama").strip().lower()
-    if backend not in {"ollama", "mlx", "trtllm"}:
-        return jsonify([])
-    models = load_models_map()
-    filtered = [m for m in models if m.get("backend") == backend]
-    return jsonify(filtered)
+    manifest = load_models_manifest()
+    backend = (request.args.get("backend") or "").strip().lower()
+    if backend in {"ollama", "mlx", "trtllm"}:
+        filtered: List[Dict[str, Any]] = []
+        for model in manifest.get("models", []):
+            if backend == "ollama" and isinstance(model.get("ollama"), dict):
+                filtered.append(model)
+            if backend in {"mlx", "trtllm"} and isinstance(model.get("custom"), dict):
+                filtered.append(model)
+        return jsonify({"models": filtered})
+    return jsonify(manifest)
 
 
 def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
@@ -2245,6 +2250,74 @@ def api_agent_models(machine_id: str):
     else:
         models = cap.get("llm_models") or []
     return jsonify({"backend": backend, "models": models})
+
+
+@app.post("/api/agent/<machine_id>/switch_backend")
+def api_agent_switch_backend(machine_id: str):
+    """Switch backend for a single agent and optionally provide an initial model."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    payload = request.get_json(silent=True) or {}
+    backend = str(payload.get("backend") or "").strip().lower()
+    model_id = payload.get("model_id")
+    if backend not in {"ollama", "mlx", "trtllm"}:
+        return jsonify({"error": "backend must be ollama, mlx, or trtllm", "ok": False}), 400
+
+    agent_backend = "vllm" if backend in {"mlx", "trtllm"} else backend
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        response = requests.post(
+            f"{agent_base_url}/api/backend/select",
+            json={"backend": agent_backend, "model": model_id},
+            timeout=600,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Backend selection timed out", "ok": False}), 504
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
+
+
+@app.post("/api/agent/<machine_id>/load_model")
+def api_agent_load_model(machine_id: str):
+    """Load a model on a single agent using that agent's current backend."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    payload = request.get_json(silent=True) or {}
+    model_id = str(payload.get("model_id") or "").strip()
+    if not model_id:
+        return jsonify({"error": "model_id is required", "ok": False}), 400
+
+    status = _proxy_backend_status(machine)
+    backend = (status.get("backend") or "ollama").lower()
+    agent_backend = "vllm" if backend in {"mlx", "trtllm"} else backend
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        response = requests.post(
+            f"{agent_base_url}/api/backend/select",
+            json={"backend": agent_backend, "model": model_id},
+            timeout=600,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Model load timed out", "ok": False}), 504
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
 
 
 @app.post("/api/agents/<machine_id>/backend/select")

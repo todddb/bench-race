@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "id": "llama3.1:8b-instruct",
+      "ollama": {
+        "quant": "q8_0"
+      },
+      "custom": {
+        "MLX": {
+          "quant": "fp16",
+          "engine_model_name": "llama3.1:8b-instruct"
+        },
+        "TensorRT-LLM": {
+          "quant": "fp16",
+          "engine_model_name": "llama3.1:8b-instruct"
+        }
+      }
+    },
+    {
+      "id": "mistral:7b",
+      "ollama": {
+        "quant": "q8_0"
+      },
+      "custom": {
+        "MLX": {
+          "quant": "fp16",
+          "engine_model_name": "mistral:7b"
+        },
+        "TensorRT-LLM": {
+          "quant": "fp16",
+          "engine_model_name": "mistral:7b"
+        }
+      }
+    }
+  ]
+}

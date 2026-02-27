@@ -1938,6 +1938,7 @@ socket.on("connect", async () => {
       }
     });
     initSyncButtons(machines);
+    await loadModelsManifest();
     await fetchStatus();
     await loadBaselineRun();
     await fetchRecentRuns();
@@ -2713,6 +2714,7 @@ document.getElementById("model")?.addEventListener("change", () => {
 const backendSelect = document.getElementById("backend-select");
 const backendStatusEl = document.getElementById("backend-status");
 const backendApplyBtn = document.getElementById("backend-apply");
+const modelApplyBtn = document.getElementById("model-apply");
 
 const backendSwitch = {
   inProgress: false,
@@ -2783,17 +2785,42 @@ const getActiveMachineIds = () => {
   return Array.from(panes).map((p) => p.id.replace("pane-", "")).filter(Boolean);
 };
 
-const refreshModelsForBackend = async (backend) => {
-  const modelSelect = document.getElementById("model");
-  if (!modelSelect) return;
+let modelsManifest = [];
+
+const modelSupportedOnBackend = (model, backend) => {
+  if (!model || !backend) return false;
+  if (backend === "ollama") return Boolean(model.ollama);
+  if (backend === "mlx" || backend === "trtllm") return Boolean(model.custom);
+  return false;
+};
+
+const modelIdsForBackend = (backend) => (
+  (modelsManifest || [])
+    .filter((model) => modelSupportedOnBackend(model, backend))
+    .map((model) => model.id)
+    .filter(Boolean)
+);
+
+const loadModelsManifest = async () => {
   try {
-    const res = await fetch(`/api/models?backend=${encodeURIComponent(backend)}`);
-    if (!res.ok) return;
-    const models = await res.json();
-    populateModelDropdown((models || []).map((m) => m.display_name).filter(Boolean));
-  } catch (err) {
-    console.warn("Failed loading models for backend", backend, err);
+    const response = await fetch("/api/models");
+    if (!response.ok) throw new Error("failed to load models manifest");
+    const payload = await response.json();
+    modelsManifest = Array.isArray(payload?.models) ? payload.models : [];
+    const selectedBackend = backendSelect?.value || "ollama";
+    updateModelOptions(modelIdsForBackend(selectedBackend));
+  } catch (error) {
+    console.warn("Failed loading models manifest", error);
+    modelsManifest = [];
   }
+};
+
+const refreshModelsForBackend = async (backend) => {
+  if (!modelsManifest.length) {
+    await loadModelsManifest();
+    return;
+  }
+  updateModelOptions(modelIdsForBackend(backend));
 };
 
 const validateModelAvailability = async (machineId, selectedModel) => {
@@ -2831,6 +2858,34 @@ document.getElementById("model")?.addEventListener("change", async () => {
   await refreshAllModelAvailability();
 });
 
+modelApplyBtn?.addEventListener("click", async () => {
+  const modelId = document.getElementById("model")?.value;
+  if (!modelId) return;
+  modelApplyBtn.disabled = true;
+  const machineIds = getActiveMachineIds();
+  machineIds.forEach((machineId) => setAgentSwitchStatus(machineId, "Loading model...", "status-loading"));
+  try {
+    await Promise.all(machineIds.map(async (machineId) => {
+      const response = await fetch(`/api/agent/${encodeURIComponent(machineId)}/load_model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: modelId }),
+      });
+      const data = await response.json();
+      if (!response.ok || data.ok === false) {
+        throw new Error(`${machineId}: ${data.error || "load model failed"}`);
+      }
+      setAgentSwitchStatus(machineId, "Ready", "status-ready");
+    }));
+    await refreshAllModelAvailability();
+  } catch (error) {
+    console.error("Failed to apply model", error);
+    updateBackendStatus("error", `Model switch failed: ${error.message}`);
+  } finally {
+    modelApplyBtn.disabled = false;
+  }
+});
+
 const pollBackendSwitchState = async () => {
   if (!backendSwitch.inProgress || !backendSwitch.switchId) return;
   try {
@@ -2853,35 +2908,44 @@ const pollBackendSwitchState = async () => {
 
 backendApplyBtn?.addEventListener("click", async () => {
   const backend = backendSelect?.value || "ollama";
+  const selectedModel = document.getElementById("model")?.value || null;
   backendSwitch.inProgress = true;
   backendSwitch.switchId = null;
   backendSwitch.perAgentState.clear();
 
-  getActiveMachineIds().forEach((machineId) => {
-    backendSwitch.perAgentState.set(machineId, "stopping");
-    setAgentSwitchStatus(machineId, "Stopping Ollama", "status-stopping");
+  const machineIds = getActiveMachineIds();
+  machineIds.forEach((machineId) => {
+    backendSwitch.perAgentState.set(machineId, "starting");
+    setAgentSwitchStatus(machineId, "Switching backend...", "status-starting");
     setAgentDimmed(machineId, true);
   });
 
   updateBackendStatus("starting", "Switching...");
 
   try {
-    const resp = await fetch("/api/backend/switch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ backend }),
-    });
-    const data = await resp.json();
-    if (!resp.ok || !data.switch_id) {
-      throw new Error(data.error || "Failed to start backend switch");
-    }
-    backendSwitch.switchId = data.switch_id;
-    pollBackendSwitchState();
+    await Promise.all(machineIds.map(async (machineId) => {
+      const resp = await fetch(`/api/agent/${encodeURIComponent(machineId)}/switch_backend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ backend, model_id: selectedModel }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.ok === false) {
+        throw new Error(`${machineId}: ${data.error || "switch failed"}`);
+      }
+      backendSwitch.perAgentState.set(machineId, "ready");
+      setAgentSwitchStatus(machineId, "Ready", "status-ready", backend === "mlx" ? "backend-mlx" : (backend === "trtllm" ? "backend-trtllm" : ""));
+      setAgentDimmed(machineId, false);
+    }));
+
+    backendSwitch.inProgress = false;
+    updateBackendStatus("ready", "Ready");
+    await refreshModelsForBackend(backend);
+    await refreshAllModelAvailability();
   } catch (err) {
     backendSwitch.inProgress = false;
-    if (backendSwitch.pollTimer) { clearTimeout(backendSwitch.pollTimer); backendSwitch.pollTimer = null; }
     updateBackendStatus("error", `Error: ${err.message}`);
-    getActiveMachineIds().forEach((machineId) => setAgentDimmed(machineId, false));
+    machineIds.forEach((machineId) => setAgentDimmed(machineId, false));
   }
 });
 
