@@ -94,7 +94,7 @@ agent/model_cache/
 ########################################
 .docker/
 docker-compose.override.yml
-
+agent/backends/trtllm_run.sh
 agent/third_party/comfyui/*
 !agent/third_party/comfyui/.gitkeep
 
