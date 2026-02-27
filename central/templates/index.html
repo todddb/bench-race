@@ -54,22 +54,16 @@
 
                 <div class="controls-right">
                   <div class="control-field">
-                    <label for="backend-select" class="control-label">Backend</label>
+                    <label for="backend-select" class="control-label">Inference Backend</label>
                     <div class="backend-selector">
                       <select id="backend-select">
                         <option value="ollama" selected>Ollama</option>
-                        <option value="mlx">MLX</option>
-                        <option value="vllm">vLLM</option>
-                        <option value="triton">Triton</option>
+                        <option value="custom">Custom</option>
                       </select>
-                      <span id="backend-status" class="backend-status-indicator" title="Backend status">--</span>
-                      <button id="backend-stop" class="btn btn-secondary btn-small" type="button" title="Stop backend">Stop</button>
-                      <label class="toggle-inline" title="Keep backend running after idle timeout">
-                        <input type="checkbox" id="backend-keep-warm" />
-                        <span class="toggle-label-text">Keep warm</span>
-                      </label>
+                      <button id="backend-apply" class="btn btn-secondary btn-small" type="button">Apply</button>
+                      <span id="backend-status" class="backend-status-indicator" title="Backend status">Ready</span>
                     </div>
-                    <div class="helper">Inference engine. Starting one LLM backend stops the other.</div>
+                    <div class="helper">Switching backend pauses inference while agents restart runtime services.</div>
                   </div>
 
                   <div class="model-row control-field">
@@ -186,6 +180,10 @@
               <div class="missing-models-banner hidden" id="missing-models-{{ m.machine_id }}">
                 <span class="missing-models-text"></span>
                 <button class="btn btn-small btn-primary missing-models-sync" data-machine-id="{{ m.machine_id }}">Sync Models</button>
+              </div>
+              <div class="backend-agent-status" id="backend-agent-status-{{ m.machine_id }}">
+                <div class="backend-agent-phase" id="backend-phase-{{ m.machine_id }}">Backend: idle</div>
+                <pre class="backend-agent-log" id="backend-log-{{ m.machine_id }}"></pre>
               </div>
               <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
                 <div class="progress-bar">
@@ -444,6 +442,20 @@
     </div>
 
     <script src="/static/js/sparkline_utils.js?v={{ build_id }}"></script>
+
+    <div id="backend-switch-overlay" class="overlay hidden" aria-hidden="true">
+      <div class="overlay-backdrop"></div>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backend-switch-title">
+        <header class="modal-header">
+          <h3 id="backend-switch-title">Switching backend — pausing inference</h3>
+        </header>
+        <div class="modal-body">
+          <p id="backend-switch-message">Waiting for agents...</p>
+          <div id="backend-switch-errors" class="hidden"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/static/js/app.js?v={{ build_id }}"></script>
     <script src="/static/vendor/Sortable.min.js"></script>
     <script src="/static/js/card-order.js?v={{ build_id }}"></script>

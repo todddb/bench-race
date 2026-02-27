@@ -1,0 +1,24 @@
+{
+  "models": [
+    {
+      "display_name": "llama3.1:8b-instruct",
+      "backend": "ollama",
+      "engine_model_name": "llama3.1:8b-instruct",
+      "notes": "Ollama model tag"
+    },
+    {
+      "display_name": "mistral-mlx",
+      "backend": "custom",
+      "engine_model_name": "mistral",
+      "tool": "mlx",
+      "notes": "MLX backend model identifier"
+    },
+    {
+      "display_name": "distilgpt2-trt",
+      "backend": "custom",
+      "engine_model_name": "distilgpt2",
+      "tool": "trtllm",
+      "notes": "TensorRT-LLM engine name"
+    }
+  ]
+}

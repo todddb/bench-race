@@ -50,6 +50,8 @@ if str(ROOT_DIR) not in sys.path:
 from central.services import controller as service_controller
 from central.fit_util import compute_model_fit_score, get_model_size_bytes
 from central.runtime_metrics import normalize_runtime_metrics, normalize_runtime_metrics_map
+from central.config_loader import load_models_map
+from central.agent_protocol import do_backend_switch
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -1945,14 +1947,16 @@ def add_cache_headers(response):
 # -----------------------------------------------------------------------------
 @app.get("/")
 def index():
-    # Your templates/index.html should already render panes based on MACHINES
-    model_options = _required_models().get("llm") or []
+    # Prefer models map for default dropdown, fallback to policy.
+    mapped = [m.get("display_name") for m in load_models_map() if m.get("backend") == "ollama" and m.get("display_name")]
+    model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
 @app.get("/inference")
 def inference():
-    model_options = _required_models().get("llm") or []
+    mapped = [m.get("display_name") for m in load_models_map() if m.get("backend") == "ollama" and m.get("display_name")]
+    model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
@@ -2121,6 +2125,40 @@ def api_reset_agent(machine_id: str):
             "duration_ms": duration_ms
         }), 500
 
+
+
+@app.get("/api/models")
+def api_models():
+    backend = (request.args.get("backend") or "ollama").strip().lower()
+    if backend not in {"ollama", "custom"}:
+        return jsonify([])
+    models = load_models_map()
+    filtered = [m for m in models if m.get("backend") == backend]
+    return jsonify(filtered)
+
+
+@app.post("/api/backend/switch")
+def api_backend_switch():
+    payload = request.get_json(silent=True) or {}
+    backend = str(payload.get("backend") or "").strip().lower()
+    if backend not in {"ollama", "custom"}:
+        return jsonify({"ok": False, "error": "backend must be ollama or custom"}), 400
+
+    result = do_backend_switch(MACHINES, backend)
+    dispatch = result.get("dispatch", [])
+    for item in dispatch:
+        if not item.get("ok"):
+            socketio.emit("agent_event", {
+                "machine_id": item.get("machine_id"),
+                "type": "backend_switch_status",
+                "payload": {
+                    "request_id": result.get("request_id"),
+                    "phase": "error",
+                    "detail": f"Dispatch failed: {item.get('error')}",
+                    "timestamp": int(time.time()),
+                },
+            })
+    return jsonify({"ok": True, "request_id": result.get("request_id"), "dispatch": dispatch})
 
 @app.post("/api/agents/<machine_id>/backend/select")
 def api_backend_select(machine_id: str):

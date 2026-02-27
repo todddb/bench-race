@@ -45,6 +45,7 @@ from backends.vllm_backend import check_vllm_available, stream_vllm_generate, ge
 # Import agent-specific modules
 from agent.logging_utils import init_logging, get_logger, HOSTNAME
 from agent.middleware import ws_logger
+from agent.agent_ws_handler import maybe_handle_ws_command
 from agent.http_client import comfyui_client, ollama_client
 from agent.http_logging_asgi import HTTPLoggingASGIMiddleware
 from agent.comfy_ws import (
@@ -3653,7 +3654,9 @@ async def ws_endpoint(ws: WebSocket):
         while True:
             # keep the connection alive by reading; the central may send pings/commands later
             data = await ws.receive_text()
-            # we ignore received messages for now; could implement control messages
+            handled = await maybe_handle_ws_command(data, lambda payload: ws.send_text(json.dumps(payload)))
+            if handled:
+                continue
             log.debug("WS recv from %s: %s", client_id, data)
     except WebSocketDisconnect:
         ws_logger.log_disconnect(client_id, "normal")

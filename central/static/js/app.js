@@ -2174,6 +2174,17 @@ socket.on("agent_event", (evt) => {
     runtimeMetrics.set(evt.machine_id, metrics);
     updateRuntimeMetrics(evt.machine_id, metrics);
   }
+
+  if (evt.type === "backend_switch_status") {
+    const payload = evt.payload || {};
+    if (!activeBackendRequestId || payload.request_id !== activeBackendRequestId) return;
+    const phase = payload.phase || "starting";
+    const detail = payload.detail || "";
+    backendSwitchState.set(evt.machine_id, phase);
+    setBackendPhase(evt.machine_id, phase, detail);
+    appendBackendLog(evt.machine_id, detail || phase);
+    maybeCompleteBackendSwitch();
+  }
 });
 
 socket.on("llm_jobs_started", (payload) => {
@@ -2810,8 +2821,13 @@ document.getElementById("model")?.addEventListener("change", () => {
 
 const backendSelect = document.getElementById("backend-select");
 const backendStatusEl = document.getElementById("backend-status");
-const backendStopBtn = document.getElementById("backend-stop");
-const backendKeepWarm = document.getElementById("backend-keep-warm");
+const backendApplyBtn = document.getElementById("backend-apply");
+const backendSwitchOverlay = document.getElementById("backend-switch-overlay");
+const backendSwitchMessage = document.getElementById("backend-switch-message");
+const backendSwitchErrors = document.getElementById("backend-switch-errors");
+
+let activeBackendRequestId = null;
+const backendSwitchState = new Map();
 
 const updateBackendStatus = (state, text) => {
   if (!backendStatusEl) return;
@@ -2819,94 +2835,119 @@ const updateBackendStatus = (state, text) => {
   backendStatusEl.textContent = text || state;
 };
 
-// Get machine IDs from the pane elements
-const getMachineIds = () => {
+const setInferenceControlsDisabled = (disabled) => {
+  ["run", "model", "backend-select", "backend-apply"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  });
+};
+
+const showBackendOverlay = (show, message = "") => {
+  if (!backendSwitchOverlay) return;
+  backendSwitchOverlay.classList.toggle("hidden", !show);
+  backendSwitchOverlay.setAttribute("aria-hidden", show ? "false" : "true");
+  if (backendSwitchMessage && message) backendSwitchMessage.textContent = message;
+};
+
+const appendBackendLog = (machineId, detail) => {
+  const logEl = document.getElementById(`backend-log-${machineId}`);
+  if (!logEl || !detail) return;
+  logEl.textContent += `${detail}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+};
+
+const setBackendPhase = (machineId, phase, detail) => {
+  const phaseEl = document.getElementById(`backend-phase-${machineId}`);
+  if (phaseEl) {
+    phaseEl.textContent = `Backend: ${phase}${detail ? ` — ${detail}` : ""}`;
+  }
+};
+
+const getActiveMachineIds = () => {
   const panes = document.querySelectorAll(".pane[data-excluded='false']");
-  return Array.from(panes).map(p => p.id.replace("pane-", "")).filter(Boolean);
+  return Array.from(panes).map((p) => p.id.replace("pane-", "")).filter(Boolean);
 };
 
-// When backend selection changes, send select request via central proxy
-backendSelect?.addEventListener("change", async () => {
-  const backend = backendSelect.value;
-  const model = document.getElementById("model")?.value || "";
-  const keepWarm = backendKeepWarm?.checked || false;
-
-  updateBackendStatus("starting", "Starting...");
-
-  const machineIds = getMachineIds();
-  for (const machineId of machineIds) {
-    try {
-      const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/select`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ backend, model, keep_warm: keepWarm }),
-      });
-      const data = await resp.json();
-      if (data.ok) {
-        updateBackendStatus(data.state || "ready", data.state === "ready" ? "Ready" : "Starting...");
-      } else {
-        updateBackendStatus("error", "Error");
-      }
-    } catch (e) {
-      console.error("Backend select failed for", machineId, e);
-    }
-  }
-});
-
-// Stop backend button
-backendStopBtn?.addEventListener("click", async () => {
-  const backend = backendSelect?.value;
-  updateBackendStatus("stopped", "Stopping...");
-
-  const machineIds = getMachineIds();
-  for (const machineId of machineIds) {
-    try {
-      await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/stop?backend=${backend}`, { method: "POST" });
-    } catch (e) {
-      console.error("Backend stop failed for", machineId, e);
-    }
-  }
-
-  updateBackendStatus("stopped", "Stopped");
-});
-
-// Poll backend status periodically via central proxy
-const pollBackendStatus = async () => {
-  const machineIds = getMachineIds();
-  if (machineIds.length === 0) return;
-
-  // Use first machine as representative
-  const machineId = machineIds[0];
+const refreshModelsForBackend = async (backend) => {
+  const modelSelect = document.getElementById("model");
+  if (!modelSelect) return;
   try {
-    const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/backend/status`);
-    if (resp.ok) {
-      const data = await resp.json();
-      const active = data.active_backend;
-      if (active && backendSelect && backendSelect.value !== active) {
-        backendSelect.value = active;
-      }
-      if (active) {
-        const backendHealth = data.backends?.[active];
-        // Read the label from the dropdown option — avoids hardcoding engine names
-        const activeOption = backendSelect?.querySelector(`option[value="${active}"]`);
-        const backendLabel = activeOption?.textContent || active;
-        if (backendHealth?.healthy) {
-          updateBackendStatus(`ready backend-${active}`, backendLabel);
-        } else {
-          updateBackendStatus("starting", "Starting...");
-        }
-      } else {
-        updateBackendStatus("stopped", "Stopped");
-      }
-    }
-  } catch (e) {
-    // Silently fail — agent may be unreachable
+    const res = await fetch(`/api/models?backend=${encodeURIComponent(backend)}`);
+    if (!res.ok) return;
+    const models = await res.json();
+    populateModelDropdown((models || []).map((m) => m.display_name).filter(Boolean));
+  } catch (err) {
+    console.warn("Failed loading models for backend", backend, err);
   }
 };
 
-// Poll every 10 seconds
-setInterval(pollBackendStatus, 10000);
+backendSelect?.addEventListener("change", async () => {
+  await refreshModelsForBackend(backendSelect.value || "ollama");
+});
 
+backendApplyBtn?.addEventListener("click", async () => {
+  const backend = backendSelect?.value || "ollama";
+  activeBackendRequestId = null;
+  backendSwitchState.clear();
+  backendSwitchErrors?.classList.add("hidden");
+  backendSwitchErrors.textContent = "";
+
+  getActiveMachineIds().forEach((machineId) => {
+    const logEl = document.getElementById(`backend-log-${machineId}`);
+    if (logEl) logEl.textContent = "";
+    setBackendPhase(machineId, "queued", `waiting to switch to ${backend}`);
+  });
+
+  updateBackendStatus("starting", "Switching...");
+  showBackendOverlay(true, `Switching backend to ${backend} — pausing inference. Waiting for agents...`);
+  setInferenceControlsDisabled(true);
+
+  try {
+    const resp = await fetch("/api/backend/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backend }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.request_id) {
+      throw new Error(data.error || "Failed to start backend switch");
+    }
+    activeBackendRequestId = data.request_id;
+  } catch (err) {
+    backendSwitchErrors.classList.remove("hidden");
+    backendSwitchErrors.textContent = `Switch failed: ${err.message}`;
+    updateBackendStatus("error", "Error");
+    setInferenceControlsDisabled(false);
+  }
+});
+
+function maybeCompleteBackendSwitch() {
+  if (!activeBackendRequestId) return;
+  const machineIds = getActiveMachineIds();
+  if (!machineIds.length) {
+    showBackendOverlay(false);
+    setInferenceControlsDisabled(false);
+    return;
+  }
+  const statuses = machineIds.map((id) => backendSwitchState.get(id));
+  if (statuses.some((phase) => !phase)) return;
+
+  const hasError = statuses.some((phase) => phase === "error");
+  const allRunning = statuses.every((phase) => phase === "running");
+
+  if (hasError) {
+    backendSwitchErrors.classList.remove("hidden");
+    backendSwitchErrors.textContent = "One or more agents failed. Fix agent errors and click Apply to retry.";
+    updateBackendStatus("error", "Error");
+    return;
+  }
+  if (allRunning) {
+    showBackendOverlay(false);
+    setInferenceControlsDisabled(false);
+    updateBackendStatus("ready", "Ready");
+    activeBackendRequestId = null;
+  }
+}
 // Run view banner actions
 document.getElementById("run-view-return")?.addEventListener("click", () => {
   returnToLive();
@@ -2932,6 +2973,7 @@ document.getElementById("run-view-export-json")?.addEventListener("click", () =>
 loadPollingSettings();
 loadComputeSettings();
 scheduleStatusPoll();
+refreshModelsForBackend(backendSelect?.value || "ollama");
 
 const params = new URLSearchParams(window.location.search);
 const runId = params.get("run_id");
