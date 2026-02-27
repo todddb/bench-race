@@ -84,6 +84,7 @@ stop_other_llm_backends(){
 }
 
 start_ollama(){
+  log "starting ollama"
   stop_other_llm_backends ollama
   if probe_ollama; then log "ollama already running"; return 0; fi
   command -v ollama >/dev/null 2>&1 || { err "ollama not installed. Install: https://ollama.com/download"; return 4; }
@@ -94,6 +95,7 @@ start_ollama(){
 stop_ollama(){ stop_process "$OLLAMA_PIDFILE" "ollama"; }
 
 start_mlx(){
+  log "starting mlx"
   stop_other_llm_backends mlx
   local py="${AGENT_DIR}/backends/mlx/.venv/bin/python"
   [[ -x "$py" ]] || { err "mlx not installed. Run ./scripts/install_macos_mlx.sh"; return 4; }
@@ -104,6 +106,7 @@ start_mlx(){
 stop_mlx(){ stop_process "$MLX_PIDFILE" "mlx"; }
 
 start_trtllm(){
+  log "starting trtllm"
   stop_other_llm_backends trtllm
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
   [[ -x "$launcher" ]] || { err "Missing ${launcher}. Run ./scripts/install_trtllm.sh"; return 4; }

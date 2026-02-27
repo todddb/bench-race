@@ -504,10 +504,11 @@ const toggleOverlay = (overlayId) => {
   }
 };
 
-const ENGINE_BADGE_CLASSES = { ollama: "ollama", mlx: "mlx", vllm: "vllm", triton: "triton", mock: "mock" };
+const ENGINE_BADGE_CLASSES = { ollama: "ollama", mlx: "mlx", triton: "triton", mock: "mock" };
 
 const renderEngineBadge = (engine, fallbackReason) => {
-  const engineValue = engine ?? "n/a";
+  const rawEngine = engine ?? "n/a";
+  const engineValue = rawEngine === "vllm" ? "triton" : rawEngine;
   const isMock = engineValue === "mock";
   const badgeClass = isMock ? "mock" : (ENGINE_BADGE_CLASSES[engineValue] ?? "ollama");
   let badge = `<span class="engine-badge ${badgeClass}">${engineValue}</span>`;
@@ -2181,8 +2182,9 @@ socket.on("agent_event", (evt) => {
     const phase = payload.phase || "starting";
     const detail = payload.detail || "";
     backendSwitchState.set(evt.machine_id, phase);
-    setBackendPhase(evt.machine_id, phase, detail);
-    appendBackendLog(evt.machine_id, detail || phase);
+    const selectedBackend = backendSelect?.value || "ollama";
+    const { text, statusClass, backendClass } = phaseToAgentStatus(selectedBackend, phase, detail);
+    setAgentSwitchStatus(evt.machine_id, text, statusClass, backendClass);
     maybeCompleteBackendSwitch();
   }
 });
@@ -2828,6 +2830,7 @@ const backendSwitchErrors = document.getElementById("backend-switch-errors");
 
 let activeBackendRequestId = null;
 const backendSwitchState = new Map();
+const agentStatusTimers = new Map();
 
 const updateBackendStatus = (state, text) => {
   if (!backendStatusEl) return;
@@ -2845,22 +2848,54 @@ const setInferenceControlsDisabled = (disabled) => {
 const showBackendOverlay = (show, message = "") => {
   if (!backendSwitchOverlay) return;
   backendSwitchOverlay.classList.toggle("hidden", !show);
+  backendSwitchOverlay.classList.toggle("open", !!show);
   backendSwitchOverlay.setAttribute("aria-hidden", show ? "false" : "true");
   if (backendSwitchMessage && message) backendSwitchMessage.textContent = message;
 };
 
-const appendBackendLog = (machineId, detail) => {
-  const logEl = document.getElementById(`backend-log-${machineId}`);
-  if (!logEl || !detail) return;
-  logEl.textContent += `${detail}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
+const clearAgentSwitchStatus = (machineId) => {
+  const statusEl = document.getElementById(`agent-switch-status-${machineId}`);
+  if (!statusEl) return;
+  statusEl.classList.add("hidden");
+  statusEl.textContent = "";
+  statusEl.classList.remove("status-ready", "status-stopping", "status-starting", "status-loading", "status-error", "backend-mlx", "backend-trtllm");
 };
 
-const setBackendPhase = (machineId, phase, detail) => {
-  const phaseEl = document.getElementById(`backend-phase-${machineId}`);
-  if (phaseEl) {
-    phaseEl.textContent = `Backend: ${phase}${detail ? ` — ${detail}` : ""}`;
+const setAgentSwitchStatus = (machineId, text, statusClass = "status-starting", backendClass = "") => {
+  const statusEl = document.getElementById(`agent-switch-status-${machineId}`);
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.className = `agent-switch-status ${statusClass} ${backendClass}`.trim();
+  const existing = agentStatusTimers.get(machineId);
+  if (existing) clearTimeout(existing);
+  if (statusClass === "status-ready" || statusClass === "status-error") {
+    const timer = setTimeout(() => clearAgentSwitchStatus(machineId), 3000);
+    agentStatusTimers.set(machineId, timer);
   }
+};
+
+const phaseToAgentStatus = (backend, phase, detail = "") => {
+  const lowerDetail = String(detail || "").toLowerCase();
+  const backendClass = backend === "custom" ? "backend-trtllm" : "";
+  if (phase === "stopping" || lowerDetail.includes("stop-ollama")) {
+    return { text: "Stopping Ollama", statusClass: "status-stopping", backendClass };
+  }
+  if (phase === "starting") {
+    if (lowerDetail.includes("start-mlx")) {
+      return { text: "Starting MLX", statusClass: "status-starting", backendClass: "backend-mlx" };
+    }
+    if (lowerDetail.includes("start-trtllm")) {
+      return { text: "Starting TRT-LLM", statusClass: "status-starting", backendClass: "backend-trtllm" };
+    }
+    return { text: "Loading model...", statusClass: "status-loading", backendClass };
+  }
+  if (phase === "running") {
+    return { text: "Ready", statusClass: "status-ready", backendClass };
+  }
+  if (phase === "error") {
+    return { text: "Switch failed", statusClass: "status-error", backendClass };
+  }
+  return { text: "Loading model...", statusClass: "status-loading", backendClass };
 };
 
 const getActiveMachineIds = () => {
@@ -2893,13 +2928,11 @@ backendApplyBtn?.addEventListener("click", async () => {
   backendSwitchErrors.textContent = "";
 
   getActiveMachineIds().forEach((machineId) => {
-    const logEl = document.getElementById(`backend-log-${machineId}`);
-    if (logEl) logEl.textContent = "";
-    setBackendPhase(machineId, "queued", `waiting to switch to ${backend}`);
+    setAgentSwitchStatus(machineId, "Stopping Ollama", "status-stopping");
   });
 
   updateBackendStatus("starting", "Switching...");
-  showBackendOverlay(true, `Switching backend to ${backend} — pausing inference. Waiting for agents...`);
+  showBackendOverlay(true, "Switching backend — pausing inference");
   setInferenceControlsDisabled(true);
 
   try {

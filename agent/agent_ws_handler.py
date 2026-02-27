@@ -62,6 +62,7 @@ async def handle_backend_switch(payload: Dict[str, Any], send: SendPayload) -> N
         return
 
     await _send_status(send, request_id, "offline", "Going offline to switch backend")
+    await _send_status(send, request_id, "stopping", "Stopping Ollama")
 
     rc = await _run_script_and_stream(send, request_id, "stopping", "./scripts/agent stop-ollama")
     if rc != 0:
@@ -80,12 +81,20 @@ async def handle_backend_switch(payload: Dict[str, Any], send: SendPayload) -> N
         await _send_status(send, request_id, "error", f"Unsupported backend: {backend}")
         return
 
+    if "start-mlx" in start_cmd:
+        await _send_status(send, request_id, "starting", "Starting MLX")
+    elif "start-trtllm" in start_cmd:
+        await _send_status(send, request_id, "starting", "Starting TRT-LLM")
+    else:
+        await _send_status(send, request_id, "starting", "Starting Ollama")
+
     rc = await _run_script_and_stream(send, request_id, "starting", start_cmd)
     if rc != 0:
         await _send_status(send, request_id, "error", f"{start_cmd} exited {rc}")
         return
 
-    await _send_status(send, request_id, "running", f"Backend {backend} running")
+    await _send_status(send, request_id, "starting", "Loading model...")
+    await _send_status(send, request_id, "running", "Ready")
 
 
 async def maybe_handle_ws_command(raw: str, send: SendPayload) -> bool:
