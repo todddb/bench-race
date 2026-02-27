@@ -36,7 +36,29 @@ log(){ echo "[$(date '+%H:%M:%S')] $*" | tee -a "${LOG_DIR}/agent-actions.log" >
 err(){ echo "[ERROR] $*" >&2; }
 
 pid_is_running(){ [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
-read_pid(){ [[ -f "$1" ]] && cat "$1"; }
+read_pid(){
+  local pidfile="$1" pid
+  if [[ ! -f "$pidfile" ]]; then
+    echo ""
+    return 0
+  fi
+
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    rm_pid "$pidfile"
+    echo ""
+    return 0
+  fi
+
+  if ! pid_is_running "$pid"; then
+    rm_pid "$pidfile"
+    log "[WARN] stale PID file cleaned: ${pidfile}"
+    echo ""
+    return 0
+  fi
+
+  echo "$pid"
+}
 write_pid(){ echo "$2" > "$1"; }
 rm_pid(){ rm -f "$1"; }
 
@@ -59,9 +81,17 @@ wait_ready(){
 
 stop_process(){
   local pidfile="$1" name="$2" pid
+  if [[ ! -f "$pidfile" ]]; then
+    log "[WARN] $name PID file not found, skipping stop"
+    return 0
+  fi
+
   pid="$(read_pid "$pidfile")"
-  if [[ -z "$pid" ]]; then log "$name not running"; return 0; fi
-  if ! pid_is_running "$pid"; then rm_pid "$pidfile"; log "$name stale pidfile cleaned"; return 0; fi
+  if [[ -z "$pid" ]]; then
+    log "[WARN] $name process not running, skipping stop"
+    return 0
+  fi
+
   kill "$pid" 2>/dev/null || true
   sleep 1
   if pid_is_running "$pid"; then kill -9 "$pid" 2>/dev/null || true; fi
@@ -78,34 +108,61 @@ active_llm(){
 
 stop_other_llm_backends(){
   local keep="$1"
-  [[ "$keep" == "ollama" ]] || stop_ollama
-  [[ "$keep" == "mlx" ]] || stop_mlx
-  [[ "$keep" == "trtllm" ]] || stop_trtllm
+  [[ "$keep" == "ollama" ]] || stop_ollama || log "[WARN] failed to stop ollama"
+  [[ "$keep" == "mlx" ]] || stop_mlx || log "[WARN] failed to stop mlx"
+  [[ "$keep" == "trtllm" ]] || stop_trtllm || log "[WARN] failed to stop trtllm"
 }
 
 start_ollama(){
+  mkdir -p "$(dirname "$OLLAMA_LOGFILE")"
   log "starting ollama"
   stop_other_llm_backends ollama
   if probe_ollama; then log "ollama already running"; return 0; fi
-  command -v ollama >/dev/null 2>&1 || { err "ollama not installed. Install: https://ollama.com/download"; return 4; }
-  nohup ollama serve >>"$OLLAMA_LOGFILE" 2>&1 &
+  local ollama_bin="/opt/homebrew/bin/ollama"
+  [[ -x "$ollama_bin" ]] || ollama_bin="$(command -v ollama 2>/dev/null || true)"
+  [[ -n "$ollama_bin" ]] || { err "ollama not installed. Install: https://ollama.com/download"; return 4; }
+  nohup env OLLAMA_HOST="${OLLAMA_HOST}:${OLLAMA_PORT}" "$ollama_bin" serve >>"$OLLAMA_LOGFILE" 2>&1 &
   write_pid "$OLLAMA_PIDFILE" "$!"
-  wait_ready probe_ollama "ollama" 30
+  log "ollama launched with pid $(read_pid "$OLLAMA_PIDFILE")"
+  wait_ready probe_ollama "ollama" 120
 }
-stop_ollama(){ stop_process "$OLLAMA_PIDFILE" "ollama"; }
+stop_ollama(){
+  stop_process "$OLLAMA_PIDFILE" "ollama" || true
+
+  if command -v brew >/dev/null 2>&1; then
+    if brew services list 2>/dev/null | awk '{print $1}' | grep -Fxq "ollama"; then
+      brew services stop ollama >>"$OLLAMA_LOGFILE" 2>&1 || log "[WARN] brew services stop ollama failed"
+    fi
+  fi
+
+  if pgrep -x ollama >/dev/null 2>&1; then
+    pkill -x ollama 2>/dev/null || true
+    sleep 1
+    pgrep -x ollama >/dev/null 2>&1 && pkill -9 -x ollama 2>/dev/null || true
+  fi
+
+  rm_pid "$OLLAMA_PIDFILE"
+  log "ollama stopped"
+}
 
 start_mlx(){
+  mkdir -p "$(dirname "$MLX_LOGFILE")"
   log "starting mlx"
   stop_other_llm_backends mlx
   local py="${AGENT_DIR}/backends/mlx/.venv/bin/python"
   [[ -x "$py" ]] || { err "mlx not installed. Run ./scripts/install_macos_mlx.sh"; return 4; }
-  nohup "$py" -m uvicorn agent.backends.mlx.server:app --host "$MLX_HOST" --port "$MLX_PORT" >>"$MLX_LOGFILE" 2>&1 &
-  write_pid "$MLX_PIDFILE" "$!"
-  wait_ready probe_mlx "mlx" 30
+  (
+    cd "$REPO_ROOT"
+    nohup "$py" -m uvicorn agent.backends.mlx.server:app --host "$MLX_HOST" --port "$MLX_PORT" >>"$MLX_LOGFILE" 2>&1 &
+    echo $! >"$MLX_PIDFILE"
+  )
+  log "mlx launched with pid $(read_pid "$MLX_PIDFILE")"
+  wait_ready probe_mlx "mlx" 120
 }
 stop_mlx(){ stop_process "$MLX_PIDFILE" "mlx"; }
 
 start_trtllm(){
+  mkdir -p "$(dirname "$TRTLLM_LOGFILE")"
   log "starting trtllm"
   stop_other_llm_backends trtllm
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
@@ -114,11 +171,13 @@ start_trtllm(){
   local cpid
   cpid="$(docker inspect -f '{{.State.Pid}}' "${TRTLLM_CONTAINER_NAME:-bench-race-trtllm}" 2>/dev/null || true)"
   [[ -n "$cpid" ]] && write_pid "$TRTLLM_PIDFILE" "$cpid"
-  wait_ready probe_trtllm "trtllm" 45 || true
+  log "trtllm launched with pid ${cpid:-unknown}"
+  wait_ready probe_trtllm "trtllm" 120 || true
 }
 stop_trtllm(){
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
-  [[ -x "$launcher" ]] && TRTLLM_PORT="$TRTLLM_PORT" "$launcher" stop >>"$TRTLLM_LOGFILE" 2>&1 || true
+  [[ -x "$launcher" ]] && TRTLLM_PORT="$TRTLLM_PORT" "$launcher" stop >>"$TRTLLM_LOGFILE" 2>&1 || log "[WARN] trtllm launcher missing; skipping launcher stop"
+  stop_process "$TRTLLM_PIDFILE" "trtllm" || true
   rm_pid "$TRTLLM_PIDFILE"
   log "trtllm stopped"
 }
