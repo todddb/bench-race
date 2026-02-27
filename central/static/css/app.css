@@ -1230,3 +1230,8 @@ body.options-expanded textarea.prompt { min-height: 220px; }
 .missing-models-banner.hidden { display: none; }
 .missing-models-text { flex: 1; }
 .missing-models-sync { font-size: 11px; }
+
+.backend-agent-status { margin: 6px 0 8px; }
+.backend-agent-phase { font-size: 12px; color: #3c4c63; margin-bottom: 4px; }
+.backend-agent-log { max-height: 92px; overflow-y: auto; margin: 0; background: #f6f8fb; border: 1px solid #d8e0ee; border-radius: 6px; font-size: 11px; padding: 6px; white-space: pre-wrap; }
+#backend-switch-errors { color: #b42318; font-size: 12px; margin-top: 8px; }
