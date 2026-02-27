@@ -2787,40 +2787,33 @@ const getActiveMachineIds = () => {
 
 let modelsManifest = [];
 
-const modelSupportedOnBackend = (model, backend) => {
-  if (!model || !backend) return false;
-  if (backend === "ollama") return Boolean(model.ollama);
-  if (backend === "mlx" || backend === "trtllm") return Boolean(model.custom);
-  return false;
-};
-
-const modelIdsForBackend = (backend) => (
+const modelIdsForBackend = (backend, architecture = "") => (
   (modelsManifest || [])
-    .filter((model) => modelSupportedOnBackend(model, backend))
+    .filter((model) => !architecture || (model.architecture || "") === architecture)
     .map((model) => model.id)
     .filter(Boolean)
 );
 
-const loadModelsManifest = async () => {
+const loadModelsManifest = async (backend = "", architecture = "") => {
   try {
-    const response = await fetch("/api/models");
+    const params = new URLSearchParams();
+    if (backend) params.set("backend", backend);
+    if (architecture) params.set("architecture", architecture);
+    const url = params.toString() ? `/api/models?${params.toString()}` : "/api/models";
+    const response = await fetch(url);
     if (!response.ok) throw new Error("failed to load models manifest");
     const payload = await response.json();
     modelsManifest = Array.isArray(payload?.models) ? payload.models : [];
-    const selectedBackend = backendSelect?.value || "ollama";
-    updateModelOptions(modelIdsForBackend(selectedBackend));
+    updateModelOptions(modelIdsForBackend(backend, architecture));
   } catch (error) {
     console.warn("Failed loading models manifest", error);
     modelsManifest = [];
+    updateModelOptions([]);
   }
 };
 
 const refreshModelsForBackend = async (backend) => {
-  if (!modelsManifest.length) {
-    await loadModelsManifest();
-    return;
-  }
-  updateModelOptions(modelIdsForBackend(backend));
+  await loadModelsManifest(backend || "ollama");
 };
 
 const validateModelAvailability = async (machineId, selectedModel) => {

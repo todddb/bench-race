@@ -165,13 +165,13 @@ TensorRT-LLM engines/models are stored under `agent/models/trtllm`, and the back
 The unified wrapper service is available at `agent/backends/wrapper` and exposes a consistent API on `127.0.0.1:9002` (`/v1/health`, `/v1/models`, `/v1/infer`, `/v1/infer/stream`). Run it with `python -m agent.backends.wrapper` or `uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002`. Smoke checks are in `agent/backends/wrapper/tests/smoke_tests.sh`.
 
 
-### Backend switch model mapping (`central/config/models_map.json`)
+### Backend switch model registry (`config/models.json`)
 
-Inference UI backend switching uses `central/config/models_map.json` to control the model dropdown per backend:
+Inference UI backend switching uses `config/models.json` as the sole source of truth:
 
-- `backend: "ollama"` entries appear when **Inference Backend = Ollama**.
-- `backend: "custom"` entries appear when **Inference Backend = Custom** (MLX/TRT-LLM agents).
-- Optional `tool` is recommended for custom models (`mlx` or `trtllm`).
+- `shared_baseline` entries drive the **Ollama** model dropdown.
+- `architectures.apple_silicon.models` drives **MLX** model options.
+- `architectures.nvidia_blackwell.models` drives **TensorRT-LLM** model options.
 
 Install/runtime helpers:
 
@@ -189,7 +189,7 @@ ollama pull llama3.1:8b-instruct
 ./scripts/agent start-trtllm
 ```
 
-Update `central/config/models_map.json` whenever you add/remove models so operators see valid backend-specific choices.
+Update `config/models.json` whenever you add/remove models so operators see valid backend-specific choices.
 
 
 ### Sync models

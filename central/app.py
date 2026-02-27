@@ -50,7 +50,7 @@ if str(ROOT_DIR) not in sys.path:
 from central.services import controller as service_controller
 from central.fit_util import compute_model_fit_score, get_model_size_bytes
 from central.runtime_metrics import normalize_runtime_metrics, normalize_runtime_metrics_map
-from central.config_loader import load_models_manifest, load_models_map
+from central.config_loader import load_models_manifest, load_models_registry
 from central.agent_protocol import do_backend_switch
 
 # -----------------------------------------------------------------------------
@@ -1948,15 +1948,16 @@ def add_cache_headers(response):
 # -----------------------------------------------------------------------------
 @app.get("/")
 def index():
-    # Prefer models map for default dropdown, fallback to policy.
-    mapped = [m.get("display_name") for m in load_models_map() if m.get("backend") == "ollama" and m.get("display_name")]
+    registry = load_models_registry()
+    mapped = [m.get("display_name") for m in registry.get("shared_baseline", []) if isinstance(m, dict) and m.get("display_name")]
     model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
 @app.get("/inference")
 def inference():
-    mapped = [m.get("display_name") for m in load_models_map() if m.get("backend") == "ollama" and m.get("display_name")]
+    registry = load_models_registry()
+    mapped = [m.get("display_name") for m in registry.get("shared_baseline", []) if isinstance(m, dict) and m.get("display_name")]
     model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
@@ -2128,18 +2129,42 @@ def api_reset_agent(machine_id: str):
 
 
 
+def get_models_for_backend(backend: str, architecture: str | None = None) -> List[Dict[str, Any]]:
+    registry = load_models_registry()
+    selected_backend = (backend or "").strip().lower()
+    if selected_backend == "ollama":
+        return [m for m in registry.get("shared_baseline", []) if isinstance(m, dict)]
+
+    architectures = registry.get("architectures", {})
+    if not isinstance(architectures, dict):
+        return []
+
+    if architecture:
+        arch_block = architectures.get(architecture)
+        if isinstance(arch_block, dict) and arch_block.get("backend") == selected_backend:
+            return [m for m in arch_block.get("models", []) if isinstance(m, dict)]
+        return []
+
+    models: List[Dict[str, Any]] = []
+    for arch_block in architectures.values():
+        if isinstance(arch_block, dict) and arch_block.get("backend") == selected_backend:
+            models.extend([m for m in arch_block.get("models", []) if isinstance(m, dict)])
+    return models
+
+
+@app.get("/api/models/config")
+def api_models_config():
+    return jsonify(load_models_registry())
+
+
 @app.get("/api/models")
 def api_models():
-    manifest = load_models_manifest()
     backend = (request.args.get("backend") or "").strip().lower()
+    architecture = (request.args.get("architecture") or "").strip() or None
     if backend in {"ollama", "mlx", "trtllm"}:
-        filtered: List[Dict[str, Any]] = []
-        for model in manifest.get("models", []):
-            if backend == "ollama" and isinstance(model.get("ollama"), dict):
-                filtered.append(model)
-            if backend in {"mlx", "trtllm"} and isinstance(model.get("custom"), dict):
-                filtered.append(model)
-        return jsonify({"models": filtered})
+        return jsonify({"models": get_models_for_backend(backend, architecture)})
+
+    manifest = load_models_manifest()
     return jsonify(manifest)
 
 
@@ -2265,7 +2290,7 @@ def api_agent_switch_backend(machine_id: str):
     if backend not in {"ollama", "mlx", "trtllm"}:
         return jsonify({"error": "backend must be ollama, mlx, or trtllm", "ok": False}), 400
 
-    agent_backend = "vllm" if backend in {"mlx", "trtllm"} else backend
+    agent_backend = backend
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
@@ -2299,7 +2324,7 @@ def api_agent_load_model(machine_id: str):
 
     status = _proxy_backend_status(machine)
     backend = (status.get("backend") or "ollama").lower()
-    agent_backend = "vllm" if backend in {"mlx", "trtllm"} else backend
+    agent_backend = backend
 
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
