@@ -13,7 +13,7 @@
 #
 # Usage:
 #   ./scripts/install_trtllm.sh [--yes] [--image IMAGE] [--port PORT] [--model MODEL_ID]
-#                               [--precision float16|bfloat16|float32] [--system-service]
+#                               [--precision float16|bfloat16|float32|auto|nvfp4] [--engine-quant nvfp4|float16|bfloat16|float32|auto] [--system-service]
 #                               [--skip-docker-login] [--no-detach] [--keep-artifacts]
 #                               [--max-batch-size N] [--max-input-len N] [--max-seq-len N]
 #
@@ -32,7 +32,8 @@ DEFAULT_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
 DEFAULT_PORT="8000"
 DEFAULT_CONTAINER_NAME="bench-race-trtllm"
 DEFAULT_MODEL="distilgpt2"
-DEFAULT_PRECISION="float16"        # must match convert_checkpoint.py choices: auto, float16, bfloat16, float32
+DEFAULT_PRECISION="float16"        # convert checkpoint dtype
+DEFAULT_ENGINE_QUANT=""            # serve/build quant subdir (defaults to precision)
 DEFAULT_MAX_BATCH_SIZE="2048"
 DEFAULT_MAX_INPUT_LEN="512"
 DEFAULT_MAX_SEQ_LEN="1024"
@@ -44,6 +45,7 @@ PORT="${DEFAULT_PORT}"
 CONTAINER_NAME="${DEFAULT_CONTAINER_NAME}"
 MODEL_ID="${DEFAULT_MODEL}"
 PRECISION="${DEFAULT_PRECISION}"
+ENGINE_QUANT="${DEFAULT_ENGINE_QUANT}"
 MAX_BATCH_SIZE="${DEFAULT_MAX_BATCH_SIZE}"
 MAX_INPUT_LEN="${DEFAULT_MAX_INPUT_LEN}"
 MAX_SEQ_LEN="${DEFAULT_MAX_SEQ_LEN}"
@@ -70,8 +72,10 @@ Options:
   --port PORT                   Host port to map container 8000 to (default: ${DEFAULT_PORT})
   --container-name NAME         Docker container name (default: ${DEFAULT_CONTAINER_NAME})
   --model MODEL_ID              HuggingFace model id (default: ${DEFAULT_MODEL})
-  --precision float16|bfloat16|float32
+  --precision float16|bfloat16|float32|auto|nvfp4
                                 Precision for checkpoint conversion (default: ${DEFAULT_PRECISION})
+  --engine-quant nvfp4|float16|bfloat16|float32|auto
+                                Engine quant directory/build selector (default: follows --precision)
   --max-batch-size N            Max batch size for engine build (default: ${DEFAULT_MAX_BATCH_SIZE})
   --max-input-len N             Max input length for engine build (default: ${DEFAULT_MAX_INPUT_LEN})
   --max-seq-len N               Max sequence length for engine build (default: ${DEFAULT_MAX_SEQ_LEN})
@@ -92,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     --container-name) CONTAINER_NAME="$2"; shift 2 ;;
     --model) MODEL_ID="$2"; shift 2 ;;
     --precision) PRECISION="$2"; shift 2 ;;
+    --engine-quant) ENGINE_QUANT="$2"; shift 2 ;;
     --max-batch-size) MAX_BATCH_SIZE="$2"; shift 2 ;;
     --max-input-len) MAX_INPUT_LEN="$2"; shift 2 ;;
     --max-seq-len) MAX_SEQ_LEN="$2"; shift 2 ;;
@@ -104,14 +109,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate precision
+# Validate precision and engine quant
 case "${PRECISION}" in
   float16|bfloat16|float32|auto) ;;
+  nvfp4)
+    log_warn "--precision nvfp4 maps to float16 conversion + nvfp4 engine quant."
+    [[ -n "${ENGINE_QUANT}" ]] || ENGINE_QUANT="nvfp4"
+    PRECISION="float16"
+    ;;
   fp16)  log_warn "--precision fp16 is not valid for convert_checkpoint.py; using 'float16' instead."; PRECISION="float16" ;;
   bf16)  log_warn "--precision bf16 is not valid for convert_checkpoint.py; using 'bfloat16' instead."; PRECISION="bfloat16" ;;
   fp32)  log_warn "--precision fp32 is not valid for convert_checkpoint.py; using 'float32' instead."; PRECISION="float32" ;;
-  *)     log_error "Invalid precision '${PRECISION}'. Choose from: auto, float16, bfloat16, float32"; exit 2 ;;
+  *)     log_error "Invalid precision '${PRECISION}'. Choose from: auto, float16, bfloat16, float32, nvfp4"; exit 2 ;;
 esac
+
+if [[ -z "${ENGINE_QUANT}" ]]; then
+  ENGINE_QUANT="${PRECISION}"
+fi
+case "${ENGINE_QUANT}" in
+  nvfp4|float16|bfloat16|float32|auto) ;;
+  fp16) ENGINE_QUANT="float16" ;;
+  bf16) ENGINE_QUANT="bfloat16" ;;
+  fp32) ENGINE_QUANT="float32" ;;
+  *) log_error "Invalid --engine-quant '${ENGINE_QUANT}'. Choose from: nvfp4,float16,bfloat16,float32,auto"; exit 2 ;;
+esac
+
+GEMM_PLUGIN="${PRECISION}"
+[[ "${GEMM_PLUGIN}" == "auto" ]] && GEMM_PLUGIN="float16"
+[[ "${ENGINE_QUANT}" == "nvfp4" ]] && GEMM_PLUGIN="float16"
 
 # Platform guard
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -142,7 +167,7 @@ else
 fi
 
 # Create dirs
-mkdir -p "${MODELS_ROOT}/engines/${MODEL_FLAT}"
+mkdir -p "${MODELS_ROOT}/engines/${MODEL_FLAT}/${ENGINE_QUANT}"
 mkdir -p "${BACKENDS_DIR}"
 mkdir -p "${HOME}/.cache/huggingface"
 
@@ -201,6 +226,7 @@ CONTAINER_NAME="\${TRTLLM_CONTAINER_NAME:-${CONTAINER_NAME}}"
 TRTLLM_IMAGE="\${TRTLLM_IMAGE:-${IMAGE}}"
 TRTLLM_PORT="\${TRTLLM_PORT:-${PORT}}"
 TRTLLM_MODEL="\${TRTLLM_MODEL:-${MODEL_FLAT}}"
+TRTLLM_ENGINE_QUANT="\${TRTLLM_ENGINE_QUANT:-${ENGINE_QUANT}}"
 TRTLLM_MAX_BATCH_SIZE="\${TRTLLM_MAX_BATCH_SIZE:-${MAX_BATCH_SIZE}}"
 DETACH="\${TRTLLM_DETACH:-true}"
 
@@ -235,7 +261,7 @@ start() {
       --backend tensorrt \
       --max_batch_size "\${TRTLLM_MAX_BATCH_SIZE}" \
       --host 0.0.0.0 --port 8000 \
-      "/workspace/trtllm/engines/\${TRTLLM_MODEL}"
+      "/workspace/trtllm/engines/\${TRTLLM_MODEL}/\${TRTLLM_ENGINE_QUANT}"
 }
 
 stop() {
@@ -298,6 +324,7 @@ WorkingDirectory=${REPO_ROOT}
 Environment=TRTLLM_PORT=${PORT}
 Environment=TRTLLM_IMAGE=${IMAGE}
 Environment=TRTLLM_MODEL=${MODEL_FLAT}
+Environment=TRTLLM_ENGINE_QUANT=${ENGINE_QUANT}
 Environment=TRTLLM_MAX_BATCH_SIZE=${MAX_BATCH_SIZE}
 ExecStart=${LAUNCHER} start
 ExecStop=${LAUNCHER} stop
@@ -357,7 +384,7 @@ detect_gpt_variant() {
 # Build model: download, convert, build engines — all inside container
 # -------------------------------------------------------------------
 prepare_and_build_model() {
-  local engine_out="${MODELS_ROOT}/engines/${MODEL_FLAT}"
+  local engine_out="${MODELS_ROOT}/engines/${MODEL_FLAT}/${ENGINE_QUANT}"
 
   # Skip if engines already exist
   if ls "${engine_out}"/*.engine 2>/dev/null | head -1 >/dev/null 2>&1; then
@@ -391,6 +418,7 @@ set -euo pipefail
 MODEL_ID="${MODEL_ENV}"
 MODEL_FAMILY="${MODEL_FAMILY_ENV}"
 PRECISION="${PRECISION_ENV}"
+GEMM_PLUGIN="${GEMM_PLUGIN_ENV}"
 GPT_VARIANT="${GPT_VARIANT_ENV}"
 MAX_BATCH="${MAX_BATCH_ENV}"
 MAX_INPUT="${MAX_INPUT_ENV}"
@@ -536,7 +564,7 @@ echo "[build] Step 3/4: Building TensorRT engines"
 echo "============================================"
 trtllm-build \
   --checkpoint_dir "${CKPT_DIR}" \
-  --gemm_plugin float16 \
+  --gemm_plugin "${GEMM_PLUGIN}" \
   --output_dir "${ENGINE_DIR}" \
   --max_batch_size "${MAX_BATCH}" \
   --max_input_len "${MAX_INPUT}" \
@@ -571,6 +599,7 @@ INNER_SCRIPT
     -e "MODEL_ENV=${MODEL_ID}"
     -e "MODEL_FAMILY_ENV=${model_family}"
     -e "PRECISION_ENV=${PRECISION}"
+    -e "GEMM_PLUGIN_ENV=${GEMM_PLUGIN}"
     -e "GPT_VARIANT_ENV=${gpt_variant}"
     -e "MAX_BATCH_ENV=${MAX_BATCH_SIZE}"
     -e "MAX_INPUT_ENV=${MAX_INPUT_LEN}"
@@ -620,6 +649,7 @@ log_info "Starting TRT-LLM installer"
 log_info "Repo root:        ${REPO_ROOT}"
 log_info "Model:            ${MODEL_ID} (flat: ${MODEL_FLAT})"
 log_info "Precision:        ${PRECISION}"
+log_info "Engine quant:     ${ENGINE_QUANT}"
 log_info "Max batch size:   ${MAX_BATCH_SIZE}"
 log_info "Max input len:    ${MAX_INPUT_LEN}"
 log_info "Max seq len:      ${MAX_SEQ_LEN}"
@@ -639,6 +669,7 @@ export TRTLLM_IMAGE="${IMAGE}"
 export TRTLLM_PORT="${PORT}"
 export TRTLLM_CONTAINER_NAME="${CONTAINER_NAME}"
 export TRTLLM_MODEL="${MODEL_FLAT}"
+export TRTLLM_ENGINE_QUANT="${ENGINE_QUANT}"
 export TRTLLM_MAX_BATCH_SIZE="${MAX_BATCH_SIZE}"
 
 # Start server

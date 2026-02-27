@@ -132,7 +132,10 @@
               <div class="pane-header">
                 <div class="drag-handle" aria-label="Drag to reorder" title="Drag to reorder" role="button" tabindex="0"><svg viewBox="0 0 16 16" fill="currentColor"><circle cx="5" cy="3" r="1.5"/><circle cx="11" cy="3" r="1.5"/><circle cx="5" cy="8" r="1.5"/><circle cx="11" cy="8" r="1.5"/><circle cx="5" cy="13" r="1.5"/><circle cx="11" cy="13" r="1.5"/></svg></div>
                 <img class="vendor-logo" id="vendor-logo-{{ m.machine_id }}" src="/static/assets/vendor/{{ m.vendor|default('other') }}.png" alt="{{ m.vendor|default('other') }} logo" title="{{ m.vendor|default('other')|title }}" />
-                <div class="pane-title">{{ m.label }}</div>
+                <div class="pane-title-wrap">
+                  <div class="pane-title">{{ m.label }}</div>
+                  <div class="agent-switch-status hidden" id="agent-switch-status-{{ m.machine_id }}"></div>
+                </div>
                 <div class="pane-status">
                   <span class="status-badge {% if m.agent_reachable is defined and m.agent_reachable == true %}ready{% elif m.agent_reachable is defined and m.agent_reachable == false %}offline{% else %}checking{% endif %} {% if m.excluded %}standby{% endif %}" id="status-badge-{{ m.machine_id }}">
                     <span class="status-dot"></span>
@@ -144,7 +147,7 @@
                       {% elif m.agent_reachable is defined and m.agent_reachable == false %}
                       Offline
                       {% else %}
-                      Checking
+                      Checking...
                       {% endif %}
                     </span>
                   </span>
@@ -180,10 +183,6 @@
               <div class="missing-models-banner hidden" id="missing-models-{{ m.machine_id }}">
                 <span class="missing-models-text"></span>
                 <button class="btn btn-small btn-primary missing-models-sync" data-machine-id="{{ m.machine_id }}">Sync Models</button>
-              </div>
-              <div class="backend-agent-status" id="backend-agent-status-{{ m.machine_id }}">
-                <div class="backend-agent-phase" id="backend-phase-{{ m.machine_id }}">Backend: idle</div>
-                <pre class="backend-agent-log" id="backend-log-{{ m.machine_id }}"></pre>
               </div>
               <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
                 <div class="progress-bar">
@@ -443,9 +442,8 @@
 
     <script src="/static/js/sparkline_utils.js?v={{ build_id }}"></script>
 
-    <div id="backend-switch-overlay" class="overlay hidden" aria-hidden="true">
-      <div class="overlay-backdrop"></div>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backend-switch-title">
+    <div id="backend-switch-overlay" class="overlay backend-switch-toast hidden" aria-hidden="true">
+      <div class="modal" role="status" aria-live="polite" aria-labelledby="backend-switch-title">
         <header class="modal-header">
           <h3 id="backend-switch-title">Switching backend — pausing inference</h3>
         </header>

@@ -191,6 +191,22 @@ ollama pull llama3.1:8b-instruct
 
 Update `central/config/models_map.json` whenever you add/remove models so operators see valid backend-specific choices.
 
+
+### Sync models
+
+Use backend-native model sync before running inference:
+
+```bash
+# Ollama
+ollama pull <model>
+
+# MLX
+curl -X POST http://<mlx_host>:<port>/start -H '"'"'Content-Type: application/json'"'"' -d '{"model_id":"<id>"}'
+
+# TRT-LLM
+./scripts/install_trtllm.sh --model <id> --precision nvfp4 --yes
+```
+
 ## Backend lifecycle architecture
 
 See `docs/BACKEND_ARCHITECTURE.md` for the authoritative backend matrix and lifecycle commands.
