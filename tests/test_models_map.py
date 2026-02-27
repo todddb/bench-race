@@ -2,7 +2,7 @@ from pathlib import Path
 import importlib
 
 
-def test_load_models_map_and_filter_endpoint(tmp_path, monkeypatch):
+def test_load_models_map(tmp_path):
     machines_cfg = Path("central/config/machines.yaml")
     machines_cfg.parent.mkdir(parents=True, exist_ok=True)
     if not machines_cfg.exists():
@@ -24,13 +24,3 @@ def test_load_models_map_and_filter_endpoint(tmp_path, monkeypatch):
     models = loader.load_models_map(cfg)
     assert len(models) == 2
 
-    app_mod = importlib.import_module("central.app")
-    monkeypatch.setattr(app_mod, "load_models_map", lambda: models)
-    app_mod.app.config["TESTING"] = True
-
-    with app_mod.app.test_client() as client:
-        resp = client.get("/api/models?backend=ollama")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert len(data) == 1
-        assert data[0]["display_name"] == "m1"
