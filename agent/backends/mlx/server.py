@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+MLX_MODELS_DIR = os.getenv("MLX_MODELS_DIR")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -294,6 +296,42 @@ def _discover_models() -> List[Dict[str, Any]]:
     return models
 
 
+def _discover_models_v1() -> List[Dict[str, str]]:
+    """Return OpenAI-compatible model list entries for /v1/models."""
+    models: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    if _state.model_id:
+        seen.add(_state.model_id)
+        models.append(
+            {
+                "id": _state.model_id,
+                "object": "model",
+                "owned_by": "mlx",
+            }
+        )
+
+    if MLX_MODELS_DIR:
+        base = Path(MLX_MODELS_DIR)
+        if base.is_dir():
+            with os.scandir(base) as entries:
+                for entry in sorted(entries, key=lambda e: e.name):
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    if entry.name in seen:
+                        continue
+                    seen.add(entry.name)
+                    models.append(
+                        {
+                            "id": entry.name,
+                            "object": "model",
+                            "owned_by": "mlx",
+                        }
+                    )
+
+    return models
+
+
 def _guess_quant(model_dir: Path) -> Optional[str]:
     """Try to guess quantisation from directory name or config."""
     name = model_dir.name.lower()
@@ -323,6 +361,12 @@ async def health():
 @app.get("/models")
 async def list_models():
     return {"models": _discover_models()}
+
+
+@app.get("/v1/models")
+async def list_models_v1():
+    models = await asyncio.to_thread(_discover_models_v1)
+    return {"object": "list", "data": models}
 
 
 @app.post("/start")
