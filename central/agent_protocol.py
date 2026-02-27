@@ -12,6 +12,8 @@ import websockets
 def _machine_target(machine: Dict[str, Any], backend: str) -> str:
     if backend == "ollama":
         return "ollama"
+    if backend in {"mlx", "trtllm"}:
+        return backend
     machine_text = " ".join(
         str(machine.get(k, "")) for k in ("platform", "gpu_vendor", "vendor", "label", "machine_id")
     ).lower()
@@ -19,7 +21,7 @@ def _machine_target(machine: Dict[str, Any], backend: str) -> str:
         return "mlx"
     if any(token in machine_text for token in ("nvidia", "rtx", "cuda")):
         return "trtllm"
-    return "custom"
+    return "trtllm"
 
 
 def _base_to_ws_uri(agent_base_url: str) -> str:

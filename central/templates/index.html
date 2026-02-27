@@ -58,7 +58,8 @@
                     <div class="backend-selector">
                       <select id="backend-select">
                         <option value="ollama" selected>Ollama</option>
-                        <option value="custom">Custom</option>
+                        <option value="mlx">MLX</option>
+                        <option value="trtllm">TensorRT-LLM</option>
                       </select>
                       <button id="backend-apply" class="btn btn-secondary btn-small" type="button">Apply</button>
                       <span id="backend-status" class="backend-status-indicator" title="Backend status">Ready</span>
@@ -177,12 +178,10 @@
                     <span class="toggle-label">Enabled</span>
                   </label>
                   <button class="btn btn-sync hidden" id="sync-{{ m.machine_id }}">Sync Models</button>
-                  <button class="btn btn-sync-vllm hidden" id="sync-vllm-{{ m.machine_id }}" title="Sync and convert models for vLLM">Sync vLLM</button>
-                </div>
+                                  </div>
               </div>
               <div class="missing-models-banner hidden" id="missing-models-{{ m.machine_id }}">
                 <span class="missing-models-text"></span>
-                <button class="btn btn-small btn-primary missing-models-sync" data-machine-id="{{ m.machine_id }}">Sync Models</button>
               </div>
               <div class="sync-progress hidden" id="sync-progress-{{ m.machine_id }}">
                 <div class="progress-bar">
@@ -441,18 +440,6 @@
     </div>
 
     <script src="/static/js/sparkline_utils.js?v={{ build_id }}"></script>
-
-    <div id="backend-switch-overlay" class="overlay backend-switch-toast hidden" aria-hidden="true">
-      <div class="modal" role="status" aria-live="polite" aria-labelledby="backend-switch-title">
-        <header class="modal-header">
-          <h3 id="backend-switch-title">Switching backend — pausing inference</h3>
-        </header>
-        <div class="modal-body">
-          <p id="backend-switch-message">Waiting for agents...</p>
-          <div id="backend-switch-errors" class="hidden"></div>
-        </div>
-      </div>
-    </div>
 
     <script src="/static/js/app.js?v={{ build_id }}"></script>
     <script src="/static/vendor/Sortable.min.js"></script>
