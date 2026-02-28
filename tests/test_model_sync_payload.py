@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_machine_sync_posts_target_dir_and_sanitize(monkeypatch):
-    cfg = Path("central/config/machines.yaml")
+    cfg = Path("config/machines.yaml")
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(

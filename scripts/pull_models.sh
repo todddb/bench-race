@@ -4,13 +4,13 @@ set -euo pipefail
 # =============================================================================
 # pull_models.sh - Pull models from central model policy
 #
-# Reads central/config/model_policy.yaml and pulls all required models:
+# Reads config/policy.yaml and pulls all required models:
 # - LLM models via ollama pull
 # - Whisper models (logs message if not implemented)
 # - SDXL profiles (logs message if not implemented)
 #
 # Usage:
-#   ./scripts/pull_models.sh                              # Read from default central/config/model_policy.yaml
+#   ./scripts/pull_models.sh                              # Read from default config/policy.yaml
 #   MODEL_POLICY=/path/to/model_policy.yaml ./scripts/pull_models.sh
 #   ./scripts/pull_models.sh --policy /path/to/model_policy.yaml
 #   ./scripts/pull_models.sh --skip-70b   # Skip 70B models
@@ -42,7 +42,7 @@ fi
 skip_70b=false
 legacy_mode=false
 custom_models=()
-policy_path="${MODEL_POLICY:-$REPO_ROOT/central/config/model_policy.yaml}"
+policy_path="${MODEL_POLICY:-$REPO_ROOT/config/policy.yaml}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
     --help|-h)
       echo "Usage: $0 [OPTIONS] [MODELS...]"
       echo ""
-      echo "Pull models specified in central/config/model_policy.yaml"
+      echo "Pull models specified in config/policy.yaml"
       echo ""
       echo "Options:"
       echo "  --skip-70b     Skip models containing '70b' in the name"
@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
       echo "  --help, -h     Show this help message"
       echo ""
       echo "Environment:"
-      echo "  MODEL_POLICY  Path to model_policy.yaml (default: central/config/model_policy.yaml)"
+      echo "  MODEL_POLICY  Path to model_policy.yaml (default: config/policy.yaml)"
       echo ""
       echo "Examples:"
       echo "  $0                                          # Pull models from model policy"

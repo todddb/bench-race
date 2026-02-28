@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_validate_models_basic(monkeypatch):
-    cfg = Path("central/config/machines.yaml")
+    cfg = Path("config/machines.yaml")
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(
@@ -39,7 +39,7 @@ def test_validate_models_basic(monkeypatch):
 
 
 def test_validate_empty_model_name(monkeypatch):
-    cfg = Path("central/config/machines.yaml")
+    cfg = Path("config/machines.yaml")
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(
@@ -67,7 +67,7 @@ def test_validate_empty_model_name(monkeypatch):
 
 
 def test_validate_with_agent_check(monkeypatch):
-    cfg = Path("central/config/machines.yaml")
+    cfg = Path("config/machines.yaml")
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(

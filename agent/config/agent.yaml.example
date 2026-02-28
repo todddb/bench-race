@@ -4,7 +4,7 @@
 # This file is intentionally NOT tracked when copied to agent.yaml.
 #
 # Hardware specs (CPU, RAM, GPU, VRAM) are auto-detected at runtime.
-# Model lists are defined centrally in: central/config/model_policy.yaml
+# Model lists are defined centrally in: config/policy.yaml
 
 # ============================================================================
 # REQUIRED FIELDS

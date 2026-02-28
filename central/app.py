@@ -32,8 +32,11 @@ from flask_socketio import SocketIO, emit
 # -----------------------------------------------------------------------------
 CENTRAL_DIR = Path(__file__).resolve().parent          # .../bench-race/central
 ROOT_DIR = CENTRAL_DIR.parent                          # .../bench-race
-CONFIG_PATH = CENTRAL_DIR / "config" / "machines.yaml"
-MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
+CONFIG_DIR = ROOT_DIR / "config"
+MACHINES_PATH = CONFIG_DIR / "machines.yaml"
+LEGACY_MACHINES_PATH = CENTRAL_DIR / "config" / "machines.yaml"
+MODEL_POLICY_PATH = CONFIG_DIR / "policy.yaml"
+LEGACY_MODEL_POLICY_PATH = CENTRAL_DIR / "config" / "model_policy.yaml"
 COMFY_SETTINGS_PATH = CENTRAL_DIR / "config" / "comfyui.yaml"
 MACHINE_STATE_PATH = CENTRAL_DIR / "config" / "machine_state.json"
 DEFAULT_CHECKPOINT_URL = (
@@ -50,7 +53,13 @@ if str(ROOT_DIR) not in sys.path:
 from central.services import controller as service_controller
 from central.fit_util import compute_model_fit_score, get_model_size_bytes
 from central.runtime_metrics import normalize_runtime_metrics, normalize_runtime_metrics_map
-from central.config_loader import load_models_manifest, load_models_registry
+from central.config_loader import (
+    load_backends_config,
+    load_machines_config,
+    load_models_manifest,
+    load_models_registry,
+    load_policy_config,
+)
 from central.agent_protocol import do_backend_switch
 
 # -----------------------------------------------------------------------------
@@ -1644,18 +1653,21 @@ def detect_vendor(machine: Dict[str, Any]) -> str:
 
 
 def load_machines() -> List[Dict[str, Any]]:
-    if not CONFIG_PATH.exists():
+    cfg = load_machines_config()
+    if not cfg and LEGACY_MACHINES_PATH.exists():
+        with open(LEGACY_MACHINES_PATH, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+
+    if not cfg:
         raise FileNotFoundError(
-            f"Missing central config: {CONFIG_PATH}\n"
-            f"Create it at central/config/machines.yaml\n"
+            f"Missing machine config. Looked for: {MACHINES_PATH} (preferred), {LEGACY_MACHINES_PATH} (legacy).\n"
             f"Example:\n"
             f"machines:\n"
             f"  - machine_id: local\n"
             f"    label: Local Dev Agent\n"
             f"    agent_base_url: http://127.0.0.1:9001\n"
         )
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+
     machines = cfg.get("machines") or []
 
     # Merge in state overrides (excluded status)
@@ -1684,13 +1696,17 @@ MACHINES: List[Dict[str, Any]] = load_machines()
 
 
 def load_model_policy() -> Dict[str, Any]:
-    if not MODEL_POLICY_PATH.exists():
-        return {"required": {"llm": []}, "optional": {}, "optional_profiles": {}}
-    with open(MODEL_POLICY_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    policy = load_policy_config()
+    if policy:
+        return policy
+    if LEGACY_MODEL_POLICY_PATH.exists():
+        with open(LEGACY_MODEL_POLICY_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {"required": {"llm": []}, "optional": {}, "optional_profiles": {}}
 
 
 MODEL_POLICY: Dict[str, Any] = load_model_policy()
+BACKEND_DEFAULTS: Dict[str, Any] = load_backends_config()
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 MODEL_PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)b", re.IGNORECASE)
@@ -1986,6 +2002,11 @@ def api_version():
         "build_id": BUILD_ID,
         "git_sha": _current_git_sha(),
     })
+
+
+@app.get("/api/backends/config")
+def api_backends_config():
+    return jsonify(BACKEND_DEFAULTS)
 
 
 @app.get("/api/machines")

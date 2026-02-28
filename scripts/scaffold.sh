@@ -328,7 +328,7 @@ pydantic==2.6.4
 pyyaml==6.0.1
 EOF
 
-cat > central/config/machines.yaml <<'EOF'
+cat > config/machines.yaml <<'EOF'
 machines:
   - machine_id: "rtx5090"
     label: "RTX 5090 (32GB)"

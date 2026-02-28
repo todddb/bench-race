@@ -104,7 +104,7 @@ local connections and other machines won't be able to reach it.
 
 **Step 3: Register agents in central's machines.yaml**
 
-On the central machine, edit `central/config/machines.yaml` with each agent's
+On the central machine, edit `config/machines.yaml` with each agent's
 IP address:
 
 ```yaml
@@ -194,9 +194,9 @@ machines:
 |------|----------|---------|-------------|
 | `agent.yaml` | `agent/config/agent.yaml` | Per-machine agent settings | Yes |
 | `agent.example.yaml` | `agent/config/agent.example.yaml` | Agent config template | No |
-| `machines.yaml` | `central/config/machines.yaml` | Machine registry for central | Yes |
-| `machines.example.yaml` | `central/config/machines.example.yaml` | Machines config template | No |
-| `model_policy.yaml` | `central/config/model_policy.example.yaml` | Required model list | No |
+| `machines.yaml` | `config/machines.yaml` | Machine registry for central | Yes |
+| `machines.example.yaml` | `config/machines.yaml` | Machines config template | No |
+| `model_policy.yaml` | `config/policy.yaml` | Required model list | No |
 | `comfyui.yaml` | `central/config/comfyui.example.yaml` | Image generation config | No |
 
 The `.example.yaml` files are committed to the repository. The actual
@@ -210,7 +210,7 @@ cp agent/config/agent.example.yaml agent/config/agent.yaml
 # Edit agent.yaml for this machine
 
 # Central
-cp central/config/machines.example.yaml central/config/machines.yaml
+cp config/machines.yaml config/machines.yaml
 # Edit machines.yaml for your environment
 ```
 
@@ -350,7 +350,7 @@ logging:
 
 ## Central Machine Registry (machines.yaml)
 
-Location: `central/config/machines.yaml`
+Location: `config/machines.yaml`
 
 This file tells the central server which agents exist, how to reach them,
 and their hardware specifications for fit scoring.
@@ -445,7 +445,7 @@ machines:
 
 ## Model Policy (model_policy.yaml)
 
-Location: `central/config/model_policy.example.yaml`
+Location: `config/policy.yaml`
 
 This file is the single source of truth for which models agents should have
 installed. It's read by `scripts/pull_models.sh`.

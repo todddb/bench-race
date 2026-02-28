@@ -964,7 +964,7 @@ prompt_for_values() {
 
         echo "" >&2
         log_info "Enter a unique machine ID for this agent"
-        log_info "This ID must match the machine_id in central/config/machines.yaml"
+        log_info "This ID must match the machine_id in config/machines.yaml"
         prompt "Machine ID [${default_agent_id}]: "
         read -r AGENT_ID_INPUT
         AGENT_ID="${AGENT_ID_INPUT:-$default_agent_id}"
@@ -1621,7 +1621,7 @@ main() {
     log_info "  1. Start a backend: ./scripts/agent start-backend ollama"
     log_info "  2. Check status: ./scripts/agent status"
     log_info "  3. Sync models: ./scripts/sync_models.sh <hf-id> --local-name <name>"
-    log_info "  4. Add this machine to central/config/machines.yaml:"
+    log_info "  4. Add this machine to config/machines.yaml:"
     echo ""
     echo "    - machine_id: \"${AGENT_ID}\""
     echo "      label: \"${LABEL}\""

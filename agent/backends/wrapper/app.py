@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict
 
 import uvicorn
+import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -15,11 +16,32 @@ from .adapters import MLXAdapter, TRTAdapter
 from .service_manager import ServiceManager
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config" / "backends.json"
+REPO_BACKENDS_PATH = Path(__file__).resolve().parents[3] / "config" / "backends.yaml"
+
+
+def _load_repo_backend_defaults() -> Dict[str, Any]:
+    if not REPO_BACKENDS_PATH.exists():
+        return {}
+    try:
+        with REPO_BACKENDS_PATH.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def load_config() -> Dict[str, Any]:
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
+
+    repo_defaults = _load_repo_backend_defaults()
+    mlx_host = (repo_defaults.get("mlx") or {}).get("host", "127.0.0.1")
+    mlx_port = (repo_defaults.get("mlx") or {}).get("port", 8321)
+    trt_port = (repo_defaults.get("trtllm") or {}).get("port", 8000)
+
+    cfg["backends"]["mlx"]["base_url"] = cfg["backends"]["mlx"].get("base_url") or f"http://{mlx_host}:{mlx_port}"
+    cfg["backends"]["trt"]["base_url"] = cfg["backends"]["trt"].get("base_url") or f"http://127.0.0.1:{trt_port}"
+
     cfg["backends"]["mlx"]["base_url"] = os.getenv("WRAPPER_MLX_BASE_URL", cfg["backends"]["mlx"]["base_url"])
     cfg["backends"]["trt"]["base_url"] = os.getenv("WRAPPER_TRT_BASE_URL", cfg["backends"]["trt"]["base_url"])
     return cfg
@@ -157,52 +179,30 @@ async def stop_model(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/v1/infer")
-async def infer(payload: Dict[str, Any]) -> Dict[str, Any]:
-    model_id = payload.get("model_id")
-    if not model_id:
-        model_id = active_state.get("model")
-    if not model_id:
-        raise HTTPException(status_code=400, detail="model_id is required")
-    backend = route_model_to_backend(model_id, cfg)
-    response = await adapters[backend].infer(model_id, payload)
-    return normalize_infer_response(model_id, backend, response)
-
-
-def _to_sse(data: Dict[str, Any] | str) -> bytes:
-    if isinstance(data, str):
-        payload = data
-    else:
-        payload = json.dumps(data, ensure_ascii=False)
-    return f"data: {payload}\n\n".encode("utf-8")
+async def infer(payload: Dict[str, Any]) -> JSONResponse:
+    model_id = payload.get("model") or payload.get("model_id")
+    backend = payload.get("backend") or route_model_to_backend(model_id, cfg)
+    if backend not in adapters:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
+    response = await adapters[backend].infer(model_id or "", payload)
+    return JSONResponse(normalize_infer_response(model_id or "", backend, response))
 
 
 @app.post("/v1/infer/stream")
-async def infer_stream(request: Request) -> StreamingResponse:
-    payload = await request.json()
-    model_id = payload.get("model_id") or active_state.get("model")
-    if not model_id:
-        raise HTTPException(status_code=400, detail="model_id is required")
-    backend = route_model_to_backend(model_id, cfg)
+async def infer_stream(payload: Dict[str, Any], request: Request) -> StreamingResponse:
+    model_id = payload.get("model") or payload.get("model_id")
+    backend = payload.get("backend") or route_model_to_backend(model_id, cfg)
+    if backend not in adapters:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
 
-    async def event_generator() -> AsyncGenerator[bytes, None]:
-        idx = 0
-        async for chunk in adapters[backend].infer_stream(model_id, payload):
-            text = chunk.decode("utf-8", errors="ignore")
-            stripped = text.strip()
-            if stripped.startswith("data:"):
-                yield f"{text}\n\n".encode("utf-8") if not text.endswith("\n\n") else text.encode("utf-8")
-                continue
-            yield _to_sse({"token": text, "index": idx, "model": model_id, "engine": backend})
-            idx += 1
-        yield _to_sse("[DONE]")
+    async def event_stream() -> AsyncGenerator[bytes, None]:
+        async for chunk in adapters[backend].infer_stream(model_id or "", payload):
+            if await request.is_disconnected():
+                break
+            yield chunk
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(event_stream(), media_type="text/plain")
 
 
-@app.get("/")
-async def root() -> JSONResponse:
-    return JSONResponse({"service": "bench-race-wrapper", "health": "/v1/health"})
-
-
-def run() -> None:
-    uvicorn.run("agent.backends.wrapper.app:app", host="127.0.0.1", port=9002, reload=False)
+if __name__ == "__main__":
+    uvicorn.run("agent.backends.wrapper.app:app", host="0.0.0.0", port=9010, reload=False)
