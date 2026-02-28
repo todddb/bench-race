@@ -9,7 +9,7 @@ import httpx
 class MLXAdapter:
     backend_name = "mlx"
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8321") -> None:
+    def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
 
     async def list_models(self) -> List[Dict[str, Any]]:

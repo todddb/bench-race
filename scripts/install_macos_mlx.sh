@@ -20,10 +20,31 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MLX_DIR="${REPO_ROOT}/agent/backends/mlx"
 VENV_DIR="${MLX_DIR}/.venv"
 REQUIREMENTS="${MLX_DIR}/requirements.txt"
+BACKENDS_CONFIG="${REPO_ROOT}/config/backends.yaml"
+
+read_backend_cfg() {
+    local key="$1"
+    local fallback="$2"
+    if [[ -f "$BACKENDS_CONFIG" ]] && command -v yq >/dev/null 2>&1; then
+        local value
+        value="$(yq -r "${key} // \"${fallback}\"" "$BACKENDS_CONFIG" 2>/dev/null || true)"
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return
+        fi
+    fi
+    echo "$fallback"
+}
+
+if [[ -f "$BACKENDS_CONFIG" ]] && ! command -v yq >/dev/null 2>&1; then
+    echo "[WARN] config/backends.yaml present but yq not installed; using built-in fallbacks." >&2
+fi
 
 # Defaults
-MLX_HOST="${MLX_HOST:-127.0.0.1}"
-MLX_PORT="${MLX_PORT:-8321}"
+DEFAULT_MLX_HOST="$(read_backend_cfg '.mlx.host' "127.0.0.1")"
+DEFAULT_MLX_PORT="$(read_backend_cfg '.mlx.port' "8321")"
+MLX_HOST="${MLX_HOST:-${DEFAULT_MLX_HOST}}"
+MLX_PORT="${MLX_PORT:-${DEFAULT_MLX_PORT}}"
 INSTALL_SERVICE=false
 FORCE_VENV=false
 DRY_RUN=false

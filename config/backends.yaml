@@ -1,0 +1,15 @@
+trtllm:
+  image: nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3
+  default_precision: float16
+  default_max_batch_size: 2048
+  default_max_input_len: 512
+  default_max_seq_len: 1024
+  port: 8000
+
+mlx:
+  host: 127.0.0.1
+  port: 8321
+
+ollama:
+  host: 127.0.0.1
+  port: 11434

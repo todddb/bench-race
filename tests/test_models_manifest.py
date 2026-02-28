@@ -3,7 +3,7 @@ import importlib
 
 
 def test_load_models_manifest_and_api(monkeypatch, tmp_path):
-    machines_cfg = Path("central/config/machines.yaml")
+    machines_cfg = Path("config/machines.yaml")
     machines_cfg.parent.mkdir(parents=True, exist_ok=True)
     if not machines_cfg.exists():
         machines_cfg.write_text(

@@ -26,17 +26,43 @@ MODELS_ROOT="${AGENT_DIR}/models/trtllm"
 BACKENDS_DIR="${AGENT_DIR}/backends"
 LAUNCHER="${BACKENDS_DIR}/trtllm_run.sh"
 SECRETS_FILE="${HOME}/.bench-race-secrets"
+BACKENDS_CONFIG="${REPO_ROOT}/config/backends.yaml"
 
-# Defaults
-DEFAULT_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
-DEFAULT_PORT="8000"
+# Defaults (fallbacks when config/backends.yaml is missing or yq is unavailable)
+FALLBACK_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
+FALLBACK_PORT="8000"
 DEFAULT_CONTAINER_NAME="bench-race-trtllm"
 DEFAULT_MODEL="distilgpt2"
-DEFAULT_PRECISION="float16"        # convert checkpoint dtype
-DEFAULT_ENGINE_QUANT=""            # serve/build quant subdir (defaults to precision)
-DEFAULT_MAX_BATCH_SIZE="2048"
-DEFAULT_MAX_INPUT_LEN="512"
-DEFAULT_MAX_SEQ_LEN="1024"
+FALLBACK_PRECISION="float16"        # convert checkpoint dtype
+DEFAULT_ENGINE_QUANT=""             # serve/build quant subdir (defaults to precision)
+FALLBACK_MAX_BATCH_SIZE="2048"
+FALLBACK_MAX_INPUT_LEN="512"
+FALLBACK_MAX_SEQ_LEN="1024"
+
+read_backend_cfg() {
+  local key="$1"
+  local fallback="$2"
+  if [[ -f "${BACKENDS_CONFIG}" ]] && command -v yq >/dev/null 2>&1; then
+    local value
+    value="$(yq -r "${key} // \"${fallback}\"" "${BACKENDS_CONFIG}" 2>/dev/null || true)"
+    if [[ -n "${value}" && "${value}" != "null" ]]; then
+      echo "${value}"
+      return
+    fi
+  fi
+  echo "${fallback}"
+}
+
+if [[ -f "${BACKENDS_CONFIG}" ]] && ! command -v yq >/dev/null 2>&1; then
+  echo "[WARN] config/backends.yaml present but yq not installed; using built-in fallbacks." >&2
+fi
+
+DEFAULT_IMAGE="$(read_backend_cfg '.trtllm.image' "${FALLBACK_IMAGE}")"
+DEFAULT_PORT="$(read_backend_cfg '.trtllm.port' "${FALLBACK_PORT}")"
+DEFAULT_PRECISION="$(read_backend_cfg '.trtllm.default_precision' "${FALLBACK_PRECISION}")"
+DEFAULT_MAX_BATCH_SIZE="$(read_backend_cfg '.trtllm.default_max_batch_size' "${FALLBACK_MAX_BATCH_SIZE}")"
+DEFAULT_MAX_INPUT_LEN="$(read_backend_cfg '.trtllm.default_max_input_len' "${FALLBACK_MAX_INPUT_LEN}")"
+DEFAULT_MAX_SEQ_LEN="$(read_backend_cfg '.trtllm.default_max_seq_len' "${FALLBACK_MAX_SEQ_LEN}")"
 
 # CLI flags (defaults)
 YES_MODE=false

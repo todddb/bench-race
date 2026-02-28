@@ -87,6 +87,18 @@ ollama pull llama3.1:8b-instruct-q8_0
 
 ## Installation
 
+## Unified configuration
+
+Canonical configuration now lives under `config/`:
+
+- `config/registry/models.json`
+- `config/machines.yaml`
+- `config/backends.yaml`
+- `config/policy.yaml`
+
+Environment variables are overrides only (see `config/README.md` for precedence and schema notes).
+
+
 bench-race provides automated installer scripts for both agent and central components.
 
 ### Quick Start
@@ -165,9 +177,9 @@ TensorRT-LLM engines/models are stored under `agent/models/trtllm`, and the back
 The unified wrapper service is available at `agent/backends/wrapper` and exposes a consistent API on `127.0.0.1:9002` (`/v1/health`, `/v1/models`, `/v1/infer`, `/v1/infer/stream`). Run it with `python -m agent.backends.wrapper` or `uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002`. Smoke checks are in `agent/backends/wrapper/tests/smoke_tests.sh`.
 
 
-### Backend switch model registry (`config/models.json`)
+### Backend switch model registry (`config/registry/models.json`)
 
-Inference UI backend switching uses `config/models.json` as the sole source of truth:
+Inference UI backend switching uses `config/registry/models.json` as the sole source of truth:
 
 - `shared_baseline` entries drive the **Ollama** model dropdown.
 - `architectures.apple_silicon.models` drives **MLX** model options.
@@ -189,7 +201,7 @@ ollama pull llama3.1:8b-instruct
 ./scripts/agent start-trtllm
 ```
 
-Update `config/models.json` whenever you add/remove models so operators see valid backend-specific choices.
+Update `config/registry/models.json` whenever you add/remove models so operators see valid backend-specific choices.
 
 
 ### Sync models
@@ -281,15 +293,15 @@ ollama_base_url: "http://127.0.0.1:11434"
 | `bind_port` | Port for agent API (default: 9001) |
 | `ollama_base_url` | URL of local Ollama instance |
 
-Central model policy (`central/config/model_policy.yaml`) is the single source of truth for required models; agent.yaml only defines networking and local endpoints.
+Central model policy (`config/policy.yaml`) is the single source of truth for required models; agent.yaml only defines networking and local endpoints.
 
 ### Central Configuration
 
-Central reads `central/config/machines.yaml` to know which agents to connect to (see
+Central reads `config/machines.yaml` to know which agents to connect to (see
 `docs/machines_yaml.md` for optional hardware overrides):
 
 ```yaml
-# central/config/machines.yaml
+# config/machines.yaml
 machines:
   - machine_id: "macbook"
     label: "MacBook (M4, 128GB)"
@@ -585,7 +597,7 @@ The UI provides:
 
 1. **Configure each agent**: Edit `agent/config/agent.yaml` on each machine with a unique `machine_id`
 
-2. **Add machines to central**: Edit `central/config/machines.yaml`:
+2. **Add machines to central**: Edit `config/machines.yaml`:
    ```yaml
    machines:
      - machine_id: "macbook-pro"
@@ -772,7 +784,7 @@ If benchmark results show `engine: mock` instead of `engine: ollama`, the agent 
 
 ## Model Sync via central policy + pull_models.sh
 
-The `pull_models.sh` script reads `central/config/model_policy.yaml` and pulls the required models on any machine.
+The `pull_models.sh` script reads `config/policy.yaml` and pulls the required models on any machine.
 
 ### Usage
 
@@ -793,7 +805,7 @@ MODEL_POLICY=/path/to/model_policy.yaml ./scripts/pull_models.sh
 
 ### How It Works
 
-1. Reads `central/config/model_policy.yaml` (or path in `MODEL_POLICY`/`--policy`)
+1. Reads `config/policy.yaml` (or path in `MODEL_POLICY`/`--policy`)
 2. Extracts required model lists:
    - `required.llm` → Pulled via `ollama pull`
    - `required.whisper` → Logged (not yet implemented)
@@ -813,7 +825,7 @@ required:
 
 To sync models across multiple machines:
 
-1. Update the required model lists in `central/config/model_policy.yaml`
+1. Update the required model lists in `config/policy.yaml`
 2. SSH to each machine and run:
    ```bash
    cd /path/to/bench-race

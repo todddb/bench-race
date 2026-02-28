@@ -1,6 +1,6 @@
 # machines.yaml hardware fields
 
-`central/config/machines.yaml` accepts optional hardware fields that override agent discovery.
+`config/machines.yaml` accepts optional hardware fields that override agent discovery.
 
 ```yaml
 machines:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def _ensure_config():
-    cfg = Path("central/config/machines.yaml")
+    cfg = Path("config/machines.yaml")
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(

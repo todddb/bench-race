@@ -16,7 +16,7 @@ def test_build_backend_switch_message_targeting():
 
 
 def test_api_backend_switch_dispatch(monkeypatch):
-    machines_cfg = Path("central/config/machines.yaml")
+    machines_cfg = Path("config/machines.yaml")
     machines_cfg.parent.mkdir(parents=True, exist_ok=True)
     if not machines_cfg.exists():
         machines_cfg.write_text(

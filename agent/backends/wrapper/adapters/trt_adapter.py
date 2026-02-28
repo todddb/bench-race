@@ -13,7 +13,7 @@ class TRTAdapter:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8000",
+        base_url: str,
         run_script: str = "agent/backends/trtllm_run.sh",
         service_manager: ServiceManager | None = None,
     ) -> None:

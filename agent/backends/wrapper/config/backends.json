@@ -9,10 +9,10 @@
   ],
   "backends": {
     "mlx": {
-      "base_url": "http://127.0.0.1:8321"
+      "base_url": ""
     },
     "trt": {
-      "base_url": "http://127.0.0.1:8000",
+      "base_url": "",
       "run_script": "agent/backends/trtllm_run.sh"
     }
   }
