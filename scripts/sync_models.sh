@@ -173,10 +173,16 @@ mkdir -p "$MODELS_DIR"
 log_info "Downloading model: $HF_ID"
 log_info "  Local path: $MODEL_DIR"
 
-if [[ -n "${HF_TOKEN:-}" ]]; then
-    log_info "  HF_TOKEN: set"
+if [[ -n "${HUGGINGFACE_HUB_TOKEN:-}" ]]; then
+    log_info "  HUGGINGFACE_HUB_TOKEN: set"
+elif [[ -n "${HF_TOKEN:-}" ]]; then
+    export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"
+    log_info "  HUGGINGFACE_HUB_TOKEN: set (from HF_TOKEN)"
+elif [[ -n "${HUGGINGFACE_TOKEN:-}" ]]; then
+    export HUGGINGFACE_HUB_TOKEN="$HUGGINGFACE_TOKEN"
+    log_info "  HUGGINGFACE_HUB_TOKEN: set (from HUGGINGFACE_TOKEN)"
 else
-    log_warn "  HF_TOKEN: not set (may fail for gated/private models)"
+    log_warn "  HUGGINGFACE_HUB_TOKEN: not set"
 fi
 
 echo ""
@@ -188,26 +194,41 @@ import sys
 repo_id = sys.argv[1]
 local_dir = sys.argv[2]
 
-token = os.environ.get("HF_TOKEN") or None
+# Never log hf_token
+hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
-from huggingface_hub import snapshot_download
+if not hf_token:
+    raise RuntimeError(
+        f"HuggingFace token not configured. Cannot download gated repo: {repo_id}. "
+        "Set HUGGINGFACE_TOKEN in ~/.bench-race-secrets."
+    )
+
+from huggingface_hub import snapshot_download, HfApi
 
 print(f"Downloading {repo_id} to {local_dir}...")
-snapshot_download(
-    repo_id=repo_id,
-    local_dir=local_dir,
-    token=token,
-    # Download safetensors files preferentially
-    ignore_patterns=["*.bin", "*.pt", "*.ckpt", "original/**", "*.pth"],
-)
+try:
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=local_dir,
+        token=hf_token,
+        # Download safetensors files preferentially
+        ignore_patterns=["*.bin", "*.pt", "*.ckpt", "original/**", "*.pth"],
+    )
+except Exception as e:
+    if "401" in str(e) or "Unauthorized" in str(e):
+        raise RuntimeError(
+            f"Access denied to HuggingFace repo '{repo_id}'. "
+            "Ensure the token is valid and you have accepted the model license."
+        ) from e
+    raise
 print(f"Download complete: {local_dir}")
 PYEOF
 
 download_status=$?
 if [[ $download_status -ne 0 ]]; then
     log_err "Model download failed (exit code $download_status)"
-    if [[ -z "${HF_TOKEN:-}" ]]; then
-        log_err "This may be a gated model. Set HF_TOKEN and try again."
+    if [[ -z "${HUGGINGFACE_HUB_TOKEN:-}" ]]; then
+        log_err "This may be a gated model. Set HUGGINGFACE_TOKEN in ~/.bench-race-secrets and try again."
     fi
     exit 1
 fi

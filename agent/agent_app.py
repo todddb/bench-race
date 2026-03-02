@@ -83,6 +83,40 @@ slog = None
 DEPRECATED_MODEL_KEYS = ("llm_models", "whisper_models", "sdxl_profiles")
 
 
+def _load_local_secrets() -> None:
+    """
+    Load ~/.bench-race-secrets if present.
+    Supports simple KEY="VALUE" lines.
+    Does NOT overwrite existing environment variables.
+    """
+    secrets_path = Path.home() / ".bench-race-secrets"
+    if not secrets_path.exists():
+        return
+
+    try:
+        for line in secrets_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            # Do not overwrite if already set in environment
+            if key not in os.environ:
+                os.environ[key] = value
+
+        # Map legacy key to huggingface standard env var
+        if "HUGGINGFACE_TOKEN" in os.environ and "HUGGINGFACE_HUB_TOKEN" not in os.environ:
+            os.environ["HUGGINGFACE_HUB_TOKEN"] = os.environ["HUGGINGFACE_TOKEN"]
+    except Exception:
+        # Do NOT log secrets; just log failure generically
+        print("Warning: Failed to load ~/.bench-race-secrets")
+
+
 def load_config():
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
@@ -94,6 +128,14 @@ def load_config():
             config.pop(key, None)
     return config
 
+
+# Load secrets before app fully starts
+_load_local_secrets()
+
+if os.getenv("HUGGINGFACE_HUB_TOKEN"):
+    print("HuggingFace token detected.")
+else:
+    print("No HuggingFace token configured.")
 
 CFG = load_config()
 
