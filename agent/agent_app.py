@@ -103,6 +103,8 @@ def _load_local_secrets() -> None:
 
             key, value = line.split("=", 1)
             key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
             value = value.strip().strip('"').strip("'")
 
             # Do not overwrite if already set in environment

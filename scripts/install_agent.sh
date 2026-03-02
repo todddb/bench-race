@@ -21,6 +21,7 @@
 #   --system-service      Opt-in: install systemd/launchctl services (default: no services)
 #   --cleanup-systemd     Remove previously created systemd/launchctl units
 #   --update              Update existing installation
+#   --rebuild-venv        Delete and rebuild agent Python virtual environment
 #   --dry-run             Show what would be done without doing it
 #   --skip-ollama         Skip Ollama installation
 #   --skip-comfyui        Skip ComfyUI installation
@@ -93,6 +94,7 @@ SKIP_COMFYUI=false
 INSTALL_TRTLLM=false # opt-in; override with --install-trtllm or INSTALL_TRTLLM=true env var
 SKIP_TRTLLM=true
 INSTALL_SUDOERS=false
+REBUILD_VENV=false
 
 AGENT_ID=""
 LABEL=""
@@ -863,6 +865,15 @@ install_or_update_vllm() {
 install_or_update_agent_venv() {
     log_step "Setting up Agent Python environment..."
 
+    if [[ "$REBUILD_VENV" == true && -d "$AGENT_DIR/.venv" ]]; then
+        log_info "--rebuild-venv requested; removing existing agent venv"
+        if [[ "$DRY_RUN" == true ]]; then
+            log_info "[DRY-RUN] Would remove $AGENT_DIR/.venv"
+        else
+            rm -rf "$AGENT_DIR/.venv"
+        fi
+    fi
+
     if [[ ! -d "$AGENT_DIR/.venv" ]]; then
         log_info "Creating Python venv for agent..."
         (
@@ -1401,6 +1412,7 @@ Options:
   --system-service      Opt-in: install systemd/launchctl services
   --cleanup-systemd     Remove previously created systemd/launchctl units
   --update              Update existing installation
+  --rebuild-venv        Delete and rebuild agent Python virtual environment
   --dry-run             Show what would be done without doing it
   --skip-ollama         Skip Ollama installation
   --skip-comfyui        Skip ComfyUI installation
@@ -1452,6 +1464,10 @@ parse_args() {
                 ;;
             --update)
                 UPDATE_MODE=true
+                shift
+                ;;
+            --rebuild-venv)
+                REBUILD_VENV=true
                 shift
                 ;;
             --dry-run)
