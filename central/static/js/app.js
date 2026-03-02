@@ -1331,7 +1331,9 @@ function initSyncButtons(machines) {
       btn.disabled = true;
       updateSyncUI(machine.machine_id, { message: "Starting sync..." });
       try {
-        const response = await fetch(`/api/machines/${machine.machine_id}/sync`, { method: "POST" });
+        const selectedModel = document.getElementById("model")?.value || "";
+        const syncUrl = `/api/machines/${machine.machine_id}/sync?model=${encodeURIComponent(selectedModel)}`;
+        const response = await fetch(syncUrl, { method: "POST" });
         const data = await response.json();
         if (!response.ok || data.error) {
           throw new Error(data.error || "Sync request failed");
