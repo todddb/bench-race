@@ -2861,6 +2861,43 @@ modelApplyBtn?.addEventListener("click", async () => {
   machineIds.forEach((machineId) => setAgentSwitchStatus(machineId, "Loading model...", "status-loading"));
   try {
     await Promise.all(machineIds.map(async (machineId) => {
+      // Ensure required Ollama model is present on the target agent before loading.
+      const syncResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_models`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ models: [modelId] }),
+      });
+      const syncData = await syncResp.json();
+      if (!syncResp.ok) {
+        throw new Error(`${machineId}: ${syncData.error || "sync start failed"}`);
+      }
+
+      const jobId = syncData.job_id;
+      if (!jobId) {
+        throw new Error(`${machineId}: sync job id missing`);
+      }
+
+      let syncDone = false;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const statusResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_status/${encodeURIComponent(jobId)}`);
+        const statusData = await statusResp.json();
+        if (!statusResp.ok) {
+          throw new Error(`${machineId}: ${statusData.error || "sync status failed"}`);
+        }
+        if (["completed", "partial", "failed"].includes(statusData.status)) {
+          if (statusData.status !== "completed") {
+            throw new Error(`${machineId}: model sync ${statusData.status}`);
+          }
+          syncDone = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      if (!syncDone) {
+        throw new Error(`${machineId}: model sync timed out`);
+      }
+
       const response = await fetch(`/api/agent/${encodeURIComponent(machineId)}/load_model`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

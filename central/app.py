@@ -3612,6 +3612,52 @@ SYNC_JOBS: Dict[str, Dict[str, Any]] = {}
 SYNC_JOBS_LOCK = threading.Lock()
 
 
+def _registry_model_entries_for_sync(models: List[str], backend: str) -> List[Dict[str, Any]]:
+    """Resolve UI-selected model ids into agent sync entries using registry metadata."""
+    requested = [m for m in models if isinstance(m, str) and m.strip()]
+    if not requested:
+        return []
+
+    registry_models = get_models_for_backend(backend)
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_display: Dict[str, Dict[str, Any]] = {}
+    by_runtime: Dict[str, Dict[str, Any]] = {}
+    for item in registry_models:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        display = str(item.get("display_name") or "").strip()
+        runtime_name = str(item.get("ollama_tag") or display or mid).strip() if backend == "ollama" else str(item.get("hf_id") or display or mid).strip()
+        if mid:
+            by_id[mid] = item
+        if display:
+            by_display[display] = item
+        if runtime_name:
+            by_runtime[runtime_name] = item
+
+    entries: List[Dict[str, Any]] = []
+    for raw in requested:
+        key = raw.strip()
+        item = by_id.get(key) or by_display.get(key) or by_runtime.get(key)
+        if item:
+            model_id = str(item.get("id") or key).strip()
+            runtime_name = str(item.get("ollama_tag") or item.get("display_name") or model_id).strip() if backend == "ollama" else str(item.get("display_name") or model_id).strip()
+            hf_repo_id = item.get("hf_id")
+        else:
+            model_id = key
+            runtime_name = key
+            hf_repo_id = None
+
+        entries.append({
+            "id": model_id,
+            "display_name": runtime_name,
+            "sanitized_name": _sanitize_model_name_py(runtime_name),
+            "hf_repo_id": hf_repo_id,
+        })
+
+    return entries
+
+
 def _sanitize_model_name_py(name: str) -> str:
     """Python-native sanitizer matching shared/sanitize_name.py."""
     import re as _re
@@ -3696,15 +3742,10 @@ def api_agent_sync_models(machine_id: str):
 
     job_id = str(uuid.uuid4())
 
-    # Build per-model entries
-    model_entries = []
-    for m in models:
-        model_entries.append({
-            "id": m,
-            "display_name": m,
-            "sanitized_name": _sanitize_model_name_py(m),
-            "hf_repo_id": None,
-        })
+    # Build per-model entries from registry metadata so Ollama pulls use canonical tags.
+    model_entries = _registry_model_entries_for_sync(models, backend="ollama")
+    if not model_entries:
+        return jsonify({"error": "No valid models to sync"}), 400
 
     with SYNC_JOBS_LOCK:
         SYNC_JOBS[job_id] = {
