@@ -150,3 +150,54 @@ def test_machine_sync_skips_post_when_selected_model_already_available(monkeypat
 
     assert response.status_code == 200
     assert response.get_json()["message"] == "No missing required models"
+
+
+def test_machine_sync_resolves_ollama_ids_to_ollama_tags(monkeypatch):
+    central_app = importlib.import_module("central.app")
+
+    class _Resp:
+        def __init__(self, data):
+            self._data = data
+            self.status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    posted = {}
+
+    monkeypatch.setattr(
+        central_app,
+        "_required_models",
+        lambda: {"llm": ["llama3.1-8b-q4"], "whisper": [], "sdxl_profiles": []},
+    )
+    monkeypatch.setattr(
+        central_app,
+        "MACHINES",
+        [{"machine_id": "m1", "agent_base_url": "http://agent"}],
+    )
+    monkeypatch.setattr(
+        central_app,
+        "_registry_model_entries_for_sync",
+        lambda models, backend: [{"display_name": "llama3.1:8b-instruct-q4_K_M"}],
+    )
+
+    def fake_get(url, timeout=None):
+        return _Resp({"active_backend": "ollama", "ollama_models": []})
+
+    def fake_post(url, json=None, timeout=None):
+        posted["url"] = url
+        posted["json"] = json
+        return _Resp({"sync_id": "abc"})
+
+    monkeypatch.setattr(central_app.requests, "get", fake_get)
+    monkeypatch.setattr(central_app.requests, "post", fake_post)
+
+    central_app.app.config["TESTING"] = True
+    with central_app.app.test_client() as client:
+        response = client.post("/api/machines/m1/sync")
+
+    assert response.status_code == 200
+    assert posted["json"]["llm"] == ["llama3.1:8b-instruct-q4_K_M"]
