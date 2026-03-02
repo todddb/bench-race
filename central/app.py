@@ -2842,6 +2842,7 @@ def api_get_checkpoint(checkpoint_name: str):
 @app.post("/api/machines/<machine_id>/sync")
 def api_sync_models(machine_id: str):
     required = _required_models()
+    backend = request.args.get("backend", "ollama")
     selected_model = (request.args.get("model") or "").strip()
     if selected_model and selected_model not in (required.get("llm") or []):
         required.setdefault("llm", []).append(selected_model)
@@ -2861,6 +2862,7 @@ def api_sync_models(machine_id: str):
             "sdxl_profiles": [
                 profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
             ],
+            "backend": backend,
             "target_dir": "ollama",
             "sanitize_names": True,
         }

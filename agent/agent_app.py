@@ -200,6 +200,7 @@ class SyncRequest(BaseModel):
     llm: List[str] = Field(default_factory=list)
     whisper: List[str] = Field(default_factory=list)
     sdxl_profiles: List[str] = Field(default_factory=list)
+    backend: str = "ollama"
     target_dir: str = "ollama"
     sanitize_names: bool = True
 
@@ -3212,6 +3213,7 @@ async def _sync_models_via_script(models: List[str]) -> None:
         raise RuntimeError(err_msg or out_msg or f"sync_models.sh failed with exit code {proc.returncode}")
 
 async def _sync_models(sync_id: str, req: SyncRequest) -> None:
+    backend = (req.backend or "ollama").lower()
     target_dir = req.target_dir if req.target_dir in ("ollama", "vllm", "both") else "ollama"
     try:
         _ensure_model_layout()
@@ -3237,7 +3239,23 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
             )
 
         if req.llm:
-            await _sync_models_via_script(req.llm)
+            if backend == "ollama":
+                for model_id in req.llm:
+                    try:
+                        log.info("[sync] Pulling Ollama model: %s", model_id)
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            ["ollama", "pull", model_id],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        log.info("[sync] Ollama pull complete: %s", model_id)
+                    except subprocess.CalledProcessError as e:
+                        log.error("Ollama pull failed for %s: %s", model_id, e.stderr)
+                        raise RuntimeError(f"Ollama pull failed for model '{model_id}'.") from e
+            else:
+                await _sync_models_via_script(req.llm)
 
         for model in req.llm:
             await _broadcast_sync_event(
