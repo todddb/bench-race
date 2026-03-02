@@ -2842,6 +2842,9 @@ def api_get_checkpoint(checkpoint_name: str):
 @app.post("/api/machines/<machine_id>/sync")
 def api_sync_models(machine_id: str):
     required = _required_models()
+    selected_model = (request.args.get("model") or "").strip()
+    if selected_model and selected_model not in (required.get("llm") or []):
+        required.setdefault("llm", []).append(selected_model)
     machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
     if not machine:
         return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
@@ -2850,7 +2853,8 @@ def api_sync_models(machine_id: str):
         r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
         r.raise_for_status()
         cap = r.json()
-        available_llm = _available_llm_models(cap)
+        active_backend = (cap.get("active_backend") or "ollama").lower()
+        available_llm = _available_llm_models(cap, active_backend)
         missing = {
             "llm": [model for model in required["llm"] if model not in available_llm],
             "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
