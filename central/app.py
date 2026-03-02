@@ -2856,8 +2856,16 @@ def api_sync_models(machine_id: str):
         cap = r.json()
         active_backend = (cap.get("active_backend") or "ollama").lower()
         available_llm = _available_llm_models(cap, active_backend)
+        missing_llm = [model for model in required["llm"] if model not in available_llm]
+        if backend.lower() == "ollama" and missing_llm:
+            missing_llm = [
+                str(entry.get("display_name") or "").strip()
+                for entry in _registry_model_entries_for_sync(missing_llm, backend="ollama")
+                if str(entry.get("display_name") or "").strip()
+            ]
+
         missing = {
-            "llm": [model for model in required["llm"] if model not in available_llm],
+            "llm": missing_llm,
             "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
             "sdxl_profiles": [
                 profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
