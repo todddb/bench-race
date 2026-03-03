@@ -2075,7 +2075,7 @@ socket.on("agent_event", (evt) => {
     const phase = payload.phase || "starting";
     const detail = payload.detail || "";
     backendSwitch.perAgentState.set(evt.machine_id, phase);
-    const selectedBackend = backendSelect?.value || "ollama";
+    const selectedBackend = getSelectedBackend();
     const { text, statusClass, backendClass } = phaseToAgentStatus(selectedBackend, phase, detail);
     setAgentSwitchStatus(evt.machine_id, text, statusClass, backendClass);
     setAgentDimmed(evt.machine_id, phase !== "ready");
@@ -2715,12 +2715,26 @@ document.getElementById("model")?.addEventListener("change", () => {
 // Backend Selector
 // ============================================================================
 
-const backendSelect = document.getElementById("backend-select");
+const backendToggleInputs = Array.from(document.querySelectorAll('input[name="backend-toggle"]'));
 const backendStatusEl = document.getElementById("backend-status");
 const backendApplyBtn = document.getElementById("backend-apply");
 const modelApplyBtn = document.getElementById("model-apply");
 const modelSelect = document.getElementById("model");
 const BACKEND_STORAGE_KEY = "bench-race-selected-backend";
+
+const getSelectedBackend = () => {
+  const selected = backendToggleInputs.find((input) => input.checked);
+  return (selected?.value || "ollama").toLowerCase();
+};
+
+const setSelectedBackend = (backend) => {
+  const normalized = (backend || "").toLowerCase();
+  const target = normalized === "custom" ? "custom" : "ollama";
+  backendToggleInputs.forEach((input) => {
+    input.checked = input.value === target;
+  });
+};
+
 
 const backendSwitch = {
   inProgress: false,
@@ -2741,7 +2755,7 @@ const clearAgentSwitchStatus = (machineId) => {
   if (!statusEl) return;
   statusEl.classList.add("hidden");
   statusEl.textContent = "";
-  statusEl.classList.remove("status-ready", "status-stopping", "status-starting", "status-loading", "status-error", "backend-mlx", "backend-trtllm");
+  statusEl.classList.remove("status-ready", "status-stopping", "status-starting", "status-loading", "status-error", "backend-custom");
 };
 
 const setAgentDimmed = (machineId, dimmed) => {
@@ -2765,13 +2779,12 @@ const setAgentSwitchStatus = (machineId, text, statusClass = "status-starting", 
 
 const phaseToAgentStatus = (backend, phase, detail = "") => {
   const lowerDetail = String(detail || "").toLowerCase();
-  const backendClass = backend === "mlx" ? "backend-mlx" : (backend === "trtllm" ? "backend-trtllm" : "");
+  const backendClass = backend === "custom" ? "backend-custom" : "";
   if (phase === "stopping" || lowerDetail.includes("stop")) {
     return { text: "Stopping Ollama", statusClass: "status-stopping", backendClass };
   }
   if (phase === "starting") {
-    if (backend === "mlx") return { text: "Starting MLX", statusClass: "status-starting", backendClass };
-    if (backend === "trtllm") return { text: "Starting TensorRT-LLM", statusClass: "status-starting", backendClass };
+    if (backend === "custom") return { text: "Starting Custom backend", statusClass: "status-starting", backendClass };
     return { text: "Starting Ollama", statusClass: "status-starting", backendClass };
   }
   if (phase === "loading_model") {
@@ -2827,7 +2840,7 @@ const activateImageMode = async () => {
 
 const activateInferenceMode = async () => {
   await callAgentEngine("stop", "comfyui");
-  const backend = document.getElementById("backend-select")?.value || "ollama";
+  const backend = getSelectedBackend();
   await callAgentEngine("start", backend);
   await refreshCapabilities();
   await refreshBackendStatus();
@@ -2836,11 +2849,10 @@ const activateInferenceMode = async () => {
 const modelIdsForDropdown = (registry, selectedBackend = "") => {
   if (!registry || typeof registry !== "object") return [];
   const backend = (selectedBackend || "").toLowerCase();
-
-  const sharedBaseline = Array.isArray(registry.shared_baseline) ? registry.shared_baseline : [];
-  return sharedBaseline
+  const key = backend === "custom" ? "custom" : "ollama";
+  const selectedModels = Array.isArray(registry[key]) ? registry[key] : [];
+  return selectedModels
     .filter((model) => model && typeof model === "object")
-    .filter((model) => (model.engine || "").toLowerCase() === backend)
     .map((model) => model.id)
     .filter(Boolean);
 };
@@ -2906,10 +2918,13 @@ const refreshAllModelAvailability = async () => {
   await Promise.all(ids.map((id) => validateModelAvailability(id, selectedModel)));
 };
 
-backendSelect?.addEventListener("change", async () => {
-  localStorage.setItem(BACKEND_STORAGE_KEY, backendSelect.value || "ollama");
-  await refreshModelsForBackend(backendSelect.value || "ollama");
-  await refreshAllModelAvailability();
+backendToggleInputs.forEach((input) => {
+  input.addEventListener("change", async () => {
+    const selectedBackend = getSelectedBackend();
+    localStorage.setItem(BACKEND_STORAGE_KEY, selectedBackend);
+    await refreshModelsForBackend(selectedBackend);
+    await refreshAllModelAvailability();
+  });
 });
 
 document.getElementById("model")?.addEventListener("change", async () => {
@@ -2992,7 +3007,7 @@ const pollBackendSwitchState = async () => {
     const resp = await fetch(`/api/backend/switch/${encodeURIComponent(backendSwitch.switchId)}/status`);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "Switch poll failed");
-    const selectedBackend = backendSelect?.value || "ollama";
+    const selectedBackend = getSelectedBackend();
     Object.entries(data.agents || {}).forEach(([machineId, phase]) => {
       backendSwitch.perAgentState.set(machineId, phase);
       const { text, statusClass, backendClass } = phaseToAgentStatus(selectedBackend, phase);
@@ -3034,7 +3049,7 @@ const applyBackend = async (backend) => {
         throw new Error(`${machineId}: ${data.error || "switch failed"}`);
       }
       backendSwitch.perAgentState.set(machineId, "ready");
-      setAgentSwitchStatus(machineId, "Ready", "status-ready", backend === "mlx" ? "backend-mlx" : (backend === "trtllm" ? "backend-trtllm" : ""));
+      setAgentSwitchStatus(machineId, "Ready", "status-ready", backend === "custom" ? "backend-custom" : "");
       setAgentDimmed(machineId, false);
     }));
 
@@ -3051,7 +3066,7 @@ const applyBackend = async (backend) => {
 };
 
 backendApplyBtn?.addEventListener("click", async () => {
-  const selectedBackend = backendSelect?.value || "ollama";
+  const selectedBackend = getSelectedBackend();
   localStorage.setItem(BACKEND_STORAGE_KEY, selectedBackend);
   await applyBackend(selectedBackend);
 });
@@ -3112,11 +3127,11 @@ scheduleStatusPoll();
 
 document.addEventListener("DOMContentLoaded", async () => {
   const savedBackend = localStorage.getItem(BACKEND_STORAGE_KEY);
-  if (backendSelect && savedBackend && ["ollama", "mlx", "trtllm"].includes(savedBackend)) {
-    backendSelect.value = savedBackend;
+  if (savedBackend && ["ollama", "custom"].includes(savedBackend)) {
+    setSelectedBackend(savedBackend);
   }
 
-  const backend = backendSelect?.value;
+  const backend = getSelectedBackend();
   if (!backend) return;
   await applyBackend(backend);
   await loadModelsForBackend(backend);

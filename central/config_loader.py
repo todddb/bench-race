@@ -41,8 +41,8 @@ def load_models_registry(path: Path | None = None) -> Dict[str, Any]:
     target = path or MODELS_REGISTRY_PATH
     default_registry: Dict[str, Any] = {
         "version": 0,
-        "shared_baseline": [],
-        "architectures": {},
+        "ollama": [],
+        "custom": [],
     }
 
     if not target.exists():
@@ -59,14 +59,14 @@ def load_models_registry(path: Path | None = None) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return default_registry
 
-    shared_baseline = data.get("shared_baseline")
-    architectures = data.get("architectures")
+    ollama = data.get("ollama")
+    custom = data.get("custom")
     version = data.get("version", 0)
 
     return {
         "version": version if isinstance(version, int) else 0,
-        "shared_baseline": shared_baseline if isinstance(shared_baseline, list) else [],
-        "architectures": architectures if isinstance(architectures, dict) else {},
+        "ollama": ollama if isinstance(ollama, list) else [],
+        "custom": custom if isinstance(custom, list) else [],
     }
 
 

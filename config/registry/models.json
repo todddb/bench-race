@@ -1,92 +1,52 @@
 {
-  "version": 2,
+  "version": 3,
   "description": "Bench-Race standardized model registry (Fleet-aligned Ollama baseline + MLX + TRT-LLM)",
-
-  "shared_baseline": [
+  "ollama": [
     {
       "id": "llama3.1-8b-q4",
       "display_name": "Llama 3.1 8B Instruct (Q4_K_M)",
-      "engine": "ollama",
-      "ollama_tag": "llama3.1:8b-instruct-q4_K_M",
-      "params_b": 8,
-      "quant": "q4_K_M"
+      "apple": "llama3.1:8b-instruct-q4_K_M",
+      "nvidia": "llama3.1:8b-instruct-q4_K_M"
     },
     {
       "id": "llama3.1-8b-q8",
       "display_name": "Llama 3.1 8B Instruct (Q8_0)",
-      "engine": "ollama",
-      "ollama_tag": "llama3.1:8b-instruct-q8_0",
-      "params_b": 8,
-      "quant": "q8_0"
+      "apple": "llama3.1:8b-instruct-q8_0",
+      "nvidia": "llama3.1:8b-instruct-q8_0"
     },
     {
       "id": "llama3.1-70b-q4",
       "display_name": "Llama 3.1 70B Instruct (Q4_K_M)",
-      "engine": "ollama",
-      "ollama_tag": "llama3.1:70b-instruct-q4_K_M",
-      "params_b": 70,
-      "quant": "q4_K_M"
+      "apple": "llama3.1:70b-instruct-q4_K_M",
+      "nvidia": "llama3.1:70b-instruct-q4_K_M"
     },
     {
       "id": "llama3.1-70b-q5",
       "display_name": "Llama 3.1 70B Instruct (Q5_K_M)",
-      "engine": "ollama",
-      "ollama_tag": "llama3.1:70b-instruct-q5_K_M",
-      "params_b": 70,
-      "quant": "q5_K_M"
+      "apple": "llama3.1:70b-instruct-q5_K_M",
+      "nvidia": "llama3.1:70b-instruct-q5_K_M"
     },
     {
       "id": "mistral-7b",
       "display_name": "Mistral 7B",
-      "engine": "ollama",
-      "ollama_tag": "mistral:7b",
-      "params_b": 7,
-      "quant": "q4"
+      "apple": "mistral:7b",
+      "nvidia": "mistral:7b"
     }
   ],
-
-  "architectures": {
-
-    "apple_silicon": {
-      "backend": "mlx",
-      "models": [
-        {
-          "id": "llama3.1-8b-mlx-4bit",
-          "display_name": "Llama 3.1 8B MLX (4bit)",
-          "hf_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-          "params_b": 8,
-          "quant": "4bit"
-        },
-        {
-          "id": "llama3.1-70b-mlx-4bit",
-          "display_name": "Llama 3.1 70B MLX (4bit)",
-          "hf_id": "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit",
-          "params_b": 70,
-          "quant": "4bit"
-        }
-      ]
+  "custom": [
+    {
+      "id": "llama3.1-8b-custom",
+      "display_name": "Llama 3.1 8B (Custom Quants)",
+      "mlx_hf_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+      "trt-llm_hf_id": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "trt-llm_engine_dir": "meta-llama__Meta-Llama-3.1-8B-Instruct--float16"
     },
-
-    "nvidia_blackwell": {
-      "backend": "trtllm",
-      "models": [
-        {
-          "id": "llama3.1-8b-trt-fp16",
-          "display_name": "Llama 3.1 8B TRT (FP16)",
-          "hf_id": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-          "engine_dir": "meta-llama__Meta-Llama-3.1-8B-Instruct--float16",
-          "params_b": 8,
-          "precision": "float16"
-        },
-        {
-          "id": "llama3.1-70b-trt-fp16",
-          "display_name": "Llama 3.1 70B TRT (FP16)",
-          "hf_id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
-          "engine_dir": "meta-llama__Meta-Llama-3.1-70B-Instruct--float16",
-          "params_b": 70,
-          "precision": "float16"
-        }
-      ]
+    {
+      "id": "llama3.1-70b-custom",
+      "display_name": "Llama 3.1 70B (Custom Quants)",
+      "mlx_hf_id": "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit",
+      "trt-llm_hf_id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+      "trt-llm_engine_dir": "meta-llama__Meta-Llama-3.1-70B-Instruct--float16"
     }
-  }
+  ]
 }
