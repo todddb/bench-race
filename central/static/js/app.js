@@ -2787,57 +2787,41 @@ const getActiveMachineIds = () => {
   return Array.from(panes).map((p) => p.id.replace("pane-", "")).filter(Boolean);
 };
 
-let modelsManifest = [];
-
-const flattenModelsConfig = (registry) => {
+const modelIdsForDropdown = (registry, selectedBackend = "") => {
   if (!registry || typeof registry !== "object") return [];
+  const backend = (selectedBackend || "").toLowerCase();
+
+  if (backend === "mlx") {
+    return (registry.architectures?.apple_silicon?.models || [])
+      .filter((model) => model && typeof model === "object")
+      .map((model) => model.id)
+      .filter(Boolean);
+  }
+
+  if (backend === "trtllm") {
+    return (registry.architectures?.nvidia_blackwell?.models || [])
+      .filter((model) => model && typeof model === "object")
+      .map((model) => model.id)
+      .filter(Boolean);
+  }
 
   const sharedBaseline = Array.isArray(registry.shared_baseline) ? registry.shared_baseline : [];
-  const architectureBlocks = registry.architectures && typeof registry.architectures === "object"
-    ? Object.entries(registry.architectures)
-    : [];
-
-  const architectureModels = architectureBlocks.flatMap(([archName, archBlock]) => {
-    if (!archBlock || typeof archBlock !== "object") return [];
-    const archBackend = (archBlock.backend || "").toLowerCase();
-    const models = Array.isArray(archBlock.models) ? archBlock.models : [];
-    return models
-      .filter((model) => model && typeof model === "object")
-      .map((model) => ({
-        ...model,
-        architecture: model.architecture || archName,
-        engine: (model.engine || archBackend || "").toLowerCase(),
-      }));
-  });
-
-  const baselineModels = sharedBaseline
+  return sharedBaseline
     .filter((model) => model && typeof model === "object")
-    .map((model) => ({
-      ...model,
-      engine: (model.engine || "").toLowerCase(),
-    }));
-
-  return [...baselineModels, ...architectureModels];
+    .filter((model) => (model.engine || "").toLowerCase() === backend)
+    .map((model) => model.id)
+    .filter(Boolean);
 };
 
-const modelIdsForBackend = (backend, architecture = "") => (
-  (modelsManifest || [])
-    .filter((model) => (model.engine || "") === (backend || "").toLowerCase())
-    .filter((model) => !architecture || (model.architecture || "") === architecture)
-    .map((model) => model.id)
-    .filter(Boolean)
-);
-
-const loadModelsManifest = async (backend = "", architecture = "") => {
+const loadModelsManifest = async (backend = "") => {
   try {
     const response = await fetch("/api/models/config");
     if (!response.ok) throw new Error("failed to load models manifest");
-    const payload = await response.json();
-    modelsManifest = flattenModelsConfig(payload);
-    updateModelOptions(modelIdsForBackend(backend, architecture));
+    const registry = await response.json();
+    const modelsForDropdown = modelIdsForDropdown(registry, backend);
+    updateModelOptions(modelsForDropdown);
   } catch (error) {
     console.warn("Failed loading models manifest", error);
-    modelsManifest = [];
     updateModelOptions([]);
   }
 };
