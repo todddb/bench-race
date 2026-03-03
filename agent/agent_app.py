@@ -2392,6 +2392,19 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
             else:
                 # Check if model is available on Ollama
                 ollama_models = await get_ollama_models(ollama_base_url)
+                try:
+                    installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags)
+                    resolved_model = resolved_ollama_pull_name({"model": model}, installed_tags)
+                    if resolved_model:
+                        log.info("Resolved job model '%s' -> '%s'", model, resolved_model)
+                        model = resolved_model
+                except Exception as e:
+                    log.warning(
+                        "Failed to resolve model '%s' before job dispatch: %s",
+                        model,
+                        e,
+                    )
+
                 if model not in ollama_models:
                     backend_selected = "mock"
                     slog.info(
