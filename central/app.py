@@ -1974,16 +1974,24 @@ def add_cache_headers(response):
 @app.get("/")
 def index():
     registry = load_models_registry()
-    mapped = [m.get("display_name") for m in registry.get("ollama", []) if isinstance(m, dict) and m.get("display_name")]
-    model_options = mapped or (_required_models().get("llm") or [])
+    mapped = [
+        {"value": m.get("display_name"), "label": m.get("display_name")}
+        for m in registry.get("ollama", [])
+        if isinstance(m, dict) and m.get("display_name")
+    ]
+    model_options = mapped or [{"value": m, "label": m} for m in (_required_models().get("llm") or [])]
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
 @app.get("/inference")
 def inference():
     registry = load_models_registry()
-    mapped = [m.get("display_name") for m in registry.get("ollama", []) if isinstance(m, dict) and m.get("display_name")]
-    model_options = mapped or (_required_models().get("llm") or [])
+    mapped = [
+        {"value": m.get("display_name"), "label": m.get("display_name")}
+        for m in registry.get("ollama", [])
+        if isinstance(m, dict) and m.get("display_name")
+    ]
+    model_options = mapped or [{"value": m, "label": m} for m in (_required_models().get("llm") or [])]
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
 
@@ -2203,6 +2211,43 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
         return {"phase": "error", "detail": str(exc), "backend": None}
 
 
+def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, selected_model: str) -> str:
+    """Resolve UI-selected model name into backend runtime model identifier for a machine."""
+    model_name = (selected_model or "").strip()
+    if not model_name:
+        return model_name
+
+    registry = load_models_registry()
+    vendor = str(machine.get("vendor") or detect_vendor(machine) or "apple").strip().lower()
+    if vendor not in {"apple", "nvidia"}:
+        vendor = "apple"
+
+    if backend == "ollama":
+        for item in registry.get("ollama", []):
+            if not isinstance(item, dict):
+                continue
+            if model_name in {
+                str(item.get("display_name") or "").strip(),
+                str(item.get("id") or "").strip(),
+                str(item.get("apple") or "").strip(),
+                str(item.get("nvidia") or "").strip(),
+            }:
+                candidate = str(item.get(vendor) or item.get("apple") or item.get("nvidia") or "").strip()
+                return candidate or model_name
+        return model_name
+
+    if backend in {"custom", "mlx", "trtllm"}:
+        for item in registry.get("custom", []):
+            if not isinstance(item, dict):
+                continue
+            if model_name in {
+                str(item.get("display_name") or "").strip(),
+                str(item.get("id") or "").strip(),
+            }:
+                return str(item.get("id") or "").strip() or model_name
+    return model_name
+
+
 BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
 BACKEND_SWITCH_LOCK = threading.Lock()
 
@@ -2304,11 +2349,12 @@ def api_agent_switch_backend(machine_id: str):
 
     payload = request.get_json(silent=True) or {}
     backend = str(payload.get("backend") or "").strip().lower()
-    model_id = payload.get("model_id")
+    model_id = str(payload.get("model_id") or "").strip()
     if backend not in {"ollama", "custom", "mlx", "trtllm"}:
         return jsonify({"error": "backend must be ollama, custom, mlx, or trtllm", "ok": False}), 400
 
     agent_backend = build_backend_switch_message(machine, backend, "single-agent-switch")["payload"]["target"] if backend == "custom" else backend
+    resolved_model = _resolve_model_for_machine(machine, agent_backend, model_id)
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
@@ -2316,7 +2362,7 @@ def api_agent_switch_backend(machine_id: str):
     try:
         response = requests.post(
             f"{agent_base_url}/api/backend/select",
-            json={"backend": agent_backend, "model": model_id},
+            json={"backend": agent_backend, "model": resolved_model},
             timeout=600,
         )
         return jsonify(response.json()), response.status_code
@@ -2343,6 +2389,7 @@ def api_agent_load_model(machine_id: str):
     status = _proxy_backend_status(machine)
     backend = (status.get("backend") or "ollama").lower()
     agent_backend = backend
+    resolved_model = _resolve_model_for_machine(machine, agent_backend, model_id)
 
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
@@ -2351,7 +2398,7 @@ def api_agent_load_model(machine_id: str):
     try:
         response = requests.post(
             f"{agent_base_url}/api/backend/select",
-            json={"backend": agent_backend, "model": model_id},
+            json={"backend": agent_backend, "model": resolved_model},
             timeout=600,
         )
         return jsonify(response.json()), response.status_code
@@ -3167,12 +3214,13 @@ def api_start_llm():
             continue
 
         try:
-            model_fit = _machine_model_fit(m, model, num_ctx)
+            resolved_model = _resolve_model_for_machine(m, "ollama", model)
+            model_fit = _machine_model_fit(m, resolved_model, num_ctx)
             r = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/jobs",
                 json={
                     "test_type": "llm_generate",
-                    "model": model,
+                    "model": resolved_model,
                     "prompt": prompt,
                     "max_tokens": max_tokens,
                     "temperature": temperature,

@@ -48,5 +48,12 @@
       "trt-llm_hf_id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
       "trt-llm_engine_dir": "meta-llama__Meta-Llama-3.1-70B-Instruct--float16"
     }
+  ],
+  "comfyui": [
+    {
+      "id": "sd_xl_base_1.0",
+      "display_name": "Stable Diffusion XL Base 1.0",
+      "download_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sdxl-base-1.0.safetensors"
+    }
   ]
 }

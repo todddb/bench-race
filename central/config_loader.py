@@ -43,6 +43,7 @@ def load_models_registry(path: Path | None = None) -> Dict[str, Any]:
         "version": 0,
         "ollama": [],
         "custom": [],
+        "comfyui": [],
     }
 
     if not target.exists():
@@ -61,12 +62,14 @@ def load_models_registry(path: Path | None = None) -> Dict[str, Any]:
 
     ollama = data.get("ollama")
     custom = data.get("custom")
+    comfyui = data.get("comfyui")
     version = data.get("version", 0)
 
     return {
         "version": version if isinstance(version, int) else 0,
         "ollama": ollama if isinstance(ollama, list) else [],
         "custom": custom if isinstance(custom, list) else [],
+        "comfyui": comfyui if isinstance(comfyui, list) else [],
     }
 
 

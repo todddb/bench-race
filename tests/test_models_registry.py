@@ -29,7 +29,7 @@ def _load_central_app_with_test_machines():
 def test_load_models_registry_v3(tmp_path):
     cfg = tmp_path / "models.json"
     cfg.write_text(
-        '{"version":3,"ollama":[{"id":"m1","display_name":"Model 1","apple":"m1:tag","nvidia":"m1:tag"}],"custom":[{"id":"c1","display_name":"Custom 1","mlx_hf_id":"mlx/c1","trt-llm_hf_id":"meta/c1"}]}',
+        '{"version":3,"ollama":[{"id":"m1","display_name":"Model 1","apple":"m1:tag","nvidia":"m1:tag"}],"custom":[{"id":"c1","display_name":"Custom 1","mlx_hf_id":"mlx/c1","trt-llm_hf_id":"meta/c1"}],"comfyui":[{"id":"sdxl","display_name":"SDXL","download_url":"https://example.com/sdxl.safetensors"}]}',
         encoding="utf-8",
     )
 
@@ -38,12 +38,13 @@ def test_load_models_registry_v3(tmp_path):
     assert registry["version"] == 3
     assert registry["ollama"][0]["id"] == "m1"
     assert registry["custom"][0]["id"] == "c1"
+    assert registry["comfyui"][0]["id"] == "sdxl"
 
 
 def test_load_models_registry_missing_returns_empty(tmp_path):
     loader = importlib.import_module("central.config_loader")
     registry = loader.load_models_registry(tmp_path / "missing.json")
-    assert registry == {"version": 0, "ollama": [], "custom": []}
+    assert registry == {"version": 0, "ollama": [], "custom": [], "comfyui": []}
 
 
 def test_api_models_config_and_backend_filtering_v3(monkeypatch):
