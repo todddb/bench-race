@@ -1426,13 +1426,26 @@ async def select_backend(req: BackendSelectRequest):
     if backend not in ("ollama", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
 
-    slog.info("backend_select", backend=backend, model=req.model, keep_warm=req.keep_warm)
+    model_to_use = req.model
+    if backend == "ollama" and req.model:
+        tags_url = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434").rstrip("/") + "/api/tags"
+        installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags, tags_url)
+        resolved_model = resolved_ollama_pull_name({"model": req.model, "id": req.model}, installed_tags)
+        if resolved_model:
+            model_to_use = resolved_model
+        slog.info(
+            "backend_select_ollama_model_resolved",
+            requested_model=req.model,
+            resolved_model=model_to_use,
+        )
+
+    slog.info("backend_select", backend=backend, model=model_to_use, keep_warm=req.keep_warm)
     _BACKEND_KEEP_WARM = req.keep_warm
 
     # Build args for start-backend
     args = [backend]
-    if req.model:
-        args.append(req.model)
+    if model_to_use:
+        args.append(model_to_use)
 
     result = await _run_agent_script("start-backend", *args)
 
