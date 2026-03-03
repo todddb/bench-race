@@ -73,6 +73,7 @@ from agent.reset_helpers import (
     COMFYUI_START_TIMEOUT_S,
     HEALTH_POLL_INTERVAL_S,
 )
+from central.config_loader import load_models_registry
 
 # ---------------------------
 # Logging
@@ -1414,6 +1415,24 @@ def _reset_idle_timer():
         _BACKEND_IDLE_TASK = asyncio.create_task(_idle_timeout_watcher())
 
 
+def registry_id_to_ollama_tag(model_id: str) -> str:
+    """Translate a registry model id to its ollama tag when available."""
+    registry = load_models_registry()
+
+    for model in registry.get("shared_baseline", []):
+        if model.get("id") == model_id and model.get("engine") == "ollama":
+            ollama_tag = model.get("ollama_tag")
+            if isinstance(ollama_tag, str) and ollama_tag:
+                slog.info(
+                    "backend_select_registry_id_translated",
+                    registry_id=model_id,
+                    ollama_tag=ollama_tag,
+                )
+                return ollama_tag
+
+    return model_id
+
+
 @app.post("/api/backend/select")
 async def select_backend(req: BackendSelectRequest):
     """
@@ -1426,11 +1445,11 @@ async def select_backend(req: BackendSelectRequest):
     if backend not in ("ollama", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
 
-    model_to_use = req.model
+    model_to_use = registry_id_to_ollama_tag(req.model) if req.model else req.model
     if backend == "ollama" and req.model:
         tags_url = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434").rstrip("/") + "/api/tags"
         installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags, tags_url)
-        resolved_model = resolved_ollama_pull_name({"model": req.model, "id": req.model}, installed_tags)
+        resolved_model = resolved_ollama_pull_name({"model": model_to_use, "id": req.model}, installed_tags)
         if resolved_model:
             model_to_use = resolved_model
         slog.info(
