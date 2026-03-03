@@ -35,6 +35,22 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 log(){ echo "[$(date '+%H:%M:%S')] $*" | tee -a "${LOG_DIR}/agent-actions.log" >/dev/null; }
 err(){ echo "[ERROR] $*" >&2; }
 
+join_cmd(){
+  local out="" arg
+  for arg in "$@"; do
+    if [[ -n "$out" ]]; then out+=" "; fi
+    out+="$(printf '%q' "$arg")"
+  done
+  echo "$out"
+}
+
+run_cmd_logged(){
+  local cmd_str
+  cmd_str="$(join_cmd "$@")"
+  log "[CMD] ${cmd_str}"
+  "$@"
+}
+
 pid_is_running(){ [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
 read_pid(){
   local pidfile="$1" pid
@@ -79,6 +95,32 @@ wait_ready(){
   return 1
 }
 
+log_ollama_models(){
+  local tags_url="http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags"
+  local tags
+  tags="$(curl -fsS --max-time 5 "$tags_url" 2>/dev/null || true)"
+  if [[ -z "$tags" ]]; then
+    log "[WARN] unable to fetch ollama tags from ${tags_url}"
+    return 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local names count
+    names="$(printf '%s' "$tags" | jq -r '.models[]?.name' 2>/dev/null || true)"
+    count="$(printf '%s' "$tags" | jq '.models | length' 2>/dev/null || echo 0)"
+    log "ollama models available (${count}):"
+    if [[ -n "$names" ]]; then
+      while IFS= read -r name; do
+        [[ -n "$name" ]] && log "  - ${name}"
+      done <<< "$names"
+    else
+      log "  (none)"
+    fi
+  else
+    log "ollama tags response (jq not installed): ${tags}"
+  fi
+}
+
 stop_process(){
   local pidfile="$1" name="$2" pid
   if [[ ! -f "$pidfile" ]]; then
@@ -121,10 +163,12 @@ start_ollama(){
   local ollama_bin="/opt/homebrew/bin/ollama"
   [[ -x "$ollama_bin" ]] || ollama_bin="$(command -v ollama 2>/dev/null || true)"
   [[ -n "$ollama_bin" ]] || { err "ollama not installed. Install: https://ollama.com/download"; return 4; }
+  log "[CMD] OLLAMA_HOST=${OLLAMA_HOST}:${OLLAMA_PORT} $(join_cmd "$ollama_bin" serve)"
   nohup env OLLAMA_HOST="${OLLAMA_HOST}:${OLLAMA_PORT}" "$ollama_bin" serve >>"$OLLAMA_LOGFILE" 2>&1 &
   write_pid "$OLLAMA_PIDFILE" "$!"
   log "ollama launched with pid $(read_pid "$OLLAMA_PIDFILE")"
   wait_ready probe_ollama "ollama" 120
+  log_ollama_models
 }
 stop_ollama(){
   stop_process "$OLLAMA_PIDFILE" "ollama" || true
@@ -251,12 +295,31 @@ USAGE
 }
 
 cmd="${1:-help}"; shift || true
+if [[ "$cmd" != "help" && "$cmd" != "-h" && "$cmd" != "--help" && "$cmd" != "" ]]; then
+  log "request: ./scripts/agent $(join_cmd "$cmd" "$@")"
+fi
 case "$cmd" in
   status) status ;;
   start) start_agent ;;
   start-fg) start_agent_fg ;;
   stop) stop_agent; stop_ollama; stop_mlx; stop_trtllm; stop_comfyui ;;
-  start-backend) case "${1:-}" in ollama) start_ollama ;; mlx) start_mlx ;; trtllm) start_trtllm ;; comfyui) start_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
+  start-backend)
+    case "${1:-}" in
+      ollama)
+        start_ollama
+        if [[ -n "${2:-}" ]]; then
+          log "central requested ollama model sync/pull for: ${2}"
+          run_cmd_logged ollama pull "${2}"
+          log "ollama pull finished for model: ${2}"
+          log_ollama_models
+        fi
+        ;;
+      mlx) start_mlx ;;
+      trtllm) start_trtllm ;;
+      comfyui) start_comfyui ;;
+      *) err "Unknown backend: ${1:-}"; exit 2;;
+    esac
+    ;;
   stop-backend) case "${1:-}" in ollama) stop_ollama ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
   start-ollama) start_ollama ;;
   stop-ollama) stop_ollama ;;
