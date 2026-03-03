@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Set
 
 import httpx
 
@@ -33,6 +33,72 @@ OLLAMA_TIMEOUT = 5.0  # seconds for tags check
 # or time threshold elapses.
 STREAM_FLUSH_CHARS = int(os.getenv("BENCH_STREAM_FLUSH_CHARS", "64"))
 STREAM_FLUSH_SECONDS = float(os.getenv("BENCH_STREAM_FLUSH_SECONDS", "0.10"))
+
+
+def fetch_installed_ollama_tags(api_url: str = "http://127.0.0.1:11434/api/tags") -> Set[str]:
+    """Return installed Ollama model tags from /api/tags as a set of names."""
+    try:
+        resp = httpx.get(api_url, timeout=OLLAMA_TIMEOUT)
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        tags = {
+            str(model.get("name", "")).strip()
+            for model in models
+            if isinstance(model, dict) and str(model.get("name", "")).strip()
+        }
+        sample = sorted(tags)[:20]
+        suffix = "" if len(tags) <= 20 else f" ... (+{len(tags) - 20} more)"
+        log.info("Fetched %d installed Ollama tags: %s%s", len(tags), sample, suffix)
+        return tags
+    except Exception as exc:
+        log.warning("Failed to fetch installed Ollama tags from %s: %s", api_url, exc)
+        return set()
+
+
+def choose_best_tag(requested: str, available_tags: Iterable[str]) -> Optional[str]:
+    """Resolve requested tag against available installed tags with q4 preference."""
+    requested_tag = (requested or "").strip()
+    if not requested_tag:
+        return None
+
+    tags = {str(tag).strip() for tag in available_tags if str(tag).strip()}
+    if requested_tag in tags:
+        return requested_tag
+
+    candidates = sorted(tag for tag in tags if tag.startswith(requested_tag))
+    if not candidates:
+        return None
+
+    q4_candidates = [tag for tag in candidates if "q4" in tag.lower()]
+    if q4_candidates:
+        return q4_candidates[0]
+
+    return min(candidates, key=lambda tag: (len(tag), tag))
+
+
+def resolved_ollama_pull_name(
+    model_entry: Dict[str, Any],
+    installed_tags: Optional[Set[str]] = None,
+) -> Optional[str]:
+    """Resolve exact Ollama pull tag from model metadata and installed tags."""
+    tags = installed_tags if installed_tags is not None else fetch_installed_ollama_tags()
+    ordered_keys = ("ollama_tag", "engine_model_name", "model", "id")
+
+    for key in ordered_keys:
+        value = model_entry.get(key)
+        if value is None:
+            continue
+        candidate = str(value).strip()
+        if not candidate:
+            continue
+        if candidate in tags:
+            return candidate
+        resolved = choose_best_tag(candidate, tags)
+        if resolved:
+            return resolved
+
+    return None
 
 
 async def check_ollama_available(base_url: str) -> bool:
