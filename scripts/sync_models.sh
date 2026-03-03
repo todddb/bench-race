@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================
 # Bench-Race Universal Model Sync
-# Self-contained venv + architecture aware
-# Safe for Apple + NVIDIA
+# Apple + NVIDIA safe
+# Self-contained venv
+# Idempotent + continues on failure
 # ============================================================
 
 set -u
@@ -27,15 +28,12 @@ mkdir -p "$COMFY_DIR" "$MLX_DIR" "$TRT_DIR"
 echo "==== Bench-Race Model Sync ===="
 
 # ============================================================
-# 1. Setup isolated venv (auto create if missing)
+# 1️⃣ Setup isolated venv
 # ============================================================
 
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating sync virtual environment..."
-    python3 -m venv "$VENV_DIR" || {
-        echo "Failed to create venv."
-        exit 1
-    }
+    python3 -m venv "$VENV_DIR" || exit 1
 fi
 
 source "${VENV_DIR}/bin/activate"
@@ -44,19 +42,18 @@ pip install --upgrade pip >/dev/null 2>&1
 pip install huggingface_hub pyyaml >/dev/null 2>&1
 
 # ============================================================
-# 2. Load secrets
+# 2️⃣ Load secrets
 # ============================================================
 
 if [[ -f "$SECRETS_FILE" ]]; then
     source "$SECRETS_FILE"
 fi
 
-export HUGGINGFACE_TOKEN="${HUGGINGFACE_TOKEN:-}"
-export NGC_API_KEY="${NGC_API_KEY:-}"
+export HF_TOKEN="${HUGGINGFACE_TOKEN:-}"
 export AGENT_ID="${AGENT_ID:-}"
 
 # ============================================================
-# 3. Select machine if not stored
+# 3️⃣ Select machine if needed
 # ============================================================
 
 if [[ -z "${AGENT_ID}" ]]; then
@@ -64,7 +61,7 @@ if [[ -z "${AGENT_ID}" ]]; then
     echo "Select this machine:"
     echo
 
-    $PYTHON_BIN - <<PY
+    "$PYTHON_BIN" <<PY
 import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 for i,m in enumerate(data.get("machines",[]),1):
@@ -74,22 +71,16 @@ PY
     echo
     read -p "Enter number: " IDX
 
-    AGENT_ID=$($PYTHON_BIN - <<PY
+    AGENT_ID=$("$PYTHON_BIN" <<PY
 import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 idx=int("$IDX")-1
 machines=data.get("machines",[])
-if idx<0 or idx>=len(machines):
-    print("")
-else:
-    print(machines[idx]["machine_id"])
+print(machines[idx]["machine_id"] if 0<=idx<len(machines) else "")
 PY
 )
 
-    if [[ -z "$AGENT_ID" ]]; then
-        echo "Invalid selection."
-        exit 1
-    fi
+    [[ -z "$AGENT_ID" ]] && echo "Invalid selection." && exit 1
 
     echo "Persisting AGENT_ID=$AGENT_ID"
     echo "AGENT_ID=\"$AGENT_ID\"" >> "$SECRETS_FILE"
@@ -98,10 +89,10 @@ fi
 echo "Using AGENT_ID: $AGENT_ID"
 
 # ============================================================
-# 4. Determine architecture
+# 4️⃣ Determine architecture
 # ============================================================
 
-ARCH=$($PYTHON_BIN - <<PY
+ARCH=$("$PYTHON_BIN" <<PY
 import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 for m in data.get("machines",[]):
@@ -111,40 +102,35 @@ for m in data.get("machines",[]):
 PY
 )
 
-if [[ "$ARCH" != "apple" && "$ARCH" != "nvidia" ]]; then
-    echo "Could not determine architecture."
-    exit 1
-fi
+[[ "$ARCH" != "apple" && "$ARCH" != "nvidia" ]] && \
+    echo "Could not determine architecture." && exit 1
 
 echo "Detected architecture: $ARCH"
 
 # ============================================================
-# 5. Validate JSON
+# 5️⃣ Validate models.json
 # ============================================================
 
-$PYTHON_BIN - <<PY
+"$PYTHON_BIN" - <<PY
 import json
 json.load(open("$REGISTRY_PATH"))
 PY
 
-if [[ $? -ne 0 ]]; then
-    echo "models.json invalid."
-    exit 1
-fi
+[[ $? -ne 0 ]] && echo "models.json invalid." && exit 1
 
 # ============================================================
-# 6. Tracking
+# 6️⃣ Tracking arrays
 # ============================================================
 
 declare -a SUCCESS
 declare -a FAILED
 
 # ============================================================
-# 7. Registry reader
+# 7️⃣ Registry reader
 # ============================================================
 
 read_registry() {
-$PYTHON_BIN - <<PY
+"$PYTHON_BIN" <<PY
 import json
 data=json.load(open("$REGISTRY_PATH"))
 
@@ -165,95 +151,91 @@ for m in data.get("custom",[]):
             print("TRT", hf, eng)
 
 for c in data.get("comfyui",[]):
-    url=c.get("download_url")
-    if url:
-        print("COMFY", url)
+    print("COMFY", "stabilityai/stable-diffusion-xl-base-1.0")
 PY
 }
 
 # ============================================================
-# 8. Sync loop
+# 8️⃣ Sync loop
 # ============================================================
 
 while read kind a b; do
 
-    case "$kind" in
+case "$kind" in
 
-    OLLAMA)
-        echo "[Ollama] $a"
-        if command -v ollama >/dev/null 2>&1; then
-            if ollama pull "$a"; then
-                SUCCESS+=("Ollama:$a")
-            else
-                FAILED+=("Ollama:$a")
-            fi
-        else
-            FAILED+=("Ollama:$a (missing ollama)")
-        fi
-        ;;
+OLLAMA)
+echo "[Ollama] $a"
+if command -v ollama >/dev/null 2>&1; then
+    ollama pull "$a" && SUCCESS+=("Ollama:$a") || FAILED+=("Ollama:$a")
+else
+    FAILED+=("Ollama:$a (missing ollama)")
+fi
+;;
 
-    MLX)
-        echo "[MLX] $a"
-        target="$MLX_DIR/$(basename "$a")"
+MLX)
+echo "[MLX] $a"
+target="$MLX_DIR/$(basename "$a")"
 
-        if [[ -d "$target" ]]; then
-            SUCCESS+=("MLX:$a (exists)")
-        else
-            if huggingface-cli download "$a" \
-                --local-dir "$target" \
-                --token "$HUGGINGFACE_TOKEN" ; then
-                SUCCESS+=("MLX:$a")
-            else
-                FAILED+=("MLX:$a")
-            fi
-        fi
-        ;;
+if [[ -d "$target" ]]; then
+    SUCCESS+=("MLX:$a (exists)")
+else
+    "$PYTHON_BIN" <<PY
+from huggingface_hub import snapshot_download
+import os
+snapshot_download(
+    repo_id="$a",
+    local_dir="$target",
+    token=os.environ.get("HF_TOKEN"),
+    resume_download=True
+)
+PY
+    [[ $? -eq 0 ]] && SUCCESS+=("MLX:$a") || FAILED+=("MLX:$a")
+fi
+;;
 
-    TRT)
-        hf="$a"
-        eng_dir="$TRT_DIR/$b"
+TRT)
+echo "[TRT] $a"
+target="$TRT_DIR/$b"
 
-        echo "[TRT] $hf"
+if [[ -d "$target" ]]; then
+    SUCCESS+=("TRT:$a (exists)")
+else
+    "$PYTHON_BIN" <<PY
+from huggingface_hub import snapshot_download
+import os
+snapshot_download(
+    repo_id="$a",
+    local_dir="$target",
+    token=os.environ.get("HF_TOKEN"),
+    resume_download=True
+)
+PY
+    [[ $? -eq 0 ]] && SUCCESS+=("TRT:$a") || FAILED+=("TRT:$a")
+fi
+;;
 
-        if [[ -d "$eng_dir" ]]; then
-            SUCCESS+=("TRT:$hf (exists)")
-        else
-            if command -v trt-convert >/dev/null 2>&1; then
-                if trt-convert --model "$hf" --engine-dir "$eng_dir"; then
-                    SUCCESS+=("TRT:$hf")
-                else
-                    FAILED+=("TRT:$hf")
-                fi
-            else
-                FAILED+=("TRT:$hf (trt-convert missing)")
-            fi
-        fi
-        ;;
+COMFY)
+echo "[ComfyUI] SDXL Base 1.0"
+"$PYTHON_BIN" <<PY
+from huggingface_hub import hf_hub_download
+import os
+hf_hub_download(
+    repo_id="$a",
+    filename="sd_xl_base_1.0.safetensors",
+    local_dir="$COMFY_DIR",
+    token=os.environ.get("HF_TOKEN"),
+    resume_download=True
+)
+PY
+[[ $? -eq 0 ]] && SUCCESS+=("Comfy:SDXL") || FAILED+=("Comfy:SDXL")
+;;
 
-    COMFY)
-        url="$a"
-        fname=$(basename "$url")
-        out="$COMFY_DIR/$fname"
-
-        echo "[ComfyUI] $fname"
-
-        if [[ -f "$out" ]]; then
-            SUCCESS+=("Comfy:$fname (exists)")
-        else
-            if curl -L --fail -o "$out" "$url"; then
-                SUCCESS+=("Comfy:$fname")
-            else
-                FAILED+=("Comfy:$fname")
-            fi
-        fi
-        ;;
-
-    esac
+esac
 
 done < <(read_registry)
 
 # ============================================================
-# 9. Summary
+# 9️⃣ Summary
 # ============================================================
 
 echo

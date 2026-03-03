@@ -2,55 +2,56 @@ machines:
   - machine_id: "macbook"
     label: "Macbook Pro (M4, 128GB)"
     agent_base_url: "http://192.168.11.22:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
     cpu_cores: 16
     cpu_physical_cores: 12
     total_system_ram_bytes: 137438953472
     gpu:
       name: "Apple M4"
-      type: "unified"
+      type: "apple"
       vram_bytes: 137438953472
+
   - machine_id: "gb10"
     label: "Dell ProMax (GB10, 128GB)"
     agent_base_url: "http://192.168.11.23:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
     cpu_cores: 64
     cpu_physical_cores: 32
     total_system_ram_bytes: 137438953472
     gpu:
       name: "NVIDIA GB10"
-      type: "discrete"
+      type: "nvidia"
       vram_bytes: 68719476736
       cuda_compute: [12, 1]
+
   - machine_id: "alienware"
     label: "Alienware Area 51 (RTX5090, 32GB)"
     agent_base_url: "http://192.168.11.21:9001"
-    notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
     cpu_cores: 32
     cpu_physical_cores: 16
     total_system_ram_bytes: 68719476736
     gpu:
       name: "NVIDIA RTX5090"
-      type: "discrete"
+      type: "nvidia"
       vram_bytes: 34359738368
       cuda_compute: [12, 0]
+
   - machine_id: "dellt2"
     label: "Dell T2 (RTX Pro 6000 Blackwell, 96GB)"
-    agent_base_url: "http://127.0.0.1:9001"
+    agent_base_url: "http://dell-ai-4.byu.edu:9001"
     cpu_cores: 24
     cpu_physical_cores: 24
     total_system_ram_bytes: 134457933824
     gpu:
-      name: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
-      type: "discrete"
+      name: "NVIDIA RTX PRO 6000 Blackwell"
+      type: "nvidia"
       vram_bytes: 102641958912
-todddb@dell-ai-4:~/projects/bench-race$   - machine_id: "macmini"
-    label: "Mac Mini (10 Cores, 24 GB)"
+
+  - machine_id: "macmini"
+    label: "Mac Mini (10 Cores, 24GB)"
     agent_base_url: "http://127.0.0.1:9001"
     cpu_cores: 12
     cpu_physical_cores: 12
     total_system_ram_bytes: 25769803776
     gpu:
       name: "Apple M4 Pro"
-      type: "unified"
+      type: "apple"
       vram_bytes: 25769803776
