@@ -1349,6 +1349,23 @@ class EngineStopRequest(BaseModel):
     engine: str
 
 
+_ENGINE_TASKS: Dict[str, asyncio.Task] = {}
+
+
+def _track_engine_task(engine: str, task: asyncio.Task) -> None:
+    _ENGINE_TASKS[engine] = task
+
+    def _on_done(t: asyncio.Task):
+        if _ENGINE_TASKS.get(engine) is t:
+            _ENGINE_TASKS.pop(engine, None)
+        try:
+            t.result()
+        except Exception as exc:
+            slog.error("engine_task_failed", engine=engine, error=str(exc))
+
+    task.add_done_callback(_on_done)
+
+
 async def _check_backend_health(backend: str) -> Dict[str, Any]:
     """Check if a backend is healthy and return status info."""
     vllm_cfg = CFG.get("vllm", {})
@@ -1502,39 +1519,49 @@ async def select_backend(req: BackendSelectRequest):
 
 
 @app.post("/api/engine/start")
-def start_engine(req: EngineStartRequest):
+async def start_engine(req: EngineStartRequest):
     """
-    Start backend engine using existing agent control script.
-    Does NOT change inference registry or selection logic.
+    Start backend engine asynchronously so callers can poll readiness separately.
     """
     engine = (req.engine or "").strip().lower()
     if not engine:
         raise HTTPException(status_code=400, detail="engine is required")
 
-    try:
-        cmd = ["./scripts/agent", "start-backend", engine]
-        if req.model:
-            cmd.append(req.model)
-        subprocess.run(cmd, check=True, cwd=str(ROOT_DIR))
-        return {"status": "started", "engine": engine}
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if engine == "comfyui":
+        existing = _ENGINE_TASKS.get(engine)
+        if existing and not existing.done():
+            return {"status": "starting", "engine": engine, "accepted": True}
+        task = asyncio.create_task(_start_comfyui())
+        _track_engine_task(engine, task)
+        return {"status": "starting", "engine": engine, "accepted": True}
+
+    result = await _run_agent_script("start-backend", engine, *( [req.model] if req.model else [] ))
+    if result.get("ok"):
+        return {"status": "started", "engine": engine, "accepted": True}
+    return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
 
 
 @app.post("/api/engine/stop")
-def stop_engine(req: EngineStopRequest):
+async def stop_engine(req: EngineStopRequest):
     """
-    Stop backend engine using existing agent control script.
+    Stop backend engine asynchronously for ComfyUI and synchronously for others.
     """
     engine = (req.engine or "").strip().lower()
     if not engine:
         raise HTTPException(status_code=400, detail="engine is required")
 
-    try:
-        subprocess.run(["./scripts/agent", "stop-backend", engine], check=True, cwd=str(ROOT_DIR))
-        return {"status": "stopped", "engine": engine}
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if engine == "comfyui":
+        existing = _ENGINE_TASKS.get(engine)
+        if existing and not existing.done():
+            existing.cancel()
+        task = asyncio.create_task(_stop_comfyui())
+        _track_engine_task(engine, task)
+        return {"status": "stopping", "engine": engine, "accepted": True}
+
+    result = await _run_agent_script("stop-backend", engine)
+    if result.get("ok"):
+        return {"status": "stopped", "engine": engine, "accepted": True}
+    return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
 
 
 @app.post("/api/backend/stop")
@@ -2057,6 +2084,7 @@ async def comfy_health():
     except Exception as exc:
         error = str(exc)
     return {
+        "status": "healthy" if running else "unhealthy",
         "running": running,
         "version": version,
         "checkpoints": _list_checkpoints(),

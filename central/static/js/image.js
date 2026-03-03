@@ -20,6 +20,10 @@ const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
 const COMPUTE_SETTINGS_KEY = "bench-race-compute-settings";
 const MODE = document.body?.dataset?.mode || "image";
 const BACKEND_STORAGE_KEY = "bench-race-selected-backend";
+const COMFY_START_MAX_ATTEMPTS = 30;
+const COMFY_START_INTERVAL_MS = 2000;
+let comfyStartupController = null;
+
 
 const getActiveMachineIds = () => {
   const panes = document.querySelectorAll(".pane[data-excluded='false']");
@@ -41,6 +45,72 @@ const callAgentEngine = async (action, engine) => {
       throw new Error(`${machineId}: ${payload.error || payload.detail || `engine ${action} failed`}`);
     }
   }));
+};
+
+const getStatusBanner = () => document.getElementById("status");
+
+const setComfyStartupStatus = (message, level = "info") => {
+  const banner = getStatusBanner();
+  if (!banner) return;
+  banner.textContent = message || "";
+  banner.classList.remove("status-info", "status-success", "status-error");
+  if (!message) return;
+  banner.classList.add(level === "error" ? "status-error" : level === "success" ? "status-success" : "status-info");
+};
+
+const isComfyHealthy = async (machineId) => {
+  const response = await fetch(`/api/agents/${encodeURIComponent(machineId)}/comfy/health`);
+  if (!response.ok) {
+    return false;
+  }
+  const payload = await response.json();
+  return payload.status === "healthy" || payload.running === true;
+};
+
+const initializeComfyUiStartup = async () => {
+  const activeMachineIds = getActiveMachineIds();
+  if (!activeMachineIds.length || typeof createComfyStartupController !== "function") {
+    return;
+  }
+
+  const startEngine = async () => {
+    await Promise.all(activeMachineIds.map(async (machineId) => {
+      const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/engine/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine: "comfyui" }),
+      });
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => ({}));
+        throw new Error(payload.error || payload.detail || `${machineId}: failed to start ComfyUI`);
+      }
+    }));
+  };
+
+  const checkHealth = async () => {
+    const health = await Promise.all(activeMachineIds.map((machineId) => isComfyHealthy(machineId)));
+    return health.every(Boolean);
+  };
+
+  comfyStartupController?.stop();
+  comfyStartupController = createComfyStartupController({
+    startEngine,
+    checkHealth,
+    intervalMs: COMFY_START_INTERVAL_MS,
+    maxAttempts: COMFY_START_MAX_ATTEMPTS,
+    onStatus: (message) => setComfyStartupStatus(message, "info"),
+    onReady: async () => {
+      setComfyStartupStatus("ComfyUI is ready.", "success");
+      await fetchStatus();
+      setTimeout(() => setComfyStartupStatus(""), 1200);
+    },
+    onError: (error) => {
+      console.error("ComfyUI startup failed", error);
+      setComfyStartupStatus("Failed to start ComfyUI. Check agent logs and try again.", "error");
+    },
+  });
+
+  await comfyStartupController.start();
 };
 
 const activateInferenceMode = async () => {
@@ -2531,6 +2601,7 @@ const bootImageUi = () => {
   loadPreviewSettings();
   loadComputeSettings();
   loadCheckpointCatalog();
+  initializeComfyUiStartup();
   fetchStatus();
   scheduleStatusPoll();
   fetchRecentRuns();
@@ -2550,6 +2621,13 @@ const bootImageUi = () => {
   imageUiReady = true;
   debugLog('bootImageUi() complete');
 };
+
+window.addEventListener("beforeunload", () => {
+  comfyStartupController?.stop();
+  callAgentEngine("stop", "comfyui").catch((error) => {
+    console.warn("Failed to stop ComfyUI during unload", error);
+  });
+});
 
 try {
   bootImageUi();
