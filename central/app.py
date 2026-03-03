@@ -2427,6 +2427,29 @@ def api_engine_stop(machine_id: str):
         return jsonify({"error": "Agent unreachable", "ok": False}), 502
     except Exception as e:
         return jsonify({"error": str(e), "ok": False}), 500
+
+
+@app.get("/api/agents/<machine_id>/comfy/health")
+def api_agent_comfy_health(machine_id: str):
+    """Proxy ComfyUI health check to agent."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        response = requests.get(
+            f"{agent_base_url}/api/comfy/health",
+            timeout=10,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
 @app.post("/api/agents/<machine_id>/backend/select")
 def api_backend_select(machine_id: str):
     """Proxy backend selection to agent."""
