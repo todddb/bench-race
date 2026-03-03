@@ -1243,7 +1243,7 @@ function getPreflightStatus() {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "excluded" });
     } else if (!machine.reachable) {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
-    } else if (MODE !== "compute" && !machine.has_selected_model) {
+    } else if (MODE !== "compute" && machine.selected_model && !machine.has_selected_model) {
       blocked.push({
         machine_id: machineId,
         label: machine.label,
@@ -2719,6 +2719,7 @@ const backendSelect = document.getElementById("backend-select");
 const backendStatusEl = document.getElementById("backend-status");
 const backendApplyBtn = document.getElementById("backend-apply");
 const modelApplyBtn = document.getElementById("model-apply");
+const modelSelect = document.getElementById("model");
 
 const backendSwitch = {
   inProgress: false,
@@ -2818,6 +2819,24 @@ const refreshModelsForBackend = async (backend) => {
   await loadModelsManifest(backend || "ollama");
 };
 
+const loadModelsForBackend = async (backend) => {
+  await refreshModelsForBackend(backend);
+};
+
+const refreshBackendStatus = async () => fetchStatus();
+const refreshCapabilities = async () => refreshAllModelAvailability();
+const updateMachineCards = () => {
+  updateAllMachineStatuses();
+  updatePreflightBanner();
+};
+
+const autoSelectFirstModel = async () => {
+  const options = modelSelect?.options;
+  if (!options || options.length === 0 || modelSelect.value) return;
+  modelSelect.value = options[0].value;
+  await selectModel(modelSelect.value);
+};
+
 const validateModelAvailability = async (machineId, selectedModel) => {
   const btn = document.getElementById(`sync-${machineId}`);
   if (!btn || !selectedModel) return;
@@ -2853,10 +2872,9 @@ document.getElementById("model")?.addEventListener("change", async () => {
   await refreshAllModelAvailability();
 });
 
-modelApplyBtn?.addEventListener("click", async () => {
-  const modelId = document.getElementById("model")?.value;
+const selectModel = async (modelId) => {
   if (!modelId) return;
-  modelApplyBtn.disabled = true;
+  if (modelApplyBtn) modelApplyBtn.disabled = true;
   const machineIds = getActiveMachineIds();
   machineIds.forEach((machineId) => setAgentSwitchStatus(machineId, "Loading model...", "status-loading"));
   try {
@@ -2909,13 +2927,19 @@ modelApplyBtn?.addEventListener("click", async () => {
       }
       setAgentSwitchStatus(machineId, "Ready", "status-ready");
     }));
-    await refreshAllModelAvailability();
+    await refreshBackendStatus();
+    await refreshCapabilities();
+    updateMachineCards();
   } catch (error) {
     console.error("Failed to apply model", error);
     updateBackendStatus("error", `Model switch failed: ${error.message}`);
   } finally {
-    modelApplyBtn.disabled = false;
+    if (modelApplyBtn) modelApplyBtn.disabled = false;
   }
+};
+
+modelApplyBtn?.addEventListener("click", async () => {
+  await selectModel(modelSelect?.value);
 });
 
 const pollBackendSwitchState = async () => {
@@ -2938,8 +2962,8 @@ const pollBackendSwitchState = async () => {
   backendSwitch.pollTimer = setTimeout(pollBackendSwitchState, 1500);
 };
 
-backendApplyBtn?.addEventListener("click", async () => {
-  const backend = backendSelect?.value || "ollama";
+const applyBackend = async (backend) => {
+  if (!backend) return;
   const selectedModel = document.getElementById("model")?.value || null;
   backendSwitch.inProgress = true;
   backendSwitch.switchId = null;
@@ -2974,11 +2998,16 @@ backendApplyBtn?.addEventListener("click", async () => {
     updateBackendStatus("ready", "Ready");
     await refreshModelsForBackend(backend);
     await refreshAllModelAvailability();
+    await refreshBackendStatus();
   } catch (err) {
     backendSwitch.inProgress = false;
     updateBackendStatus("error", `Error: ${err.message}`);
     machineIds.forEach((machineId) => setAgentDimmed(machineId, false));
   }
+};
+
+backendApplyBtn?.addEventListener("click", async () => {
+  await applyBackend(backendSelect?.value || "ollama");
 });
 
 function maybeCompleteBackendSwitch() {
@@ -3034,7 +3063,14 @@ document.getElementById("run-view-export-json")?.addEventListener("click", () =>
 loadPollingSettings();
 loadComputeSettings();
 scheduleStatusPoll();
-refreshModelsForBackend(backendSelect?.value || "ollama");
+
+document.addEventListener("DOMContentLoaded", async () => {
+  const backend = backendSelect?.value;
+  if (!backend) return;
+  await applyBackend(backend);
+  await loadModelsForBackend(backend);
+  await autoSelectFirstModel();
+});
 
 const params = new URLSearchParams(window.location.search);
 const runId = params.get("run_id");
