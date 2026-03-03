@@ -2409,8 +2409,24 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 slog.info("job_started", job_id=job_id, backend=backend_selected)
                 result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
             else:
-                # Check if model is available on Ollama
-                ollama_models = await get_ollama_models(ollama_base_url)
+                # Step 1: Translate registry ID -> ollama_tag
+                try:
+                    translated_model = registry_id_to_ollama_tag(model)
+                    if translated_model != model:
+                        log.info(
+                            "Translated registry id '%s' -> '%s' for job dispatch",
+                            model,
+                            translated_model,
+                        )
+                        model = translated_model
+                except Exception as e:
+                    log.warning(
+                        "Failed to translate registry id '%s': %s",
+                        model,
+                        e,
+                    )
+
+                # Step 2: Apply quant resolution
                 try:
                     installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags)
                     resolved_model = resolved_ollama_pull_name({"model": model}, installed_tags)
@@ -2419,10 +2435,13 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                         model = resolved_model
                 except Exception as e:
                     log.warning(
-                        "Failed to resolve model '%s' before job dispatch: %s",
+                        "Failed to resolve model '%s' during job dispatch: %s",
                         model,
                         e,
                     )
+
+                # Check if model is available on Ollama
+                ollama_models = await get_ollama_models(ollama_base_url)
 
                 if model not in ollama_models:
                     backend_selected = "mock"
