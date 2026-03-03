@@ -1864,19 +1864,30 @@ const updateModelOptions = (models) => {
   const select = document.getElementById("model");
   if (!select) return;
   const selectedModel = select.value;
+  const normalized = (models || []).map((model) => {
+    if (model && typeof model === "object") {
+      const value = model.value ?? model.display_name ?? model.id ?? "";
+      const label = model.label ?? model.display_name ?? model.id ?? value;
+      return { value, label };
+    }
+    return { value: model, label: model };
+  }).filter((model) => model.value);
+
   select.innerHTML = "";
-  (models || []).forEach((model) => {
+  normalized.forEach((model) => {
     const option = document.createElement("option");
-    option.value = model;
-    option.textContent = model;
+    option.value = model.value;
+    option.textContent = model.label;
     select.appendChild(option);
   });
-  if (selectedModel && models?.includes(selectedModel)) {
+
+  const values = normalized.map((m) => m.value);
+  if (selectedModel && values.includes(selectedModel)) {
     select.value = selectedModel;
-  } else if (!selectedModel && models?.length > 0) {
-    select.value = models[0];
-  } else if (models?.length) {
-    select.value = models[0];
+  } else if (!selectedModel && values.length > 0) {
+    select.value = values[0];
+  } else if (values.length) {
+    select.value = values[0];
   }
 };
 
@@ -2853,7 +2864,11 @@ const modelIdsForDropdown = (registry, selectedBackend = "") => {
   const selectedModels = Array.isArray(registry[key]) ? registry[key] : [];
   return selectedModels
     .filter((model) => model && typeof model === "object")
-    .map((model) => model.id)
+    .map((model) => {
+      const value = model.display_name || model.id;
+      const label = model.display_name || model.id || value;
+      return value ? { value, label } : null;
+    })
     .filter(Boolean);
 };
 

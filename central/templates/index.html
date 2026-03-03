@@ -77,7 +77,7 @@
                     <div class="backend-selector">
                       <select id="model">
                         {% for model in model_options %}
-                        <option value="{{ model }}">{{ model }}</option>
+                        <option value="{{ model.value }}">{{ model.label }}</option>
                         {% endfor %}
                       </select>
                       <button id="model-apply" class="btn btn-secondary btn-small" type="button">Select Model</button>
