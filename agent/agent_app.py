@@ -3308,14 +3308,21 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                 {"model": model, "phase": "queued", "percent": None, "message": "Queued"},
             )
 
+        llm_sync_messages: Dict[str, str] = {}
+
         if req.llm:
             if backend == "ollama":
+                installed_tags = fetch_installed_ollama_tags()
                 for model_id in req.llm:
                     try:
-                        installed_tags = fetch_installed_ollama_tags()
                         pull_name = resolved_ollama_pull_name({"model": model_id}, installed_tags) or model_id
                         if pull_name != model_id:
                             log.info("[sync] Mapped requested model '%s' -> '%s'", model_id, pull_name)
+
+                        if pull_name in installed_tags:
+                            log.info("[sync] Model already installed; skipping pull: %s", pull_name)
+                            llm_sync_messages[model_id] = "Model already installed; skipping pull."
+                            continue
 
                         log.info("[sync] Pulling Ollama model: %s", pull_name)
                         await asyncio.to_thread(
@@ -3326,11 +3333,14 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                             check=True,
                         )
                         log.info("[sync] Ollama pull complete: %s", pull_name)
+                        llm_sync_messages[model_id] = "Model synced to agent/models/ollama"
                     except subprocess.CalledProcessError as e:
                         log.error("Ollama pull failed for %s: %s", model_id, e.stderr)
                         raise RuntimeError(f"Ollama pull failed for model '{model_id}'.") from e
             else:
                 await _sync_models_via_script(req.llm)
+                for model_id in req.llm:
+                    llm_sync_messages[model_id] = "Model synced to agent/models/ollama"
 
         for model in req.llm:
             await _broadcast_sync_event(
@@ -3340,7 +3350,7 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
                     "model": model,
                     "phase": "complete",
                     "percent": 100,
-                    "message": "Model synced to agent/models/ollama with vLLM sanitized symlink",
+                    "message": llm_sync_messages.get(model, "Model synced to agent/models/ollama"),
                 },
             )
 
