@@ -1,7 +1,7 @@
 machines:
   - machine_id: "macbook"
     label: "Macbook Pro (M4, 128GB)"
-    agent_base_url: "http://127.0.0.1:9001"
+    agent_base_url: "http://192.168.11.22:9001"
     notes: "For local dev, set agent_base_url to http://127.0.0.1:9001"
     cpu_cores: 16
     cpu_physical_cores: 12
@@ -34,3 +34,15 @@ machines:
       type: "discrete"
       vram_bytes: 34359738368
       cuda_compute: [12, 0]
+  - machine_id: "dellt2"
+    agent_base_url: "http://dell-ai-4.byu.edu:9001"
+  - machine_id: "macmini"
+    label: "Mac Mini (10 Cores, 24 GB)"
+    agent_base_url: "http://127.0.0.1:9001"
+    cpu_cores: 12
+    cpu_physical_cores: 12
+    total_system_ram_bytes: 25769803776
+    gpu:
+      name: "Apple M4 Pro"
+      type: "unified"
+      vram_bytes: 25769803776
