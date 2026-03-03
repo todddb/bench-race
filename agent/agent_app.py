@@ -39,7 +39,13 @@ if str(ROOT_DIR) not in sys.path:
 
 # now import shared pydantic schemas
 from shared.schemas import Capabilities, Event, JobStartResponse, LLMRequest  # type: ignore
-from backends.ollama_backend import check_ollama_available, stream_ollama_generate, get_ollama_models
+from backends.ollama_backend import (
+    check_ollama_available,
+    stream_ollama_generate,
+    get_ollama_models,
+    fetch_installed_ollama_tags,
+    resolved_ollama_pull_name,
+)
 from backends.vllm_backend import check_vllm_available, stream_vllm_generate, get_vllm_models
 
 # Import agent-specific modules
@@ -3546,22 +3552,49 @@ async def internal_sync_models(req: InternalSyncRequest):
                 base_url = ollama_cfg.get("base_url", "http://127.0.0.1:11434")
 
                 try:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=600.0, write=60.0)) as client:
-                        pull_resp = await client.post(
-                            f"{base_url.rstrip('/')}/api/pull",
-                            json={"name": display_name, "stream": False},
+                    tags_url = f"{base_url.rstrip('/')}/api/tags"
+                    installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags, tags_url)
+                    pull_name = resolved_ollama_pull_name(entry, installed_tags)
+
+                    if pull_name is None:
+                        sample = sorted(installed_tags)[:20]
+                        result["error_message"] = (
+                            f"No ollama tag resolved for model {model_id}; available tags: {sample}"
                         )
-                        pull_resp.raise_for_status()
+                        log.error(result["error_message"])
+                    else:
+                        source_name = (
+                            entry.get("ollama_tag")
+                            or entry.get("engine_model_name")
+                            or entry.get("model")
+                            or entry.get("id")
+                            or display_name
+                        )
+                        log.info(
+                            "Mapped requested model '%s' -> '%s'",
+                            source_name,
+                            pull_name,
+                        )
+                        log.info("Running ollama pull %s (resolved from %s)", pull_name, source_name)
 
-                    result["status"] = "success"
-                    result["ollama_path"] = str(_models_root() / "ollama" / sanitized)
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=600.0, write=60.0)) as client:
+                            pull_resp = await client.post(
+                                f"{base_url.rstrip('/')}/api/pull",
+                                json={"name": pull_name, "stream": False},
+                            )
+                            pull_resp.raise_for_status()
 
-                    # Create vLLM symlink if ollama model dir exists
-                    ollama_dir = _models_root() / "ollama" / sanitized
-                    vllm_link = _models_root() / "vllm" / sanitized
-                    if ollama_dir.exists() and not vllm_link.exists():
-                        vllm_link.symlink_to(ollama_dir)
-                        result["vllm_path"] = str(vllm_link)
+                        result["status"] = "success"
+                        resolved_sanitized = _sanitize_model_name(pull_name)
+                        result["sanitized_name"] = resolved_sanitized
+                        result["ollama_path"] = str(_models_root() / "ollama" / resolved_sanitized)
+
+                        # Create vLLM symlink if ollama model dir exists
+                        ollama_dir = _models_root() / "ollama" / resolved_sanitized
+                        vllm_link = _models_root() / "vllm" / resolved_sanitized
+                        if ollama_dir.exists() and not vllm_link.exists():
+                            vllm_link.symlink_to(ollama_dir)
+                            result["vllm_path"] = str(vllm_link)
 
                 except Exception as pull_err:
                     result["error_message"] = f"Ollama pull failed: {pull_err}"
@@ -3571,7 +3604,7 @@ async def internal_sync_models(req: InternalSyncRequest):
                 model_map = _load_model_map()
                 model_map[model_id] = {
                     "display_name": display_name,
-                    "sanitized_name": sanitized,
+                    "sanitized_name": result.get("sanitized_name", sanitized),
                     "ollama_path": result.get("ollama_path", ""),
                     "vllm_path": result.get("vllm_path", ""),
                     "status": result["status"],
