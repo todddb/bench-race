@@ -1755,7 +1755,7 @@ def _missing_models_for_policy(models: List[str]) -> Dict[str, List[str]]:
         except Exception:
             available = []
         for model in models:
-            if model not in available:
+            if not model_satisfied(model, available):
                 missing[model].append(label)
     return {model: machines for model, machines in missing.items() if machines}
 
@@ -1765,6 +1765,15 @@ def _available_llm_models(cap: Dict[str, Any], backend: Optional[str] = None) ->
     if selected_backend == "ollama":
         return list(cap.get("ollama_models") or [])
     return list(cap.get("llm_models") or [])
+
+
+def model_satisfied(selected_model: str, installed_models: List[str]) -> bool:
+    if not selected_model:
+        return False
+    if selected_model in installed_models:
+        return True
+    prefix = f"{selected_model}-"
+    return any(tag.startswith(prefix) for tag in installed_models)
 
 
 def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
@@ -2478,9 +2487,9 @@ def api_status():
             cap["agent_reachable"] = True
             active_backend = (cap.get("active_backend") or "ollama").lower()
             available_llm = _available_llm_models(cap, active_backend)
-            has_selected_model = bool(selected_model and selected_model in available_llm)
+            has_selected_model = bool(selected_model and model_satisfied(selected_model, available_llm))
             missing_required = {
-                "llm": [model for model in required["llm"] if model not in available_llm],
+                "llm": [model for model in required["llm"] if not model_satisfied(model, available_llm)],
                 "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
                 "sdxl_profiles": [
                     profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
@@ -2856,7 +2865,7 @@ def api_sync_models(machine_id: str):
         cap = r.json()
         active_backend = (cap.get("active_backend") or "ollama").lower()
         available_llm = _available_llm_models(cap, active_backend)
-        missing_llm = [model for model in required["llm"] if model not in available_llm]
+        missing_llm = [model for model in required["llm"] if not model_satisfied(model, available_llm)]
         if backend.lower() == "ollama" and missing_llm:
             missing_llm = [
                 str(entry.get("display_name") or "").strip()
