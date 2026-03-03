@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-# Bench-Race Robust Model Sync
+# Bench-Race Universal Model Sync
+# Self-contained venv + architecture aware
 # Safe for Apple + NVIDIA
 # ============================================================
 
-set -u  # NO set -e (we handle errors manually)
+set -u
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -12,6 +14,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REGISTRY_PATH="${REPO_ROOT}/config/registry/models.json"
 MACHINES_PATH="${REPO_ROOT}/config/machines.yaml"
 SECRETS_FILE="${HOME}/.bench-race-secrets"
+
+VENV_DIR="${SCRIPT_DIR}/.sync_venv"
+PYTHON_BIN="${VENV_DIR}/bin/python"
 
 COMFY_DIR="${REPO_ROOT}/agent/models/comfy"
 MLX_DIR="${REPO_ROOT}/agent/models/mlx"
@@ -22,7 +27,24 @@ mkdir -p "$COMFY_DIR" "$MLX_DIR" "$TRT_DIR"
 echo "==== Bench-Race Model Sync ===="
 
 # ============================================================
-# Load secrets
+# 1. Setup isolated venv (auto create if missing)
+# ============================================================
+
+if [[ ! -d "$VENV_DIR" ]]; then
+    echo "Creating sync virtual environment..."
+    python3 -m venv "$VENV_DIR" || {
+        echo "Failed to create venv."
+        exit 1
+    }
+fi
+
+source "${VENV_DIR}/bin/activate"
+
+pip install --upgrade pip >/dev/null 2>&1
+pip install huggingface_hub pyyaml >/dev/null 2>&1
+
+# ============================================================
+# 2. Load secrets
 # ============================================================
 
 if [[ -f "$SECRETS_FILE" ]]; then
@@ -34,33 +56,33 @@ export NGC_API_KEY="${NGC_API_KEY:-}"
 export AGENT_ID="${AGENT_ID:-}"
 
 # ============================================================
-# Select agent if not stored
+# 3. Select machine if not stored
 # ============================================================
 
 if [[ -z "${AGENT_ID}" ]]; then
     echo
-    echo "Select this machine from machines.yaml:"
+    echo "Select this machine:"
     echo
 
-    python3 - <<PY
+    $PYTHON_BIN - <<PY
 import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 for i,m in enumerate(data.get("machines",[]),1):
-    print(f"{i}. {m.get('machine_id')} ({m.get('gpu',{}).get('type')})")
+    print(f"{i}. {m['machine_id']} ({m.get('gpu',{}).get('type')})")
 PY
 
     echo
     read -p "Enter number: " IDX
 
-    AGENT_ID=$(python3 - <<PY
-import yaml,sys
+    AGENT_ID=$($PYTHON_BIN - <<PY
+import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 idx=int("$IDX")-1
 machines=data.get("machines",[])
 if idx<0 or idx>=len(machines):
     print("")
 else:
-    print(machines[idx].get("machine_id"))
+    print(machines[idx]["machine_id"])
 PY
 )
 
@@ -69,61 +91,60 @@ PY
         exit 1
     fi
 
-    echo
-    echo "Persisting AGENT_ID=$AGENT_ID to $SECRETS_FILE"
+    echo "Persisting AGENT_ID=$AGENT_ID"
     echo "AGENT_ID=\"$AGENT_ID\"" >> "$SECRETS_FILE"
 fi
 
 echo "Using AGENT_ID: $AGENT_ID"
 
 # ============================================================
-# Determine architecture from machines.yaml
+# 4. Determine architecture
 # ============================================================
 
-ARCH=$(python3 - <<PY
+ARCH=$($PYTHON_BIN - <<PY
 import yaml
 data=yaml.safe_load(open("$MACHINES_PATH"))
 for m in data.get("machines",[]):
-    if m.get("machine_id")=="$AGENT_ID":
+    if m["machine_id"]=="$AGENT_ID":
         print(m.get("gpu",{}).get("type"))
         break
 PY
 )
 
 if [[ "$ARCH" != "apple" && "$ARCH" != "nvidia" ]]; then
-    echo "Could not determine architecture for $AGENT_ID"
+    echo "Could not determine architecture."
     exit 1
 fi
 
 echo "Detected architecture: $ARCH"
 
 # ============================================================
-# Validate JSON
+# 5. Validate JSON
 # ============================================================
 
-python3 - <<PY
+$PYTHON_BIN - <<PY
 import json
 json.load(open("$REGISTRY_PATH"))
 PY
 
 if [[ $? -ne 0 ]]; then
-    echo "models.json invalid. Fix before running."
+    echo "models.json invalid."
     exit 1
 fi
 
 # ============================================================
-# Tracking arrays
+# 6. Tracking
 # ============================================================
 
 declare -a SUCCESS
 declare -a FAILED
 
 # ============================================================
-# Read registry
+# 7. Registry reader
 # ============================================================
 
 read_registry() {
-python3 - <<PY
+$PYTHON_BIN - <<PY
 import json
 data=json.load(open("$REGISTRY_PATH"))
 
@@ -151,7 +172,7 @@ PY
 }
 
 # ============================================================
-# Sync Loop
+# 8. Sync loop
 # ============================================================
 
 while read kind a b; do
@@ -167,25 +188,23 @@ while read kind a b; do
                 FAILED+=("Ollama:$a")
             fi
         else
-            FAILED+=("Ollama:$a (ollama missing)")
+            FAILED+=("Ollama:$a (missing ollama)")
         fi
         ;;
 
     MLX)
         echo "[MLX] $a"
-        target="$MLX_DIR/$(basename $a)"
+        target="$MLX_DIR/$(basename "$a")"
 
         if [[ -d "$target" ]]; then
             SUCCESS+=("MLX:$a (exists)")
         else
-            if command -v huggingface-cli >/dev/null 2>&1; then
-                if huggingface-cli download "$a" --local-dir "$target"; then
-                    SUCCESS+=("MLX:$a")
-                else
-                    FAILED+=("MLX:$a")
-                fi
+            if huggingface-cli download "$a" \
+                --local-dir "$target" \
+                --token "$HUGGINGFACE_TOKEN" ; then
+                SUCCESS+=("MLX:$a")
             else
-                FAILED+=("MLX:$a (hf-cli missing)")
+                FAILED+=("MLX:$a")
             fi
         fi
         ;;
@@ -221,14 +240,10 @@ while read kind a b; do
         if [[ -f "$out" ]]; then
             SUCCESS+=("Comfy:$fname (exists)")
         else
-            if command -v curl >/dev/null 2>&1; then
-                if curl -L --fail -o "$out" "$url"; then
-                    SUCCESS+=("Comfy:$fname")
-                else
-                    FAILED+=("Comfy:$fname")
-                fi
+            if curl -L --fail -o "$out" "$url"; then
+                SUCCESS+=("Comfy:$fname")
             else
-                FAILED+=("Comfy:$fname (curl missing)")
+                FAILED+=("Comfy:$fname")
             fi
         fi
         ;;
@@ -238,7 +253,7 @@ while read kind a b; do
 done < <(read_registry)
 
 # ============================================================
-# Summary
+# 9. Summary
 # ============================================================
 
 echo
