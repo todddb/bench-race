@@ -1863,7 +1863,7 @@ const loadModelPolicy = async () => {
 const updateModelOptions = (models) => {
   const select = document.getElementById("model");
   if (!select) return;
-  const currentValue = select.value;
+  const selectedModel = select.value;
   select.innerHTML = "";
   (models || []).forEach((model) => {
     const option = document.createElement("option");
@@ -1871,8 +1871,10 @@ const updateModelOptions = (models) => {
     option.textContent = model;
     select.appendChild(option);
   });
-  if (models?.includes(currentValue)) {
-    select.value = currentValue;
+  if (selectedModel && models?.includes(selectedModel)) {
+    select.value = selectedModel;
+  } else if (!selectedModel && models?.length > 0) {
+    select.value = models[0];
   } else if (models?.length) {
     select.value = models[0];
   }
@@ -2790,20 +2792,6 @@ const getActiveMachineIds = () => {
 const modelIdsForDropdown = (registry, selectedBackend = "") => {
   if (!registry || typeof registry !== "object") return [];
   const backend = (selectedBackend || "").toLowerCase();
-
-  if (backend === "mlx") {
-    return (registry.architectures?.apple_silicon?.models || [])
-      .filter((model) => model && typeof model === "object")
-      .map((model) => model.id)
-      .filter(Boolean);
-  }
-
-  if (backend === "trtllm") {
-    return (registry.architectures?.nvidia_blackwell?.models || [])
-      .filter((model) => model && typeof model === "object")
-      .map((model) => model.id)
-      .filter(Boolean);
-  }
 
   const sharedBaseline = Array.isArray(registry.shared_baseline) ? registry.shared_baseline : [];
   return sharedBaseline
