@@ -241,11 +241,11 @@ done < <(read_registry)
 echo
 echo "==== Sync Summary ===="
 
-for s in "${SUCCESS[@]}"; do
+for s in "${SUCCESS[@]:-}"; do
     echo "✔ $s"
 done
 
-for f in "${FAILED[@]}"; do
+for f in "${FAILED[@]:-}"; do
     echo "✘ $f"
 done
 
