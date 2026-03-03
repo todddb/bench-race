@@ -1776,6 +1776,16 @@ def model_satisfied(selected_model: str, installed_models: List[str]) -> bool:
     return any(tag.startswith(prefix) for tag in installed_models)
 
 
+def _resolved_validation_model_for_machine(machine: Dict[str, Any], backend: str, selected_model: str) -> str:
+    """Resolve selected model into the runtime identifier used for availability checks."""
+    model_name = (selected_model or "").strip()
+    if not model_name:
+        return model_name
+    if (backend or "").lower() != "ollama":
+        return model_name
+    return _resolve_model_for_machine(machine, "ollama", model_name)
+
+
 def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
     match = MODEL_PARAM_RE.search(model_name or "")
     if not match:
@@ -2597,9 +2607,14 @@ def api_status():
             cap["agent_reachable"] = True
             active_backend = (cap.get("active_backend") or "ollama").lower()
             available_llm = _available_llm_models(cap, active_backend)
-            has_selected_model = bool(selected_model and model_satisfied(selected_model, available_llm))
+            resolved_selected_model = _resolved_validation_model_for_machine(m, active_backend, selected_model or "")
+            has_selected_model = bool(resolved_selected_model and model_satisfied(resolved_selected_model, available_llm))
             missing_required = {
-                "llm": [model for model in required["llm"] if not model_satisfied(model, available_llm)],
+                "llm": [
+                    model
+                    for model in required["llm"]
+                    if not model_satisfied(_resolved_validation_model_for_machine(m, active_backend, model), available_llm)
+                ],
                 "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
                 "sdxl_profiles": [
                     profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
@@ -2620,6 +2635,7 @@ def api_status():
                     "reachable": True,
                     "agent_reachable": True,
                     "selected_model": selected_model,
+                    "resolved_selected_model": resolved_selected_model,
                     "has_selected_model": has_selected_model,
                     "backend": active_backend,
                     "available_models_for_current_backend": available_llm,
@@ -2651,6 +2667,7 @@ def api_status():
                     "reachable": False,
                     "agent_reachable": False,
                     "selected_model": selected_model,
+                    "resolved_selected_model": resolved_selected_model,
                     "has_selected_model": False,
                     "backend": "ollama",
                     "available_models_for_current_backend": [],
