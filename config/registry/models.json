@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "description": "Bench-Race standardized model registry (FP16 only for NVIDIA)",
+  "description": "Bench-Race standardized model registry (Fleet-aligned Ollama baseline + MLX + TRT-LLM)",
 
   "shared_baseline": [
     {
@@ -12,12 +12,36 @@
       "quant": "q4_K_M"
     },
     {
+      "id": "llama3.1-8b-q8",
+      "display_name": "Llama 3.1 8B Instruct (Q8_0)",
+      "engine": "ollama",
+      "ollama_tag": "llama3.1:8b-instruct-q8_0",
+      "params_b": 8,
+      "quant": "q8_0"
+    },
+    {
       "id": "llama3.1-70b-q4",
       "display_name": "Llama 3.1 70B Instruct (Q4_K_M)",
       "engine": "ollama",
       "ollama_tag": "llama3.1:70b-instruct-q4_K_M",
       "params_b": 70,
       "quant": "q4_K_M"
+    },
+    {
+      "id": "llama3.1-70b-q5",
+      "display_name": "Llama 3.1 70B Instruct (Q5_K_M)",
+      "engine": "ollama",
+      "ollama_tag": "llama3.1:70b-instruct-q5_K_M",
+      "params_b": 70,
+      "quant": "q5_K_M"
+    },
+    {
+      "id": "mistral-7b",
+      "display_name": "Mistral 7B",
+      "engine": "ollama",
+      "ollama_tag": "mistral:7b",
+      "params_b": 7,
+      "quant": "q4"
     }
   ],
 
