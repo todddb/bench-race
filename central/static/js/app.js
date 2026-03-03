@@ -2789,8 +2789,40 @@ const getActiveMachineIds = () => {
 
 let modelsManifest = [];
 
+const flattenModelsConfig = (registry) => {
+  if (!registry || typeof registry !== "object") return [];
+
+  const sharedBaseline = Array.isArray(registry.shared_baseline) ? registry.shared_baseline : [];
+  const architectureBlocks = registry.architectures && typeof registry.architectures === "object"
+    ? Object.entries(registry.architectures)
+    : [];
+
+  const architectureModels = architectureBlocks.flatMap(([archName, archBlock]) => {
+    if (!archBlock || typeof archBlock !== "object") return [];
+    const archBackend = (archBlock.backend || "").toLowerCase();
+    const models = Array.isArray(archBlock.models) ? archBlock.models : [];
+    return models
+      .filter((model) => model && typeof model === "object")
+      .map((model) => ({
+        ...model,
+        architecture: model.architecture || archName,
+        engine: (model.engine || archBackend || "").toLowerCase(),
+      }));
+  });
+
+  const baselineModels = sharedBaseline
+    .filter((model) => model && typeof model === "object")
+    .map((model) => ({
+      ...model,
+      engine: (model.engine || "").toLowerCase(),
+    }));
+
+  return [...baselineModels, ...architectureModels];
+};
+
 const modelIdsForBackend = (backend, architecture = "") => (
   (modelsManifest || [])
+    .filter((model) => (model.engine || "") === (backend || "").toLowerCase())
     .filter((model) => !architecture || (model.architecture || "") === architecture)
     .map((model) => model.id)
     .filter(Boolean)
@@ -2798,14 +2830,10 @@ const modelIdsForBackend = (backend, architecture = "") => (
 
 const loadModelsManifest = async (backend = "", architecture = "") => {
   try {
-    const params = new URLSearchParams();
-    if (backend) params.set("backend", backend);
-    if (architecture) params.set("architecture", architecture);
-    const url = params.toString() ? `/api/models?${params.toString()}` : "/api/models";
-    const response = await fetch(url);
+    const response = await fetch("/api/models/config");
     if (!response.ok) throw new Error("failed to load models manifest");
     const payload = await response.json();
-    modelsManifest = Array.isArray(payload?.models) ? payload.models : [];
+    modelsManifest = flattenModelsConfig(payload);
     updateModelOptions(modelIdsForBackend(backend, architecture));
   } catch (error) {
     console.warn("Failed loading models manifest", error);
