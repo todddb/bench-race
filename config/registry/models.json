@@ -38,17 +38,17 @@
       "id": "llama3.1-8b-custom",
       "display_name": "Llama 3.1 8B (Custom NVFP4 / MLX 4bit)",
       "mlx_hf_id": "mlx-community/Llama-3.1-8B-Instruct-4bit",
-      "trt_hf_id": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
-      "trt_engine_dir": "Llama-3.1-8B-Instruct-NVFP4-engine"
+      "trt-llm_hf_id": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
+      "trt-llm_engine_dir": "Llama-3.1-8B-Instruct-NVFP4-engine"
     },
     {
       "id": "llama3.3-70b-custom",
       "display_name": "Llama 3.3 70B (Custom NVFP4 / MLX 4bit)",
       "mlx_hf_id": "mlx-community/Llama-3.3-70B-Instruct-4bit",
-      "trt_hf_id": "nvidia/Llama-3.3-70B-Instruct-NVFP4",
-      "trt_engine_dir": "Llama-3.3-70B-Instruct-NVFP4-engine"
+      "trt-llm_hf_id": "nvidia/Llama-3.3-70B-Instruct-NVFP4",
+      "trt-llm_engine_dir": "Llama-3.3-70B-Instruct-NVFP4-engine"
     }
-  ]
+  ],
   "comfyui": [
     {
       "id": "sd_xl_base_1.0",
