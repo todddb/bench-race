@@ -1445,9 +1445,9 @@ def registry_id_to_ollama_tag(model_id: str) -> str:
     """Translate a registry model id to its ollama tag when available."""
     registry = load_models_registry()
 
-    for model in registry.get("shared_baseline", []):
-        if model.get("id") == model_id and model.get("engine") == "ollama":
-            ollama_tag = model.get("ollama_tag")
+    for model in registry.get("ollama", []):
+        if model.get("id") == model_id:
+            ollama_tag = model.get("apple") or model.get("nvidia")
             if isinstance(ollama_tag, str) and ollama_tag:
                 slog.info(
                     "backend_select_registry_id_translated",
@@ -3716,7 +3716,7 @@ async def internal_sync_models(req: InternalSyncRequest):
                         log.error(result["error_message"])
                     else:
                         source_name = (
-                            entry.get("ollama_tag")
+                            entry.get("apple") or entry.get("nvidia")
                             or entry.get("engine_model_name")
                             or entry.get("model")
                             or entry.get("id")

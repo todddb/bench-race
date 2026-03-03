@@ -54,13 +54,18 @@
 
                 <div class="controls-right">
                   <div class="control-field">
-                    <label for="backend-select" class="control-label">Inference Backend</label>
+                    <label class="control-label">Inference Backend</label>
                     <div class="backend-selector">
-                      <select id="backend-select">
-                        <option value="ollama" selected>Ollama</option>
-                        <option value="mlx">MLX</option>
-                        <option value="trtllm">TensorRT-LLM</option>
-                      </select>
+                      <div id="backend-toggle-group" class="backend-toggle-group" role="radiogroup" aria-label="Inference backend">
+                        <label>
+                          <input type="radio" name="backend-toggle" id="backend-ollama" value="ollama" checked />
+                          Ollama
+                        </label>
+                        <label>
+                          <input type="radio" name="backend-toggle" id="backend-custom" value="custom" />
+                          Custom
+                        </label>
+                      </div>
                       <button id="backend-apply" class="btn btn-secondary btn-small" type="button">Apply</button>
                       <span id="backend-status" class="backend-status-indicator" title="Backend status">Ready</span>
                     </div>

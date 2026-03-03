@@ -59,11 +59,11 @@ def test_registry_id_to_ollama_tag_returns_tag_for_ollama_entry(monkeypatch):
         agent_app,
         "load_models_registry",
         lambda: {
-            "shared_baseline": [
+            "ollama": [
                 {
                     "id": "llama3.1-8b-q4",
-                    "engine": "ollama",
-                    "ollama_tag": "llama3.1:8b-instruct-q4_K_M",
+                    "apple": "llama3.1:8b-instruct-q4_K_M",
+                    "nvidia": "llama3.1:8b-instruct-q4_K_M",
                 }
             ]
         },
@@ -83,11 +83,11 @@ def test_registry_id_translates_before_ollama_resolution(monkeypatch):
 
     def fake_load_models_registry():
         return {
-            "shared_baseline": [
+            "ollama": [
                 {
                     "id": "llama3.1-8b-q4",
-                    "engine": "ollama",
-                    "ollama_tag": "llama3.1:8b-instruct-q4_K_M",
+                    "apple": "llama3.1:8b-instruct-q4_K_M",
+                    "nvidia": "llama3.1:8b-instruct-q4_K_M",
                 }
             ]
         }

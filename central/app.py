@@ -60,7 +60,7 @@ from central.config_loader import (
     load_models_registry,
     load_policy_config,
 )
-from central.agent_protocol import do_backend_switch
+from central.agent_protocol import build_backend_switch_message, do_backend_switch
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -1974,7 +1974,7 @@ def add_cache_headers(response):
 @app.get("/")
 def index():
     registry = load_models_registry()
-    mapped = [m.get("display_name") for m in registry.get("shared_baseline", []) if isinstance(m, dict) and m.get("display_name")]
+    mapped = [m.get("display_name") for m in registry.get("ollama", []) if isinstance(m, dict) and m.get("display_name")]
     model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
@@ -1982,7 +1982,7 @@ def index():
 @app.get("/inference")
 def inference():
     registry = load_models_registry()
-    mapped = [m.get("display_name") for m in registry.get("shared_baseline", []) if isinstance(m, dict) and m.get("display_name")]
+    mapped = [m.get("display_name") for m in registry.get("ollama", []) if isinstance(m, dict) and m.get("display_name")]
     model_options = mapped or (_required_models().get("llm") or [])
     return render_template("index.html", machines=MACHINES, model_options=model_options)
 
@@ -2160,26 +2160,14 @@ def api_reset_agent(machine_id: str):
 
 
 def get_models_for_backend(backend: str, architecture: str | None = None) -> List[Dict[str, Any]]:
+    del architecture  # legacy query param is ignored in v3 registry
     registry = load_models_registry()
     selected_backend = (backend or "").strip().lower()
     if selected_backend == "ollama":
-        return [m for m in registry.get("shared_baseline", []) if isinstance(m, dict)]
-
-    architectures = registry.get("architectures", {})
-    if not isinstance(architectures, dict):
-        return []
-
-    if architecture:
-        arch_block = architectures.get(architecture)
-        if isinstance(arch_block, dict) and arch_block.get("backend") == selected_backend:
-            return [m for m in arch_block.get("models", []) if isinstance(m, dict)]
-        return []
-
-    models: List[Dict[str, Any]] = []
-    for arch_block in architectures.values():
-        if isinstance(arch_block, dict) and arch_block.get("backend") == selected_backend:
-            models.extend([m for m in arch_block.get("models", []) if isinstance(m, dict)])
-    return models
+        return [m for m in registry.get("ollama", []) if isinstance(m, dict)]
+    if selected_backend in {"custom", "mlx", "trtllm"}:
+        return [m for m in registry.get("custom", []) if isinstance(m, dict)]
+    return []
 
 
 @app.get("/api/models/config")
@@ -2191,7 +2179,7 @@ def api_models_config():
 def api_models():
     backend = (request.args.get("backend") or "").strip().lower()
     architecture = (request.args.get("architecture") or "").strip() or None
-    if backend in {"ollama", "mlx", "trtllm"}:
+    if backend in {"ollama", "custom", "mlx", "trtllm"}:
         return jsonify({"models": get_models_for_backend(backend, architecture)})
 
     manifest = load_models_manifest()
@@ -2223,8 +2211,8 @@ BACKEND_SWITCH_LOCK = threading.Lock()
 def api_backend_switch():
     payload = request.get_json(silent=True) or {}
     backend = str(payload.get("backend") or "").strip().lower()
-    if backend not in {"ollama", "mlx", "trtllm"}:
-        return jsonify({"ok": False, "error": "backend must be ollama, mlx, or trtllm"}), 400
+    if backend not in {"ollama", "custom", "mlx", "trtllm"}:
+        return jsonify({"ok": False, "error": "backend must be ollama, custom, mlx, or trtllm"}), 400
 
     result = do_backend_switch(MACHINES, backend)
     switch_id = result.get("request_id")
@@ -2317,10 +2305,10 @@ def api_agent_switch_backend(machine_id: str):
     payload = request.get_json(silent=True) or {}
     backend = str(payload.get("backend") or "").strip().lower()
     model_id = payload.get("model_id")
-    if backend not in {"ollama", "mlx", "trtllm"}:
-        return jsonify({"error": "backend must be ollama, mlx, or trtllm", "ok": False}), 400
+    if backend not in {"ollama", "custom", "mlx", "trtllm"}:
+        return jsonify({"error": "backend must be ollama, custom, mlx, or trtllm", "ok": False}), 400
 
-    agent_backend = backend
+    agent_backend = build_backend_switch_message(machine, backend, "single-agent-switch")["payload"]["target"] if backend == "custom" else backend
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
@@ -3721,7 +3709,7 @@ def _registry_model_entries_for_sync(models: List[str], backend: str) -> List[Di
             continue
         mid = str(item.get("id") or "").strip()
         display = str(item.get("display_name") or "").strip()
-        runtime_name = str(item.get("ollama_tag") or display or mid).strip() if backend == "ollama" else str(item.get("hf_id") or display or mid).strip()
+        runtime_name = str(item.get("apple") or item.get("nvidia") or display or mid).strip() if backend == "ollama" else str(item.get("mlx_hf_id") or item.get("trt-llm_hf_id") or display or mid).strip()
         if mid:
             by_id[mid] = item
         if display:
@@ -3735,8 +3723,8 @@ def _registry_model_entries_for_sync(models: List[str], backend: str) -> List[Di
         item = by_id.get(key) or by_display.get(key) or by_runtime.get(key)
         if item:
             model_id = str(item.get("id") or key).strip()
-            runtime_name = str(item.get("ollama_tag") or item.get("display_name") or model_id).strip() if backend == "ollama" else str(item.get("display_name") or model_id).strip()
-            hf_repo_id = item.get("hf_id")
+            runtime_name = str(item.get("apple") or item.get("nvidia") or item.get("display_name") or model_id).strip() if backend == "ollama" else str(item.get("display_name") or model_id).strip()
+            hf_repo_id = item.get("mlx_hf_id") or item.get("trt-llm_hf_id")
         else:
             model_id = key
             runtime_name = key
