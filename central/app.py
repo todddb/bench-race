@@ -2294,6 +2294,47 @@ def api_backend_switch():
     return jsonify({"ok": True, "switch_id": switch_id, "dispatch": dispatch})
 
 
+@app.post("/api/backend/custom_switch")
+def api_backend_custom_switch():
+    machines = load_machines_config()
+    results = []
+
+    for machine in machines:
+        machine_id = machine.get("machine_id")
+        base_url = str(machine.get("agent_base_url") or "").rstrip("/")
+        gpu_type = str((machine.get("gpu") or {}).get("type") or "").strip().lower()
+
+        try:
+            if not base_url:
+                raise ValueError("Missing agent_base_url")
+
+            requests.post(
+                f"{base_url}/api/engine/stop",
+                json={"engine": "ollama"},
+                timeout=10,
+            )
+
+            if gpu_type == "apple":
+                target_engine = "mlx"
+            elif gpu_type == "nvidia":
+                target_engine = "trtllm"
+            else:
+                raise ValueError(f"Unknown gpu type: {gpu_type}")
+
+            start_resp = requests.post(
+                f"{base_url}/api/engine/start",
+                json={"engine": target_engine},
+                timeout=30,
+            )
+            start_resp.raise_for_status()
+
+            results.append({"machine": machine_id, "status": "ok"})
+        except Exception as e:
+            results.append({"machine": machine_id, "status": "error", "error": str(e)})
+
+    return jsonify({"results": results})
+
+
 @app.get("/api/backend/switch/<switch_id>/status")
 def api_backend_switch_status(switch_id: str):
     with BACKEND_SWITCH_LOCK:
