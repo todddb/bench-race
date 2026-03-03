@@ -3261,15 +3261,20 @@ async def _sync_models(sync_id: str, req: SyncRequest) -> None:
             if backend == "ollama":
                 for model_id in req.llm:
                     try:
-                        log.info("[sync] Pulling Ollama model: %s", model_id)
+                        installed_tags = fetch_installed_ollama_tags()
+                        pull_name = resolved_ollama_pull_name({"model": model_id}, installed_tags) or model_id
+                        if pull_name != model_id:
+                            log.info("[sync] Mapped requested model '%s' -> '%s'", model_id, pull_name)
+
+                        log.info("[sync] Pulling Ollama model: %s", pull_name)
                         await asyncio.to_thread(
                             subprocess.run,
-                            ["ollama", "pull", model_id],
+                            ["ollama", "pull", pull_name],
                             capture_output=True,
                             text=True,
                             check=True,
                         )
-                        log.info("[sync] Ollama pull complete: %s", model_id)
+                        log.info("[sync] Ollama pull complete: %s", pull_name)
                     except subprocess.CalledProcessError as e:
                         log.error("Ollama pull failed for %s: %s", model_id, e.stderr)
                         raise RuntimeError(f"Ollama pull failed for model '{model_id}'.") from e
