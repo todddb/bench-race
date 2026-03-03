@@ -2720,6 +2720,7 @@ const backendStatusEl = document.getElementById("backend-status");
 const backendApplyBtn = document.getElementById("backend-apply");
 const modelApplyBtn = document.getElementById("model-apply");
 const modelSelect = document.getElementById("model");
+const BACKEND_STORAGE_KEY = "bench-race-selected-backend";
 
 const backendSwitch = {
   inProgress: false,
@@ -2788,6 +2789,48 @@ const phaseToAgentStatus = (backend, phase, detail = "") => {
 const getActiveMachineIds = () => {
   const panes = document.querySelectorAll(".pane[data-excluded='false']");
   return Array.from(panes).map((p) => p.id.replace("pane-", "")).filter(Boolean);
+};
+
+const getActiveAgents = () => getActiveMachineIds().map((machineId) => ({ machineId }));
+
+const callAgentEngine = async (action, engine) => {
+  const agents = getActiveAgents();
+  await Promise.all(agents.map(async ({ machineId }) => {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/engine/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ engine }),
+    });
+    if (!resp.ok) {
+      const payload = await resp.json().catch(() => ({}));
+      throw new Error(`${machineId}: ${payload.error || payload.detail || `engine ${action} failed`}`);
+    }
+  }));
+};
+
+const stopAllLLMBackends = async () => {
+  const llmBackends = ["ollama", "mlx", "trtllm"];
+  await Promise.all(llmBackends.map(async (engine) => {
+    try {
+      await callAgentEngine("stop", engine);
+    } catch (error) {
+      console.warn(`Failed to stop ${engine}`, error);
+    }
+  }));
+};
+
+const activateImageMode = async () => {
+  await stopAllLLMBackends();
+  await callAgentEngine("start", "comfyui");
+  await refreshCapabilities();
+};
+
+const activateInferenceMode = async () => {
+  await callAgentEngine("stop", "comfyui");
+  const backend = document.getElementById("backend-select")?.value || "ollama";
+  await callAgentEngine("start", backend);
+  await refreshCapabilities();
+  await refreshBackendStatus();
 };
 
 const modelIdsForDropdown = (registry, selectedBackend = "") => {
@@ -2864,6 +2907,7 @@ const refreshAllModelAvailability = async () => {
 };
 
 backendSelect?.addEventListener("change", async () => {
+  localStorage.setItem(BACKEND_STORAGE_KEY, backendSelect.value || "ollama");
   await refreshModelsForBackend(backendSelect.value || "ollama");
   await refreshAllModelAvailability();
 });
@@ -3007,7 +3051,9 @@ const applyBackend = async (backend) => {
 };
 
 backendApplyBtn?.addEventListener("click", async () => {
-  await applyBackend(backendSelect?.value || "ollama");
+  const selectedBackend = backendSelect?.value || "ollama";
+  localStorage.setItem(BACKEND_STORAGE_KEY, selectedBackend);
+  await applyBackend(selectedBackend);
 });
 
 function maybeCompleteBackendSwitch() {
@@ -3065,11 +3111,27 @@ loadComputeSettings();
 scheduleStatusPoll();
 
 document.addEventListener("DOMContentLoaded", async () => {
+  const savedBackend = localStorage.getItem(BACKEND_STORAGE_KEY);
+  if (backendSelect && savedBackend && ["ollama", "mlx", "trtllm"].includes(savedBackend)) {
+    backendSelect.value = savedBackend;
+  }
+
   const backend = backendSelect?.value;
   if (!backend) return;
   await applyBackend(backend);
   await loadModelsForBackend(backend);
   await autoSelectFirstModel();
+
+  const imageNav = document.querySelector('.app-nav a[href="/image"]');
+  imageNav?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    try {
+      await activateImageMode();
+    } catch (error) {
+      console.error("Failed to activate image mode", error);
+    }
+    window.location.href = "/image";
+  });
 });
 
 const params = new URLSearchParams(window.location.search);

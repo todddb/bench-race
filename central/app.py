@@ -2375,6 +2375,58 @@ def api_agent_load_model(machine_id: str):
         return jsonify({"error": str(e), "ok": False}), 500
 
 
+
+
+@app.post("/api/agents/<machine_id>/engine/start")
+def api_engine_start(machine_id: str):
+    """Proxy engine start to agent lifecycle endpoint."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        from flask import request as flask_request
+        response = requests.post(
+            f"{agent_base_url}/api/engine/start",
+            json=flask_request.get_json(silent=True) or {},
+            timeout=600,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Engine start timed out", "ok": False}), 504
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
+
+
+@app.post("/api/agents/<machine_id>/engine/stop")
+def api_engine_stop(machine_id: str):
+    """Proxy engine stop to agent lifecycle endpoint."""
+    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
+    if not machine:
+        return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
+
+    agent_base_url = machine.get("agent_base_url", "").rstrip("/")
+    if not agent_base_url:
+        return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
+
+    try:
+        from flask import request as flask_request
+        response = requests.post(
+            f"{agent_base_url}/api/engine/stop",
+            json=flask_request.get_json(silent=True) or {},
+            timeout=60,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Agent unreachable", "ok": False}), 502
+    except Exception as e:
+        return jsonify({"error": str(e), "ok": False}), 500
 @app.post("/api/agents/<machine_id>/backend/select")
 def api_backend_select(machine_id: str):
     """Proxy backend selection to agent."""

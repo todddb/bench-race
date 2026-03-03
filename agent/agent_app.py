@@ -1340,6 +1340,15 @@ class BackendStatusResponse(BaseModel):
     keep_warm: bool = False
 
 
+class EngineStartRequest(BaseModel):
+    engine: str
+    model: Optional[str] = None
+
+
+class EngineStopRequest(BaseModel):
+    engine: str
+
+
 async def _check_backend_health(backend: str) -> Dict[str, Any]:
     """Check if a backend is healthy and return status info."""
     vllm_cfg = CFG.get("vllm", {})
@@ -1490,6 +1499,42 @@ async def select_backend(req: BackendSelectRequest):
                 "error": result.get("stderr", result.get("error", "Unknown error")),
             },
         )
+
+
+@app.post("/api/engine/start")
+def start_engine(req: EngineStartRequest):
+    """
+    Start backend engine using existing agent control script.
+    Does NOT change inference registry or selection logic.
+    """
+    engine = (req.engine or "").strip().lower()
+    if not engine:
+        raise HTTPException(status_code=400, detail="engine is required")
+
+    try:
+        cmd = ["./scripts/agent", "start-backend", engine]
+        if req.model:
+            cmd.append(req.model)
+        subprocess.run(cmd, check=True, cwd=str(ROOT_DIR))
+        return {"status": "started", "engine": engine}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/engine/stop")
+def stop_engine(req: EngineStopRequest):
+    """
+    Stop backend engine using existing agent control script.
+    """
+    engine = (req.engine or "").strip().lower()
+    if not engine:
+        raise HTTPException(status_code=400, detail="engine is required")
+
+    try:
+        subprocess.run(["./scripts/agent", "stop-backend", engine], check=True, cwd=str(ROOT_DIR))
+        return {"status": "stopped", "engine": engine}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/backend/stop")
