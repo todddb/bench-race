@@ -19,6 +19,36 @@ const POLLING_SETTINGS_KEY = "bench-race-polling-settings";
 const PREVIEW_SETTINGS_KEY = "bench-race-preview-settings";
 const COMPUTE_SETTINGS_KEY = "bench-race-compute-settings";
 const MODE = document.body?.dataset?.mode || "image";
+const BACKEND_STORAGE_KEY = "bench-race-selected-backend";
+
+const getActiveMachineIds = () => {
+  const panes = document.querySelectorAll(".pane[data-excluded='false']");
+  return Array.from(panes).map((p) => p.id.replace("pane-", "")).filter(Boolean);
+};
+
+const getActiveAgents = () => getActiveMachineIds().map((machineId) => ({ machineId }));
+
+const callAgentEngine = async (action, engine) => {
+  const agents = getActiveAgents();
+  await Promise.all(agents.map(async ({ machineId }) => {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/engine/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ engine }),
+    });
+    if (!resp.ok) {
+      const payload = await resp.json().catch(() => ({}));
+      throw new Error(`${machineId}: ${payload.error || payload.detail || `engine ${action} failed`}`);
+    }
+  }));
+};
+
+const activateInferenceMode = async () => {
+  await callAgentEngine("stop", "comfyui");
+  const backend = localStorage.getItem(BACKEND_STORAGE_KEY) || "ollama";
+  await callAgentEngine("start", backend);
+  await fetchStatus();
+};
 
 // Adaptive polling configuration
 const DEFAULT_POLLING_CONFIG = {
@@ -2480,6 +2510,17 @@ if (checkpointSelect) {
 
 const bootImageUi = () => {
   debugLog('bootImageUi() start');
+
+  const inferenceNav = document.querySelector('.app-nav a[href="/inference"]');
+  inferenceNav?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    try {
+      await activateInferenceMode();
+    } catch (error) {
+      console.error("Failed to activate inference mode", error);
+    }
+    window.location.href = "/inference";
+  });
 
   // Call initialization
   initToggleButtons();
