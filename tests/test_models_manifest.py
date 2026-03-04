@@ -45,6 +45,7 @@ def test_agent_switch_and_load_model_proxy(monkeypatch):
     }
     monkeypatch.setattr(app_mod, "MACHINES", [machine])
     monkeypatch.setattr(app_mod, "_proxy_backend_status", lambda _: {"backend": "ollama"})
+    monkeypatch.setattr(app_mod, "_resolve_model_for_machine", lambda machine, backend, model_id: ("ollama", model_id))
 
     called = []
 

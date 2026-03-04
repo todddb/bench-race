@@ -44,19 +44,22 @@ def test_api_backend_switch_dispatch(monkeypatch):
     app_mod.app.config["TESTING"] = True
 
     monkeypatch.setattr(app_mod, "MACHINES", [{"machine_id": "a1", "agent_base_url": "http://agent"}])
-    monkeypatch.setattr(
-        app_mod,
-        "do_backend_switch",
-        lambda agents, backend: {"request_id": "req-1", "dispatch": [{"machine_id": "a1", "ok": True}]},
-    )
+    monkeypatch.setattr(app_mod, "_resolve_model_for_machine", lambda machine, backend, model_id: ("ollama", "llama3:8b"))
+    monkeypatch.setattr(app_mod, "load_models_registry", lambda: {"ollama": [{"id": "m1"}], "custom": [{"id": "m1"}]})
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    monkeypatch.setattr(app_mod.requests, "post", lambda *args, **kwargs: _Resp())
 
     with app_mod.app.test_client() as client:
-        resp = client.post("/api/backend/switch", json={"backend": "ollama"})
+        resp = client.post("/api/backend/switch", json={"backend": "ollama", "model_id": "m1"})
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["switch_id"] == "req-1"
+        assert data["status"] == "ok"
 
-        custom_resp = client.post("/api/backend/switch", json={"backend": "custom"})
+        custom_resp = client.post("/api/backend/switch", json={"backend": "custom", "model_id": "m1"})
         assert custom_resp.status_code == 200
         custom_data = custom_resp.get_json()
-        assert custom_data["switch_id"] == "req-1"
+        assert custom_data["status"] == "ok"

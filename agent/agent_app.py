@@ -284,6 +284,10 @@ async def _broadcast_payload(payload: Dict[str, Any]):
         WS_CLIENTS.pop(cid, None)
 
 
+async def broadcast_status(message: str) -> None:
+    await _broadcast_payload({"type": "status_update", "message": message})
+
+
 # ---------------------------
 # Image Storage Helpers
 # ---------------------------
@@ -1338,6 +1342,8 @@ class BackendStatusResponse(BaseModel):
     active_backend: Optional[str] = None
     backends: Dict[str, Any] = Field(default_factory=dict)
     keep_warm: bool = False
+    backend: Optional[str] = None
+    state: str = "ready"
 
 
 class EngineStartRequest(BaseModel):
@@ -1346,10 +1352,12 @@ class EngineStartRequest(BaseModel):
 
 
 class EngineStopRequest(BaseModel):
-    engine: str
+    engine: Optional[str] = None
 
 
 _ENGINE_TASKS: Dict[str, asyncio.Task] = {}
+_ENGINE_LAST_START_TS: Dict[str, float] = {}
+_ENGINE_TRANSIENT_WINDOW_S = 45
 
 
 def _track_engine_task(engine: str, task: asyncio.Task) -> None:
@@ -1545,6 +1553,7 @@ async def start_engine(req: EngineStartRequest):
     """
     Start backend engine asynchronously so callers can poll readiness separately.
     """
+    global _ACTIVE_BACKEND
     engine = (req.engine or "").strip().lower()
     if not engine:
         raise HTTPException(status_code=400, detail="engine is required")
@@ -1557,15 +1566,19 @@ async def start_engine(req: EngineStartRequest):
         _track_engine_task(engine, task)
         return {"status": "starting", "engine": engine, "accepted": True}
 
-    if engine in ["trtllm", "mlx"] and not req.model:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "error": "Model required"},
-        )
-
     try:
+        if engine == "ollama":
+            await broadcast_status("Stopping Ollama")
+        elif engine == "trtllm":
+            await broadcast_status("Starting TRT Engine")
+        elif engine == "mlx":
+            await broadcast_status("Loading MLX Model")
         result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
         if result.get("ok"):
+            _ENGINE_LAST_START_TS[engine] = time.time()
+            _ACTIVE_BACKEND = engine
+            await broadcast_status("Warming Model")
+            await broadcast_status("Ready")
             return {"status": "started", "engine": engine, "accepted": True}
         raise subprocess.CalledProcessError(
             returncode=int(result.get("returncode") or 1),
@@ -1582,11 +1595,20 @@ async def start_engine(req: EngineStartRequest):
 @app.post("/api/engine/stop")
 async def stop_engine(req: EngineStopRequest):
     """
-    Stop backend engine asynchronously for ComfyUI and synchronously for others.
+    Stop one backend engine or all inference engines when engine is omitted.
     """
     engine = (req.engine or "").strip().lower()
+
     if not engine:
-        raise HTTPException(status_code=400, detail="engine is required")
+        engines = ["ollama", "mlx", "trtllm"]
+        errors: Dict[str, str] = {}
+        for target in engines:
+            result = await _run_agent_script("stop-backend", target)
+            if not result.get("ok"):
+                errors[target] = result.get("stderr", result.get("error", "Unknown error"))
+        if not errors:
+            return {"status": "stopped", "engine": "all", "accepted": True}
+        return JSONResponse(status_code=500, content={"status": "error", "engine": "all", "accepted": True, "errors": errors})
 
     if engine == "comfyui":
         existing = _ENGINE_TASKS.get(engine)
@@ -1634,10 +1656,23 @@ async def backend_status():
         except Exception as e:
             statuses[b] = {"name": b, "healthy": False, "error": str(e)}
 
+    state = "ready"
+    if _ACTIVE_BACKEND:
+        active_status = statuses.get(_ACTIVE_BACKEND) or {}
+        healthy = bool(active_status.get("healthy"))
+        last_start = _ENGINE_LAST_START_TS.get(_ACTIVE_BACKEND, 0)
+        in_transient_window = (time.time() - last_start) < _ENGINE_TRANSIENT_WINDOW_S
+        if not healthy and in_transient_window:
+            state = "starting"
+        elif not healthy:
+            state = "offline"
+
     return BackendStatusResponse(
         active_backend=_ACTIVE_BACKEND,
         backends=statuses,
         keep_warm=_BACKEND_KEEP_WARM,
+        backend=_ACTIVE_BACKEND,
+        state=state,
     )
 
 
