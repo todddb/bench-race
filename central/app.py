@@ -12,6 +12,7 @@ import random
 import shutil
 import subprocess
 import threading
+from threading import Lock
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2214,6 +2215,11 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
         if not response.ok:
             return {"phase": "error", "detail": payload.get("error") or "backend status failed", "backend": None}
         active = payload.get("active_backend")
+        state = str(payload.get("state") or "").lower()
+        if state == "starting":
+            return {"phase": "starting", "detail": "Loading model...", "backend": active}
+        if state == "offline":
+            return {"phase": "error", "detail": "Backend offline", "backend": active}
         if active in {"ollama", "mlx", "trtllm"}:
             return {"phase": "ready", "detail": "Ready", "backend": active}
         return {"phase": "starting", "detail": "Loading model...", "backend": active}
@@ -2278,10 +2284,21 @@ def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: 
 
 BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
 BACKEND_SWITCH_LOCK = threading.Lock()
+SWITCH_LOCK = Lock()
+SWITCH_ACTIVE = False
 
 
 @app.post("/api/backend/switch")
 def api_backend_switch():
+    global SWITCH_ACTIVE
+    with SWITCH_LOCK:
+        if SWITCH_ACTIVE:
+            return jsonify({
+                "status": "error",
+                "error": "Switch already in progress",
+            }), 409
+        SWITCH_ACTIVE = True
+
     try:
         data = request.get_json(force=True) or {}
         backend = str(data.get("backend") or "").strip().lower()
@@ -2327,21 +2344,7 @@ def api_backend_switch():
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
 
-                requests.post(
-                    f"{base_url}/api/engine/stop",
-                    json={"engine": "ollama"},
-                    timeout=10,
-                )
-                requests.post(
-                    f"{base_url}/api/engine/stop",
-                    json={"engine": "mlx"},
-                    timeout=10,
-                )
-                requests.post(
-                    f"{base_url}/api/engine/stop",
-                    json={"engine": "trtllm"},
-                    timeout=10,
-                )
+                requests.post(f"{base_url}/api/engine/stop", timeout=30)
 
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
@@ -2373,14 +2376,17 @@ def api_backend_switch():
 
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
+    finally:
+        with SWITCH_LOCK:
+            SWITCH_ACTIVE = False
 
 
 @app.post("/api/backend/select")
-def legacy_backend_select():
+def deprecated_backend_select():
     return jsonify({
         "status": "error",
-        "error": "Deprecated endpoint. Use /api/backend/switch.",
-    }), 400
+        "error": "backend/select is deprecated. Use backend/switch."
+    }), 410
 
 
 @app.get("/api/backend/switch/<switch_id>/status")

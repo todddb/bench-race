@@ -44,6 +44,7 @@ const activeRunMachinesById = new Map();
 const activeRunMachineIds = new Set();
 let statusPollTimer = null;
 let lastUiUpdate = 0;
+let switchingInProgress = false;
 let runTrackingActive = false;
 let runStartTs = null;
 let runEndTs = null;
@@ -154,6 +155,17 @@ const scheduleStatusPoll = () => {
 };
 
 const restartPolling = () => {
+  scheduleStatusPoll();
+};
+
+const pauseStatusPolling = () => {
+  if (statusPollTimer) {
+    clearTimeout(statusPollTimer);
+    statusPollTimer = null;
+  }
+};
+
+const resumeStatusPolling = () => {
   scheduleStatusPoll();
 };
 
@@ -1218,6 +1230,7 @@ function applyStatusResponse(data) {
 }
 
 async function fetchStatus() {
+  if (switchingInProgress) return null;
   const selectedModel = document.getElementById("model")?.value;
   const numCtx = document.getElementById("num_ctx")?.value;
   const params = new URLSearchParams();
@@ -2092,6 +2105,10 @@ socket.on("agent_event", (evt) => {
     setAgentDimmed(evt.machine_id, phase !== "ready");
     maybeCompleteBackendSwitch();
   }
+
+  if (evt.type === "status_update") {
+    setAgentStatusMessage(evt.machine_id, evt.payload?.message || evt.message || "");
+  }
 });
 
 socket.on("llm_jobs_started", (payload) => {
@@ -2769,6 +2786,12 @@ const clearAgentSwitchStatus = (machineId) => {
   statusEl.classList.remove("status-ready", "status-stopping", "status-starting", "status-loading", "status-error", "backend-custom");
 };
 
+const setAgentStatusMessage = (machineId, message = "") => {
+  const messageEl = document.getElementById(`agent-status-message-${machineId}`);
+  if (!messageEl) return;
+  messageEl.textContent = message || "";
+};
+
 const setAgentDimmed = (machineId, dimmed) => {
   const pane = document.getElementById(`pane-${machineId}`);
   if (!pane) return;
@@ -3038,6 +3061,8 @@ const pollBackendSwitchState = async () => {
 
 const applyBackend = async (backend) => {
   if (!backend) return;
+  switchingInProgress = true;
+  pauseStatusPolling();
   backendSwitch.inProgress = true;
   backendSwitch.switchId = null;
   backendSwitch.perAgentState.clear();
@@ -3091,6 +3116,9 @@ const applyBackend = async (backend) => {
     backendSwitch.inProgress = false;
     updateBackendStatus("error", `Error: ${err.message}`);
     machineIds.forEach((machineId) => setAgentDimmed(machineId, false));
+  } finally {
+    switchingInProgress = false;
+    resumeStatusPolling();
   }
 };
 
@@ -3162,7 +3190,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const backend = getSelectedBackend();
   if (!backend) return;
-  await applyBackend(backend);
   await loadModelsForBackend(backend);
   await autoSelectFirstModel();
 

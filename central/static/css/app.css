@@ -91,7 +91,7 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
   pointer-events: none;
 }
 .pane-title { font-weight: 700; margin-bottom: 0; font-size: 18px; color: var(--title-blue); white-space: normal; word-break: break-word; }
-.pane-title-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pane-title-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 auto; white-space: normal; word-break: break-word; }
 .agent-switch-status {
   display: inline-flex;
   width: fit-content;
@@ -111,6 +111,13 @@ textarea.prompt { font-family: Inter, system-ui, -apple-system, "Segoe UI", Robo
 .agent-switch-status.backend-mlx { background: var(--backend-mlx-bg); color: var(--backend-mlx-fg); }
 .agent-switch-status.backend-trtllm { background: var(--backend-trtllm-bg); color: var(--backend-trtllm-fg); }
 .agent-switch-status.backend-custom { background: var(--backend-custom-bg); color: var(--backend-custom-fg); }
+.agent-status-message {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+}
 .output { min-height: 200px; max-height: 320px; background: #0b1020; color: #d7e1ff; padding: 12px; border-radius: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; border: 1px solid rgba(148, 163, 184, 0.2); }
 .metrics { margin-top: 8px; font-size: 13px; color: #111; }
 .muted { color: #666; }
@@ -537,7 +544,7 @@ body.options-expanded textarea.prompt { min-height: 220px; }
   grid-template-columns: 20px minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   gap: 8px 12px;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 12px;
   padding-bottom: 0;
   border-bottom: none;
@@ -547,7 +554,7 @@ body.options-expanded textarea.prompt { min-height: 220px; }
   grid-row: 1;
   grid-column: 2;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   min-width: 0;
 }
