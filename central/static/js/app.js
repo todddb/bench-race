@@ -3052,49 +3052,35 @@ const applyBackend = async (backend) => {
   updateBackendStatus("starting", "Switching...");
 
   try {
-    if (backend === "custom") {
-      const selectedModel = document.getElementById("model")?.value || "";
-      const selectedBackend = backend;
-      const resp = await fetch("/api/backend/switch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ backend: selectedBackend, model: selectedModel }),
-      });
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
-      }
-      const data = await resp.json();
+    const selectedModel = document.getElementById("model")?.value || "";
+    const resp = await fetch("/api/backend/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        backend,
+        model: selectedModel,
+      }),
+    });
 
-      const results = Array.isArray(data.results) ? data.results : [];
-      machineIds.forEach((machineId) => {
-        const machineResult = results.find((item) => item.machine === machineId);
-        if (machineResult && machineResult.status !== "ok") {
-          backendSwitch.perAgentState.set(machineId, "error");
-          setAgentSwitchStatus(machineId, "Switch failed", "status-error", "backend-custom");
-          setAgentDimmed(machineId, false);
-          return;
-        }
-        backendSwitch.perAgentState.set(machineId, "ready");
-        setAgentSwitchStatus(machineId, "Ready", "status-ready", "backend-custom");
-        setAgentDimmed(machineId, false);
-      });
-    } else {
-      const selectedModel = document.getElementById("model")?.value || null;
-      await Promise.all(machineIds.map(async (machineId) => {
-        const resp = await fetch(`/api/agent/${encodeURIComponent(machineId)}/switch_backend`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ backend, model_id: selectedModel }),
-        });
-        const data = await resp.json();
-        if (!resp.ok || data.ok === false) {
-          throw new Error(`${machineId}: ${data.error || "switch failed"}`);
-        }
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Switch failed: ${text}`);
+    }
+
+    const data = await resp.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+
+    machineIds.forEach((machineId) => {
+      const machineResult = results.find((item) => item.machine === machineId);
+      if (machineResult && machineResult.status === "ok") {
         backendSwitch.perAgentState.set(machineId, "ready");
         setAgentSwitchStatus(machineId, "Ready", "status-ready", backend === "custom" ? "backend-custom" : "");
-        setAgentDimmed(machineId, false);
-      }));
-    }
+      } else {
+        backendSwitch.perAgentState.set(machineId, "error");
+        setAgentSwitchStatus(machineId, "Switch failed", "status-error", backend === "custom" ? "backend-custom" : "");
+      }
+      setAgentDimmed(machineId, false);
+    });
 
     backendSwitch.inProgress = false;
     updateBackendStatus("ready", "Ready");
