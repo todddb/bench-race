@@ -44,7 +44,7 @@ def test_api_backend_switch_dispatch(monkeypatch):
     app_mod.app.config["TESTING"] = True
 
     monkeypatch.setattr(app_mod, "MACHINES", [{"machine_id": "a1", "agent_base_url": "http://agent"}])
-    monkeypatch.setattr(app_mod, "_resolve_model_for_machine", lambda machine, backend, model_id: ("ollama", "llama3:8b"))
+    monkeypatch.setattr(app_mod, "resolve_runtime_model", lambda machine, backend, model_id: "llama3:8b")
     monkeypatch.setattr(app_mod, "load_models_registry", lambda: {"ollama": [{"id": "m1"}], "custom": [{"id": "m1"}]})
 
     class _Resp:

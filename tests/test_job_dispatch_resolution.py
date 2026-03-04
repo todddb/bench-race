@@ -59,3 +59,35 @@ def test_job_dispatch_uses_resolved_tag(monkeypatch):
     assert called["ollama"] is True
     assert called["mock"] is False
     assert called["model"] == "llama3.1:8b-instruct-q4_K_M"
+
+
+def test_job_dispatch_requires_active_backend(monkeypatch):
+    agent_app = importlib.import_module("agent.agent_app")
+
+    called = {"mock": False, "events": []}
+
+    async def fake_run_mock_stream(*args, **kwargs):
+        called["mock"] = True
+        return {"tokens_generated": 1}
+
+    async def fake_broadcast_event(ev):
+        called["events"].append(ev.model_dump())
+
+    monkeypatch.setattr(agent_app, "_run_mock_stream", fake_run_mock_stream)
+    monkeypatch.setattr(agent_app, "_broadcast_event", fake_broadcast_event)
+    monkeypatch.setattr(agent_app, "_ACTIVE_BACKEND", None)
+
+    req = agent_app.LLMRequest(model="llama3.1:8b-instruct", prompt="hello")
+    asyncio.run(agent_app._job_runner_llm("job-no-backend", req))
+
+    assert called["mock"] is False
+    assert called["events"][-1]["type"] == "job_done"
+    assert called["events"][-1]["payload"]["error"] == "No active backend"
+
+
+def test_engine_start_rejects_invalid_backend():
+    agent_app = importlib.import_module("agent.agent_app")
+
+    resp = asyncio.run(agent_app.start_engine(agent_app.EngineStartRequest(backend="custom", model="x")))
+    assert resp.status_code == 400
+    assert b"Invalid backend 'custom'" in resp.body

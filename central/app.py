@@ -2295,6 +2295,16 @@ def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: 
     raise ValueError(f"Unknown backend {backend}")
 
 
+def _machine_llm_hardware(machine: Dict[str, Any]) -> str:
+    return str(
+        machine.get("llmHardware")
+        or machine.get("gpu_type")
+        or (machine.get("gpu") or {}).get("type")
+        or detect_vendor(machine)
+        or ""
+    ).strip().lower()
+
+
 BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
 BACKEND_SWITCH_LOCK = threading.Lock()
 SWITCH_LOCK = Lock()
@@ -2342,7 +2352,7 @@ def api_backend_switch():
             machine_id = machine.get("machine_id")
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
             try:
-                engine, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
+                resolved_runtime_model = resolve_runtime_model(machine, backend, model_id)
             except (ValueError, StopIteration) as exc:
                 results.append({
                     "machine": machine_id,
@@ -2355,11 +2365,23 @@ def api_backend_switch():
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
 
+                llm_hardware = _machine_llm_hardware(machine)
+                # Translate UI backend → concrete runtime backend
+                if backend == "custom":
+                    if llm_hardware == "apple":
+                        resolved_backend = "mlx"
+                    elif llm_hardware == "nvidia":
+                        resolved_backend = "trtllm"
+                    else:
+                        raise ValueError(f"Unsupported hardware for custom backend: {llm_hardware}")
+                else:
+                    resolved_backend = backend
+
                 requests.post(f"{base_url}/api/engine/stop", timeout=30)
 
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"engine": engine, "model": resolved_model},
+                    json={"backend": resolved_backend, "model": resolved_runtime_model},
                     timeout=300,
                 )
 
@@ -2373,8 +2395,8 @@ def api_backend_switch():
                     results.append({
                         "machine": machine_id,
                         "status": "ok",
-                        "engine": engine,
-                        "model": resolved_model,
+                        "backend": resolved_backend,
+                        "model": resolved_runtime_model,
                     })
             except Exception as exc:
                 results.append({
@@ -2389,14 +2411,6 @@ def api_backend_switch():
         return jsonify({"status": "error", "error": str(exc)}), 500
     finally:
         backend_switch_in_progress = False
-
-
-@app.post("/api/backend/select")
-def backend_select_disabled():
-    return jsonify({
-        "ok": False,
-        "error": "backend/select is deprecated. Use /api/backend/switch."
-    }), 410
 
 
 @app.get("/api/backend/switch/<switch_id>/status")
@@ -2478,7 +2492,7 @@ def api_agent_switch_backend(machine_id: str):
 
     try:
         response = requests.post(
-            f"{agent_base_url}/api/backend/select",
+            f"{agent_base_url}/api/engine/start",
             json={"backend": agent_backend, "model": resolved_model},
             timeout=600,
         )
@@ -2516,7 +2530,7 @@ def api_agent_load_model(machine_id: str):
 
     try:
         response = requests.post(
-            f"{agent_base_url}/api/backend/select",
+            f"{agent_base_url}/api/engine/start",
             json={"backend": agent_backend, "model": resolved_model},
             timeout=600,
         )
@@ -2606,7 +2620,7 @@ def api_agent_comfy_health(machine_id: str):
         return jsonify({"error": str(e), "ok": False}), 500
 @app.post("/api/agents/<machine_id>/backend/select")
 def api_backend_select(machine_id: str):
-    """Proxy backend selection to agent."""
+    """Deprecated endpoint kept for compatibility; callers should use /api/agents/<machine_id>/engine/start."""
     machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
     if not machine:
         return jsonify({"error": f"Unknown machine_id: {machine_id}", "ok": False}), 404
@@ -2616,17 +2630,7 @@ def api_backend_select(machine_id: str):
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
 
     try:
-        from flask import request as flask_request
-        response = requests.post(
-            f"{agent_base_url}/api/backend/select",
-            json=flask_request.get_json(),
-            timeout=600,
-        )
-        return jsonify(response.json()), response.status_code
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Agent unreachable", "ok": False}), 502
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Backend selection timed out", "ok": False}), 504
+        return jsonify({"error": "backend/select is deprecated. Use /api/agents/<machine_id>/engine/start.", "ok": False}), 410
     except Exception as e:
         return jsonify({"error": str(e), "ok": False}), 500
 
