@@ -1373,6 +1373,10 @@ async def _check_backend_health(backend: str) -> Dict[str, Any]:
     ollama_base = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
     comfy_host = CFG.get("comfyui", {}).get("host", "127.0.0.1")
     comfy_port = CFG.get("comfyui", {}).get("port", 8188)
+    mlx_host = os.environ.get("MLX_HOST", "127.0.0.1")
+    mlx_port = int(os.environ.get("MLX_PORT", "8321"))
+    trtllm_host = os.environ.get("TRTLLM_HOST", "127.0.0.1")
+    trtllm_port = int(os.environ.get("TRTLLM_PORT", "8000"))
 
     if backend == "ollama":
         healthy = await check_ollama_available(ollama_base)
@@ -1390,6 +1394,24 @@ async def _check_backend_health(backend: str) -> Dict[str, Any]:
         except Exception:
             healthy = False
         return {"name": "comfyui", "healthy": healthy, "url": f"http://{comfy_host}:{comfy_port}"}
+    elif backend == "mlx":
+        url = f"http://{mlx_host}:{mlx_port}/v1/models"
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(url)
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        return {"name": "mlx", "healthy": healthy, "url": url}
+    elif backend == "trtllm":
+        url = f"http://{trtllm_host}:{trtllm_port}/v1/models"
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(url)
+                healthy = r.status_code == 200
+        except Exception:
+            healthy = False
+        return {"name": "trtllm", "healthy": healthy, "url": url}
     return {"name": backend, "healthy": False, "error": "unknown backend"}
 
 
@@ -1535,10 +1557,10 @@ async def start_engine(req: EngineStartRequest):
         _track_engine_task(engine, task)
         return {"status": "starting", "engine": engine, "accepted": True}
 
-    if engine in ["trtllm", "mlx"] and not req.model:
+    if engine == "trtllm" and not req.model:
         return JSONResponse(status_code=400, content={
             "status": "error",
-            "error": "Model required for custom backend"
+            "error": "Model required for trtllm backend"
         })
 
     result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
@@ -1596,7 +1618,7 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
 async def backend_status():
     """Return status of all backends."""
     statuses = {}
-    for b in ("ollama", "vllm", "comfyui"):
+    for b in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
         try:
             statuses[b] = await _check_backend_health(b)
         except Exception as e:

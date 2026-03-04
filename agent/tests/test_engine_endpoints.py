@@ -80,3 +80,34 @@ def test_comfy_health_exposes_status(monkeypatch):
 
     assert payload["running"] is True
     assert payload["status"] == "healthy"
+
+
+def test_engine_start_mlx_without_model(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
+
+    async def fake_run_agent_script(*_args):
+        return {"ok": True}
+
+    monkeypatch.setattr(mod, "_run_agent_script", fake_run_agent_script)
+
+    response = asyncio.run(mod.start_engine(mod.EngineStartRequest(engine="mlx")))
+
+    assert response["engine"] == "mlx"
+    assert response["status"] == "started"
+    assert response["accepted"] is True
+
+
+def test_backend_status_includes_mlx_and_trtllm(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
+
+    async def fake_check_backend_health(backend):
+        return {"name": backend, "healthy": True}
+
+    monkeypatch.setattr(mod, "_check_backend_health", fake_check_backend_health)
+
+    payload = asyncio.run(mod.backend_status())
+
+    assert "mlx" in payload.backends
+    assert "trtllm" in payload.backends

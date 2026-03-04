@@ -22,10 +22,6 @@ wait_ready() {
 
 start() {
   local model="${1:-}"
-  if [[ -z "${model}" ]]; then
-    echo "ERROR: model required" >&2
-    return 2
-  fi
 
   if [[ ! -x "${PY}" ]]; then
     echo "mlx not installed. Run ./scripts/install_macos_mlx.sh" >&2
@@ -37,6 +33,10 @@ start() {
     nohup "${PY}" -m uvicorn agent.backends.mlx.server:app --host "${MLX_HOST}" --port "${MLX_PORT}" >>"${REPO_ROOT}/agent/log/mlx.log" 2>&1 &
     echo $! >"${MLX_PIDFILE}"
   )
+
+  if [[ -n "${model}" ]]; then
+    echo "INFO: mlx start received model argument '${model}', backend will use its default model selection" >&2
+  fi
 
   wait_ready
 }
