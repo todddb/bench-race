@@ -202,6 +202,12 @@ start_mlx(){
     exit 2
   fi
 
+  local model_dir="${AGENT_DIR}/models/mlx/${model_name}"
+  if [[ ! -d "$model_dir" ]]; then
+    echo "ERROR: MLX model directory not found: $model_dir" >&2
+    exit 3
+  fi
+
   # Always stop stale mlx before start to ensure deterministic restart behavior.
   MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" stop >>"$MLX_LOGFILE" 2>&1 || true
 
@@ -232,6 +238,12 @@ start_trtllm(){
   if [[ -z "$model_dir" ]]; then
     echo "ERROR: model argument required for trtllm" >&2
     exit 2
+  fi
+
+  local trt_model_dir="${AGENT_DIR}/models/trtllm/${model_dir}"
+  if [[ ! -d "$trt_model_dir" ]]; then
+    echo "ERROR: TRT model directory not found: $trt_model_dir" >&2
+    exit 3
   fi
 
   TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start "$model_dir" >>"$TRTLLM_LOGFILE" 2>&1
