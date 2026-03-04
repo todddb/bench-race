@@ -2865,8 +2865,8 @@ const modelIdsForDropdown = (registry, selectedBackend = "") => {
   return selectedModels
     .filter((model) => model && typeof model === "object")
     .map((model) => {
-      const value = model.display_name || model.id;
-      const label = model.display_name || model.id || value;
+      const value = model.id;
+      const label = model.display_name || model.id;
       return value ? { value, label } : null;
     })
     .filter(Boolean);
@@ -3052,13 +3052,13 @@ const applyBackend = async (backend) => {
   updateBackendStatus("starting", "Switching...");
 
   try {
-    const selectedModel = document.getElementById("model")?.value || "";
+    const selectedModelId = document.getElementById("model")?.value || "";
     const resp = await fetch("/api/backend/switch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         backend,
-        model: selectedModel,
+        model_id: selectedModelId,
       }),
     });
 

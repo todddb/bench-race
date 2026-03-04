@@ -1563,10 +1563,20 @@ async def start_engine(req: EngineStartRequest):
             content={"status": "error", "error": "Model required"},
         )
 
-    result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
-    if result.get("ok"):
-        return {"status": "started", "engine": engine, "accepted": True}
-    return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
+    try:
+        result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
+        if result.get("ok"):
+            return {"status": "started", "engine": engine, "accepted": True}
+        raise subprocess.CalledProcessError(
+            returncode=int(result.get("returncode") or 1),
+            cmd="start-backend",
+            stderr=result.get("stderr") or result.get("error") or "Unknown error",
+        )
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "engine": engine, "accepted": True, "error": str(e.stderr or str(e))},
+        )
 
 
 @app.post("/api/engine/stop")

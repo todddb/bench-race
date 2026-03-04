@@ -2221,41 +2221,59 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
         return {"phase": "error", "detail": str(exc), "backend": None}
 
 
-def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, selected_model: str) -> str:
-    """Resolve UI-selected model name into backend runtime model identifier for a machine."""
-    model_name = (selected_model or "").strip()
-    if not model_name:
-        return model_name
+def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
+    """Resolve registry model_id into backend runtime identifier and engine for a machine."""
+    selected_id = (model_id or "").strip()
+    if not selected_id:
+        raise ValueError("model_id is required")
 
     registry = load_models_registry()
-    vendor = str(machine.get("vendor") or detect_vendor(machine) or "apple").strip().lower()
-    if vendor not in {"apple", "nvidia"}:
-        vendor = "apple"
+    gpu_type = str(
+        machine.get("gpu_type")
+        or (machine.get("gpu") or {}).get("type")
+        or detect_vendor(machine)
+        or ""
+    ).strip().lower()
+
+    if backend == "custom":
+        custom_models = registry.get("custom", [])
+        model_entry = next(
+            (m for m in custom_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id),
+            None,
+        )
+        if not model_entry:
+            raise ValueError(f"Unknown custom model id: {selected_id}")
+
+        if gpu_type == "nvidia":
+            resolved_model = str(model_entry.get("trt-llm_engine_dir") or "").strip()
+            if not resolved_model:
+                raise ValueError(f"Missing trt-llm_engine_dir for model id: {selected_id}")
+            return "trtllm", resolved_model
+        if gpu_type == "apple":
+            resolved_model = str(model_entry.get("mlx_hf_id") or "").strip()
+            if not resolved_model:
+                raise ValueError(f"Missing mlx_hf_id for model id: {selected_id}")
+            return "mlx", resolved_model
+        raise ValueError(f"Unsupported gpu_type: {gpu_type or 'missing'}")
 
     if backend == "ollama":
-        for item in registry.get("ollama", []):
-            if not isinstance(item, dict):
-                continue
-            if model_name in {
-                str(item.get("display_name") or "").strip(),
-                str(item.get("id") or "").strip(),
-                str(item.get("apple") or "").strip(),
-                str(item.get("nvidia") or "").strip(),
-            }:
-                candidate = str(item.get(vendor) or item.get("apple") or item.get("nvidia") or "").strip()
-                return candidate or model_name
-        return model_name
+        ollama_models = registry.get("ollama", [])
+        model_entry = next(
+            (m for m in ollama_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id),
+            None,
+        )
+        if not model_entry:
+            raise ValueError(f"Unknown ollama model id: {selected_id}")
 
-    if backend in {"custom", "mlx", "trtllm"}:
-        for item in registry.get("custom", []):
-            if not isinstance(item, dict):
-                continue
-            if model_name in {
-                str(item.get("display_name") or "").strip(),
-                str(item.get("id") or "").strip(),
-            }:
-                return str(item.get("id") or "").strip() or model_name
-    return model_name
+        resolved_model = str(model_entry.get("apple") if gpu_type == "apple" else model_entry.get("nvidia") or "").strip()
+        if not resolved_model:
+            raise ValueError(f"Missing backend identifier for model id: {selected_id}")
+        return "ollama", resolved_model
+
+    if backend in {"mlx", "trtllm"}:
+        return backend, selected_id
+
+    raise ValueError(f"Unsupported backend: {backend}")
 
 
 BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -2267,7 +2285,7 @@ def api_backend_switch():
     try:
         data = request.get_json(force=True) or {}
         backend = str(data.get("backend") or "").strip().lower()
-        model = str(data.get("model") or "").strip()
+        model_id = str(data.get("model_id") or "").strip()
 
         if not backend:
             return jsonify({"status": "error", "error": "backend field required"}), 400
@@ -2275,8 +2293,18 @@ def api_backend_switch():
         if backend not in {"custom", "ollama", "mlx", "trtllm"}:
             return jsonify({"status": "error", "error": "backend must be custom, ollama, mlx, or trtllm"}), 400
 
-        if backend == "custom" and not model:
-            return jsonify({"status": "error", "error": "Model required for custom backend"}), 400
+        if not model_id:
+            return jsonify({"status": "error", "error": "model_id field required"}), 400
+
+        registry = load_models_registry()
+        if backend == "custom":
+            custom_models = [m for m in registry.get("custom", []) if isinstance(m, dict)]
+            if not any(str(m.get("id") or "").strip() == model_id for m in custom_models):
+                return jsonify({"status": "error", "error": f"Unknown custom model id: {model_id}"}), 400
+        elif backend == "ollama":
+            ollama_models = [m for m in registry.get("ollama", []) if isinstance(m, dict)]
+            if not any(str(m.get("id") or "").strip() == model_id for m in ollama_models):
+                return jsonify({"status": "error", "error": f"Unknown ollama model id: {model_id}"}), 400
 
         machines_cfg = load_machines_config()
         machines = machines_cfg.get("machines", []) if isinstance(machines_cfg, dict) else machines_cfg
@@ -2285,27 +2313,15 @@ def api_backend_switch():
         for machine in machines:
             machine_id = machine.get("machine_id")
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
-            gpu_type = str(
-                machine.get("gpu_type")
-                or (machine.get("gpu") or {}).get("type")
-                or detect_vendor(machine)
-                or ""
-            ).strip().lower()
-
-            if backend == "custom":
-                if gpu_type == "nvidia":
-                    engine = "trtllm"
-                elif gpu_type == "apple":
-                    engine = "mlx"
-                else:
-                    results.append({
-                        "machine": machine_id,
-                        "status": "error",
-                        "error": f"Unsupported gpu_type: {gpu_type or 'missing'}",
-                    })
-                    continue
-            else:
-                engine = backend
+            try:
+                engine, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
+            except ValueError as exc:
+                results.append({
+                    "machine": machine_id,
+                    "status": "error",
+                    "error": str(exc),
+                })
+                continue
 
             try:
                 if not base_url:
@@ -2329,7 +2345,7 @@ def api_backend_switch():
 
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"engine": engine, "model": model or None},
+                    json={"engine": engine, "model": resolved_model},
                     timeout=60,
                 )
 
@@ -2344,7 +2360,7 @@ def api_backend_switch():
                         "machine": machine_id,
                         "status": "ok",
                         "engine": engine,
-                        "model": model or None,
+                        "model": resolved_model,
                     })
             except Exception as exc:
                 results.append({
@@ -2436,8 +2452,10 @@ def api_agent_switch_backend(machine_id: str):
     if backend not in {"ollama", "custom", "mlx", "trtllm"}:
         return jsonify({"error": "backend must be ollama, custom, mlx, or trtllm", "ok": False}), 400
 
-    agent_backend = build_backend_switch_message(machine, backend, "single-agent-switch")["payload"]["target"] if backend == "custom" else backend
-    resolved_model = _resolve_model_for_machine(machine, agent_backend, model_id)
+    try:
+        agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "ok": False}), 400
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
@@ -2471,8 +2489,10 @@ def api_agent_load_model(machine_id: str):
 
     status = _proxy_backend_status(machine)
     backend = (status.get("backend") or "ollama").lower()
-    agent_backend = backend
-    resolved_model = _resolve_model_for_machine(machine, agent_backend, model_id)
+    try:
+        agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "ok": False}), 400
 
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
