@@ -73,7 +73,6 @@ from agent.reset_helpers import (
     COMFYUI_START_TIMEOUT_S,
     HEALTH_POLL_INTERVAL_S,
 )
-from central.config_loader import load_models_registry
 
 # ---------------------------
 # Logging
@@ -1471,24 +1470,6 @@ def _reset_idle_timer():
         _BACKEND_IDLE_TASK = asyncio.create_task(_idle_timeout_watcher())
 
 
-def registry_id_to_ollama_tag(model_id: str) -> str:
-    """Translate a registry model id to its ollama tag when available."""
-    registry = load_models_registry()
-
-    for model in registry.get("ollama", []):
-        if model.get("id") == model_id:
-            ollama_tag = model.get("apple") or model.get("nvidia")
-            if isinstance(ollama_tag, str) and ollama_tag:
-                slog.info(
-                    "backend_select_registry_id_translated",
-                    registry_id=model_id,
-                    ollama_tag=ollama_tag,
-                )
-                return ollama_tag
-
-    return model_id
-
-
 @app.post("/api/backend/select")
 async def select_backend(req: BackendSelectRequest):
     """
@@ -1501,7 +1482,7 @@ async def select_backend(req: BackendSelectRequest):
     if backend not in ("ollama", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
 
-    model_to_use = registry_id_to_ollama_tag(req.model) if req.model else req.model
+    model_to_use = req.model
     if backend == "ollama" and req.model:
         tags_url = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434").rstrip("/") + "/api/tags"
         installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags, tags_url)
@@ -2555,24 +2536,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 slog.info("job_started", job_id=job_id, backend=backend_selected)
                 result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
             else:
-                # Step 1: Translate registry ID -> ollama_tag
-                try:
-                    translated_model = registry_id_to_ollama_tag(model)
-                    if translated_model != model:
-                        log.info(
-                            "Translated registry id '%s' -> '%s' for job dispatch",
-                            model,
-                            translated_model,
-                        )
-                        model = translated_model
-                except Exception as e:
-                    log.warning(
-                        "Failed to translate registry id '%s': %s",
-                        model,
-                        e,
-                    )
-
-                # Step 2: Apply quant resolution
+                # Resolve Ollama pull name based on installed tags.
                 try:
                     installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags)
                     resolved_model = resolved_ollama_pull_name({"model": model}, installed_tags)
