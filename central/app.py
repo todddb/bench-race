@@ -1777,14 +1777,21 @@ def model_satisfied(selected_model: str, installed_models: List[str]) -> bool:
     return any(tag.startswith(prefix) for tag in installed_models)
 
 
-def _resolved_validation_model_for_machine(machine: Dict[str, Any], backend: str, selected_model: str) -> str:
+def _resolved_validation_model_for_machine(machine: Dict[str, Any], backend: str, selected_model: str) -> Optional[str]:
     """Resolve selected model into the runtime identifier used for availability checks."""
     model_name = (selected_model or "").strip()
+    active_backend = (backend or "").lower()
     if not model_name:
-        return model_name
-    if (backend or "").lower() != "ollama":
-        return model_name
-    return _resolve_model_for_machine(machine, "ollama", model_name)
+        return None
+
+    # Prevent cross-backend resolution
+    if active_backend == "ollama" and model_name.endswith("-custom"):
+        return None
+
+    if active_backend == "custom" and not model_name.endswith("-custom"):
+        return None
+
+    return _resolve_model_for_machine(machine, active_backend, model_name)
 
 
 def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
@@ -2286,18 +2293,16 @@ BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
 BACKEND_SWITCH_LOCK = threading.Lock()
 SWITCH_LOCK = Lock()
 SWITCH_ACTIVE = False
+backend_switch_in_progress = False
 
 
 @app.post("/api/backend/switch")
 def api_backend_switch():
-    global SWITCH_ACTIVE
-    with SWITCH_LOCK:
-        if SWITCH_ACTIVE:
-            return jsonify({
-                "status": "error",
-                "error": "Switch already in progress",
-            }), 409
-        SWITCH_ACTIVE = True
+    global backend_switch_in_progress
+    if backend_switch_in_progress:
+        return jsonify({"ok": False, "error": "Switch already in progress"}), 409
+
+    backend_switch_in_progress = True
 
     try:
         data = request.get_json(force=True) or {}
@@ -2349,7 +2354,7 @@ def api_backend_switch():
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
                     json={"engine": engine, "model": resolved_model},
-                    timeout=60,
+                    timeout=300,
                 )
 
                 if resp.status_code != 200:
@@ -2377,15 +2382,14 @@ def api_backend_switch():
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
     finally:
-        with SWITCH_LOCK:
-            SWITCH_ACTIVE = False
+        backend_switch_in_progress = False
 
 
 @app.post("/api/backend/select")
-def deprecated_backend_select():
+def backend_select_disabled():
     return jsonify({
-        "status": "error",
-        "error": "backend/select is deprecated. Use backend/switch."
+        "ok": False,
+        "error": "backend/select is deprecated. Use /api/backend/switch."
     }), 410
 
 
@@ -2694,11 +2698,15 @@ def api_capabilities():
 @app.get("/api/status")
 def api_status():
     selected_model = request.args.get("model")
-    num_ctx = int(request.args.get("num_ctx", 4096))
+    try:
+        num_ctx = int(request.args.get("num_ctx", 4096))
+    except Exception:
+        num_ctx = 4096
     required = _required_models()
     statuses = []
     for m in MACHINES:
         last_checked = time.time()
+        resolved_selected_model = None
         try:
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
@@ -2706,7 +2714,13 @@ def api_status():
             cap["agent_reachable"] = True
             active_backend = (cap.get("active_backend") or "ollama").lower()
             available_llm = _available_llm_models(cap, active_backend)
-            resolved_selected_model = _resolved_validation_model_for_machine(m, active_backend, selected_model or "")
+            try:
+                resolved_selected_model = _resolved_validation_model_for_machine(
+                    m, active_backend, selected_model or ""
+                )
+            except Exception as e:
+                app.logger.warning(f"Model resolution failed in api_status: {e}")
+                resolved_selected_model = None
             has_selected_model = bool(resolved_selected_model and model_satisfied(resolved_selected_model, available_llm))
             missing_required = {
                 "llm": [
@@ -2784,7 +2798,8 @@ def api_status():
                     "runtime_metrics": RUNTIME_METRICS.get(m.get("machine_id")),
                 }
             )
-    return jsonify({"model": selected_model, "required": required, "machines": statuses})
+    response_dict = {"model": selected_model, "required": required, "machines": statuses}
+    return jsonify(response_dict), 200
 
 
 @app.get("/api/runtime_metrics")
