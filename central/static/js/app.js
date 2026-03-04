@@ -1231,6 +1231,9 @@ function applyStatusResponse(data) {
 
 async function fetchStatus() {
   if (switchingInProgress) return null;
+  if (backendSwitch?.inProgress) {
+    return null;
+  }
   const selectedModel = document.getElementById("model")?.value;
   const numCtx = document.getElementById("num_ctx")?.value;
   const params = new URLSearchParams();

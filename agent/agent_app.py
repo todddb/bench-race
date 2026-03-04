@@ -1593,11 +1593,11 @@ async def start_engine(req: EngineStartRequest):
 
 
 @app.post("/api/engine/stop")
-async def stop_engine(req: EngineStopRequest):
+async def stop_engine(req: Optional[EngineStopRequest] = None):
     """
     Stop one backend engine or all inference engines when engine is omitted.
     """
-    engine = (req.engine or "").strip().lower()
+    engine = ((req.engine if req else "") or "").strip().lower()
 
     if not engine:
         engines = ["ollama", "mlx", "trtllm"]
@@ -1607,7 +1607,7 @@ async def stop_engine(req: EngineStopRequest):
             if not result.get("ok"):
                 errors[target] = result.get("stderr", result.get("error", "Unknown error"))
         if not errors:
-            return {"status": "stopped", "engine": "all", "accepted": True}
+            return {"ok": True}
         return JSONResponse(status_code=500, content={"status": "error", "engine": "all", "accepted": True, "errors": errors})
 
     if engine == "comfyui":
@@ -1616,11 +1616,11 @@ async def stop_engine(req: EngineStopRequest):
             existing.cancel()
         task = asyncio.create_task(_stop_comfyui())
         _track_engine_task(engine, task)
-        return {"status": "stopping", "engine": engine, "accepted": True}
+        return {"ok": True}
 
     result = await _run_agent_script("stop-backend", engine)
     if result.get("ok"):
-        return {"status": "stopped", "engine": engine, "accepted": True}
+        return {"ok": True}
     return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
 
 
