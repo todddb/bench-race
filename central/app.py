@@ -2264,75 +2264,80 @@ BACKEND_SWITCH_LOCK = threading.Lock()
 
 @app.post("/api/backend/switch")
 def api_backend_switch():
-    payload = request.get_json(silent=True) or {}
-    backend = str(payload.get("backend") or "").strip().lower()
-    if backend not in {"ollama", "custom", "mlx", "trtllm"}:
-        return jsonify({"ok": False, "error": "backend must be ollama, custom, mlx, or trtllm"}), 400
+    try:
+        payload = request.get_json(silent=True) or {}
+        backend = str(payload.get("backend") or "").strip().lower()
+        model = str(payload.get("model") or "").strip()
+        if backend not in {"custom", "ollama"}:
+            return jsonify({"results": [], "error": "backend must be custom or ollama"}), 400
+        if not model:
+            return jsonify({"results": [], "error": "model is required"}), 400
 
-    result = do_backend_switch(MACHINES, backend)
-    switch_id = result.get("request_id")
-    dispatch = result.get("dispatch", [])
-    with BACKEND_SWITCH_LOCK:
-        BACKEND_SWITCH_JOBS[switch_id] = {
-            "backend": backend,
-            "created_at": int(time.time()),
-            "agents": {m.get("machine_id"): "starting" for m in MACHINES if m.get("machine_id")},
-            "dispatch": dispatch,
-        }
-    for item in dispatch:
-        if not item.get("ok"):
-            socketio.emit("agent_event", {
-                "machine_id": item.get("machine_id"),
-                "type": "backend_switch_status",
-                "payload": {
-                    "switch_id": switch_id,
-                    "phase": "error",
-                    "detail": f"Dispatch failed: {item.get('error')}",
-                    "timestamp": int(time.time()),
-                },
-            })
-    return jsonify({"ok": True, "switch_id": switch_id, "dispatch": dispatch})
+        machines = load_machines_config()
+        results: List[Dict[str, Any]] = []
 
+        for machine in machines:
+            machine_id = machine.get("machine_id")
+            base_url = str(machine.get("agent_base_url") or "").rstrip("/")
+            gpu_type = str((machine.get("gpu") or {}).get("type") or detect_vendor(machine) or "").strip().lower()
 
-@app.post("/api/backend/custom_switch")
-def api_backend_custom_switch():
-    machines = load_machines_config()
-    results = []
-
-    for machine in machines:
-        machine_id = machine.get("machine_id")
-        base_url = str(machine.get("agent_base_url") or "").rstrip("/")
-        gpu_type = str((machine.get("gpu") or {}).get("type") or "").strip().lower()
-
-        try:
-            if not base_url:
-                raise ValueError("Missing agent_base_url")
-
-            requests.post(
-                f"{base_url}/api/engine/stop",
-                json={"engine": "ollama"},
-                timeout=10,
-            )
-
-            if gpu_type == "apple":
-                target_engine = "mlx"
-            elif gpu_type == "nvidia":
-                target_engine = "trtllm"
+            if backend == "custom":
+                if gpu_type == "apple":
+                    engine = "mlx"
+                elif gpu_type == "nvidia":
+                    engine = "trtllm"
+                else:
+                    results.append({
+                        "machine": machine_id,
+                        "status": "error",
+                        "engine": "custom",
+                        "model": model,
+                        "error": f"Unknown gpu type: {gpu_type or 'missing'}",
+                    })
+                    continue
             else:
-                raise ValueError(f"Unknown gpu type: {gpu_type}")
+                engine = backend
 
-            start_resp = requests.post(
-                f"{base_url}/api/engine/start",
-                json={"engine": target_engine},
-                timeout=30,
-            )
-            start_resp.raise_for_status()
+            try:
+                if not base_url:
+                    raise ValueError("Missing agent_base_url")
 
-            results.append({"machine": machine_id, "status": "ok"})
-        except Exception as e:
-            results.append({"machine": machine_id, "status": "error", "error": str(e)})
+                for other in ("ollama", "mlx", "trtllm"):
+                    if other == engine:
+                        continue
+                    requests.post(
+                        f"{base_url}/api/engine/stop",
+                        json={"engine": other},
+                        timeout=15,
+                    )
 
-    return jsonify({"results": results})
+                start_resp = requests.post(
+                    f"{base_url}/api/engine/start",
+                    json={"engine": engine, "model": model},
+                    timeout=120,
+                )
+                start_data = start_resp.json() if start_resp.content else {}
+                if not start_resp.ok:
+                    raise RuntimeError(start_data.get("error") or f"HTTP {start_resp.status_code}")
+
+                results.append({
+                    "machine": machine_id,
+                    "status": "ok",
+                    "engine": engine,
+                    "model": model,
+                })
+            except Exception as exc:
+                results.append({
+                    "machine": machine_id,
+                    "status": "error",
+                    "engine": engine,
+                    "model": model,
+                    "error": str(exc),
+                })
+
+        return jsonify({"results": results})
+    except Exception as exc:
+        return jsonify({"results": [], "error": str(exc)}), 500
 
 
 @app.get("/api/backend/switch/<switch_id>/status")

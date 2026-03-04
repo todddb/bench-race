@@ -3053,15 +3053,17 @@ const applyBackend = async (backend) => {
 
   try {
     if (backend === "custom") {
-      const resp = await fetch("/api/backend/custom_switch", {
+      const selectedModel = document.getElementById("model")?.value || "";
+      const selectedBackend = backend;
+      const resp = await fetch("/api/backend/switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ backend: selectedBackend, model: selectedModel }),
       });
-      const data = await resp.json();
       if (!resp.ok) {
-        throw new Error(data.error || "custom switch failed");
+        throw new Error(`HTTP ${resp.status}`);
       }
+      const data = await resp.json();
 
       const results = Array.isArray(data.results) ? data.results : [];
       machineIds.forEach((machineId) => {
