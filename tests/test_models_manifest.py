@@ -71,7 +71,7 @@ def test_agent_switch_and_load_model_proxy(monkeypatch):
         load_resp = client.post("/api/agent/agent1/load_model", json={"model_id": "m2"})
         assert load_resp.status_code == 200
 
-    assert called[0]["url"].endswith("/api/backend/select")
+    assert called[0]["url"].endswith("/api/engine/start")
     assert called[0]["json"]["backend"] == "ollama"
     assert called[0]["json"]["model"] == "m1"
     assert called[1]["json"]["model"] == "m2"

@@ -1325,7 +1325,7 @@ async def health():
 # ---------------------------
 
 # Track which inference backend is currently active
-_ACTIVE_BACKEND: Optional[str] = None  # "ollama", "vllm", "comfyui", or None
+_ACTIVE_BACKEND: Optional[str] = None  # "ollama", "mlx", "trtllm", "vllm", "comfyui", or None
 _BACKEND_KEEP_WARM: bool = False
 _BACKEND_IDLE_SECS: int = int(os.environ.get("AGENT_BACKEND_IDLE_SECS", "0"))
 _BACKEND_IDLE_TASK: Optional[asyncio.Task] = None
@@ -1346,7 +1346,8 @@ class BackendStatusResponse(BaseModel):
 
 
 class EngineStartRequest(BaseModel):
-    engine: str
+    engine: Optional[str] = None
+    backend: Optional[str] = None
     model: Optional[str] = None
 
 
@@ -1535,9 +1536,16 @@ async def start_engine(req: EngineStartRequest):
     Start backend engine asynchronously so callers can poll readiness separately.
     """
     global _ACTIVE_BACKEND
-    engine = (req.engine or "").strip().lower()
+    requested_backend = getattr(req, "backend", None)
+    engine = (req.engine or requested_backend or "").strip().lower()
+    valid_backends = {"ollama", "mlx", "trtllm"}
     if not engine:
         raise HTTPException(status_code=400, detail="engine is required")
+    if engine not in valid_backends and engine != "comfyui":
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid backend '{engine}'"},
+        )
 
     if engine == "comfyui":
         existing = _ENGINE_TASKS.get(engine)
@@ -2483,12 +2491,24 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     vllm_cfg = CFG.get("vllm", {})
     vllm_base_url = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
 
-    # If vLLM is the active backend, try it first
-    use_vllm = _ACTIVE_BACKEND == "vllm"
-
     backend_selected = None
+    active_backend = (_ACTIVE_BACKEND or "").strip().lower()
+    if active_backend not in {"ollama", "vllm", "mlx", "trtllm"}:
+        result = {
+            "error": "No active backend",
+            "engine": active_backend or None,
+            "model": model,
+            "fallback_reason": "no_active_backend",
+            "total_ms": 0,
+            "tokens_generated": 0,
+        }
+        slog.info("job_backend_selected", job_id=job_id, backend="none", reason="no_active_backend")
+        ev = Event(job_id=job_id, type="job_done", payload=result)
+        await _broadcast_event(ev)
+        return
+
     try:
-        if use_vllm:
+        if active_backend == "vllm":
             # Try vLLM first
             vllm_available = await check_vllm_available(vllm_base_url)
             if vllm_available:
@@ -2521,7 +2541,9 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 slog.info("job_started", job_id=job_id, backend=backend_selected)
                 result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="vllm_unreachable")
         else:
-            # Default: try Ollama
+            if active_backend != "ollama":
+                raise RuntimeError(f"Active backend '{active_backend}' is not supported for LLM jobs")
+            # Explicit ollama backend only
             available = await check_ollama_available(ollama_base_url)
             if not available:
                 backend_selected = "mock"
@@ -2595,7 +2617,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                     # Reset idle timer on activity
                     _reset_idle_timer()
     except Exception as e:
-        backend_selected = "mock"
+        backend_selected = active_backend or "unknown"
         slog.info(
             "job_backend_selected",
             job_id=job_id,
@@ -2603,10 +2625,15 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
             reason="stream_error",
             error=str(e),
         )
-        log.warning("LLM stream failed (%s); falling back to mock stream", e)
-
-        slog.info("job_started", job_id=job_id, backend=backend_selected)
-        result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="stream_error")
+        log.warning("LLM stream failed (%s); returning error", e)
+        result = {
+            "error": str(e),
+            "engine": backend_selected,
+            "model": model,
+            "fallback_reason": "stream_error",
+            "total_ms": 0,
+            "tokens_generated": 0,
+        }
 
     # Log job completion
     slog.info(
