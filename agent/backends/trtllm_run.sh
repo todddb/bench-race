@@ -4,85 +4,65 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MODELS_DIR="${REPO_ROOT}/agent/models/trtllm"
-HF_CACHE_DIR="${HOME}/.cache/huggingface"
-CONTAINER_NAME="${TRTLLM_CONTAINER_NAME:-bench-race-trtllm}"
+CONTAINER_NAME="bench-race-trtllm"
 TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3}"
 TRTLLM_PORT="${TRTLLM_PORT:-8000}"
-TRTLLM_MODEL="${TRTLLM_MODEL:-distilgpt2}"
-TRTLLM_ENGINE_QUANT="${TRTLLM_ENGINE_QUANT:-auto}"
-TRTLLM_MAX_BATCH_SIZE="${TRTLLM_MAX_BATCH_SIZE:-2048}"
-DETACH="${TRTLLM_DETACH:-true}"
+READY_TIMEOUT_SECONDS="120"
 
-mkdir -p "${MODELS_DIR}" "${HF_CACHE_DIR}"
+mkdir -p "${MODELS_DIR}"
 
-resolve_model_path() {
-  local model_name="${TRTLLM_MODEL}"
-  local quant="${TRTLLM_ENGINE_QUANT}"
-  if [[ "${model_name}" == *:* ]]; then
-    quant="${model_name##*:}"
-    model_name="${model_name%%:*}"
-  fi
-  local base="/workspace/trtllm/engines/${model_name}"
-  if [[ -d "${base}/${quant}" ]]; then
-    echo "${base}/${quant}"
-    return 0
-  fi
-  if [[ -d "${base}/float16" ]]; then
-    echo "${base}/float16"
-    return 0
-  fi
-  if [[ -d "${base}/bfloat16" ]]; then
-    echo "${base}/bfloat16"
-    return 0
-  fi
-  echo "${base}"
+wait_ready() {
+  local deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+  local url="http://127.0.0.1:${TRTLLM_PORT}/v1/models"
+  while (( SECONDS < deadline )); do
+    if curl -fsS --max-time 2 "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Timed out waiting for TRT-LLM health at ${url}" >&2
+  return 1
 }
 
 start() {
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-      echo "Container ${CONTAINER_NAME} already running."
-      return 0
-    fi
-    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  local model_folder="${1:-}"
+  if [[ -z "${model_folder}" ]]; then
+    echo "Usage: $0 start <model_folder>" >&2
+    return 2
   fi
 
-  local model_path
-  model_path="$(resolve_model_path)"
-  local docker_args=(
-    run --name "${CONTAINER_NAME}"
-    --gpus=all --ipc=host
-    --ulimit memlock=-1 --ulimit stack=67108864
-    -p "${TRTLLM_PORT}:8000"
-    -v "${MODELS_DIR}:/workspace/trtllm:ro"
-    -v "${HF_CACHE_DIR}:/root/.cache/huggingface:ro"
-  )
+  if [[ ! -d "${MODELS_DIR}/${model_folder}" ]]; then
+    echo "Model directory not found: ${MODELS_DIR}/${model_folder}" >&2
+    return 2
+  fi
 
-  [[ -n "${HUGGINGFACE_TOKEN:-}" ]] && docker_args+=( -e "HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}" )
-  [[ "${DETACH}" == "true" ]] && docker_args+=( -d )
+  docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
-  docker "${docker_args[@]}" "${TRTLLM_IMAGE}" \
-    trtllm-serve serve \
-      --backend tensorrt \
-      --max_batch_size "${TRTLLM_MAX_BATCH_SIZE}" \
-      --host 0.0.0.0 --port 8000 \
-      "${model_path}"
+  docker run -d \
+    --name "${CONTAINER_NAME}" \
+    --gpus all \
+    -p "${TRTLLM_PORT}:8000" \
+    -v "${MODELS_DIR}:/models" \
+    "${TRTLLM_IMAGE}" \
+    trtllm-serve "/models/${model_folder}" \
+      --host 0.0.0.0 \
+      --port 8000
+
+  wait_ready
 }
 
 stop() {
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-    echo "Stopped ${CONTAINER_NAME}."
-  else
-    echo "Container ${CONTAINER_NAME} not present."
-  fi
+  docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 }
 status() { docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"; }
 logs() { docker logs -f "${CONTAINER_NAME}"; }
 restart() { stop || true; start; }
 
 case "${1:-start}" in
-  start) start ;;
+  start) start "${2:-}" ;;
   stop) stop ;;
   restart) restart ;;
   status) status ;;

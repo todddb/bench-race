@@ -81,7 +81,7 @@ rm_pid(){ rm -f "$1"; }
 probe_url(){ curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
 probe_ollama(){ probe_url "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags"; }
 probe_mlx(){ probe_url "http://${MLX_HOST}:${MLX_PORT}/health"; }
-probe_trtllm(){ probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/v1/models" || probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/health"; }
+probe_trtllm(){ probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/v1/models"; }
 probe_comfyui(){ probe_url "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats"; }
 probe_agent(){ probe_url "http://127.0.0.1:${AGENT_PORT}/health"; }
 
@@ -211,9 +211,21 @@ start_trtllm(){
   stop_other_llm_backends trtllm
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
   [[ -x "$launcher" ]] || { err "Missing ${launcher}. Run ./scripts/install_trtllm.sh"; return 4; }
-  TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start >>"$TRTLLM_LOGFILE" 2>&1
+
+  local model_dir="${1:-}"
+  if [[ -z "$model_dir" ]]; then
+    model_dir="$(find "${AGENT_DIR}/models/trtllm" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | head -n 1 || true)"
+    if [[ -z "$model_dir" ]]; then
+      err "No TRT model specified. Available models:"
+      find "${AGENT_DIR}/models/trtllm" -mindepth 1 -maxdepth 1 -type d -printf '  - %f\n' 2>/dev/null | sort >&2 || true
+      return 2
+    fi
+    log "no TRT model specified; using first available model: ${model_dir}"
+  fi
+
+  TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start "$model_dir" >>"$TRTLLM_LOGFILE" 2>&1
   local cpid
-  cpid="$(docker inspect -f '{{.State.Pid}}' "${TRTLLM_CONTAINER_NAME:-bench-race-trtllm}" 2>/dev/null || true)"
+  cpid="$(docker inspect -f '{{.State.Pid}}' "bench-race-trtllm" 2>/dev/null || true)"
   [[ -n "$cpid" ]] && write_pid "$TRTLLM_PIDFILE" "$cpid"
   log "trtllm launched with pid ${cpid:-unknown}"
   wait_ready probe_trtllm "trtllm" 120 || true
@@ -315,7 +327,7 @@ case "$cmd" in
         fi
         ;;
       mlx) start_mlx ;;
-      trtllm) start_trtllm ;;
+      trtllm) start_trtllm "${2:-}" ;;
       comfyui) start_comfyui ;;
       *) err "Unknown backend: ${1:-}"; exit 2;;
     esac
