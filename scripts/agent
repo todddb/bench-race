@@ -193,13 +193,16 @@ start_mlx(){
   mkdir -p "$(dirname "$MLX_LOGFILE")"
   log "starting mlx"
   stop_other_llm_backends mlx
-  local py="${AGENT_DIR}/backends/mlx/.venv/bin/python"
-  [[ -x "$py" ]] || { err "mlx not installed. Run ./scripts/install_macos_mlx.sh"; return 4; }
-  (
-    cd "$REPO_ROOT"
-    nohup "$py" -m uvicorn agent.backends.mlx.server:app --host "$MLX_HOST" --port "$MLX_PORT" >>"$MLX_LOGFILE" 2>&1 &
-    echo $! >"$MLX_PIDFILE"
-  )
+  local model_name="${1:-}"
+  [[ -n "$model_name" ]] || { err "model required"; echo "ERROR: model required" >&2; return 2; }
+  local launcher="${AGENT_DIR}/backends/mlx_run.sh"
+  [[ -x "$launcher" ]] || { err "Missing ${launcher}"; return 4; }
+
+  MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" start "$model_name" >>"$MLX_LOGFILE" 2>&1
+  local pid
+  pid="$(pgrep -f "uvicorn agent.backends.mlx.server:app --host ${MLX_HOST} --port ${MLX_PORT}" | head -n 1 || true)"
+  [[ -n "$pid" ]] && write_pid "$MLX_PIDFILE" "$pid"
+  [[ -n "$pid" ]] || { err "mlx failed to start"; return 3; }
   log "mlx launched with pid $(read_pid "$MLX_PIDFILE")"
   wait_ready probe_mlx "mlx" 120
 }
@@ -213,22 +216,15 @@ start_trtllm(){
   [[ -x "$launcher" ]] || { err "Missing ${launcher}. Run ./scripts/install_trtllm.sh"; return 4; }
 
   local model_dir="${1:-}"
-  if [[ -z "$model_dir" ]]; then
-    model_dir="$(find "${AGENT_DIR}/models/trtllm" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | head -n 1 || true)"
-    if [[ -z "$model_dir" ]]; then
-      err "No TRT model specified. Available models:"
-      find "${AGENT_DIR}/models/trtllm" -mindepth 1 -maxdepth 1 -type d -printf '  - %f\n' 2>/dev/null | sort >&2 || true
-      return 2
-    fi
-    log "no TRT model specified; using first available model: ${model_dir}"
-  fi
+  [[ -n "$model_dir" ]] || { err "model required"; echo "ERROR: model required" >&2; return 2; }
 
   TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start "$model_dir" >>"$TRTLLM_LOGFILE" 2>&1
   local cpid
   cpid="$(docker inspect -f '{{.State.Pid}}' "bench-race-trtllm" 2>/dev/null || true)"
   [[ -n "$cpid" ]] && write_pid "$TRTLLM_PIDFILE" "$cpid"
+  [[ -n "$cpid" ]] || { err "trtllm failed to start"; return 3; }
   log "trtllm launched with pid ${cpid:-unknown}"
-  wait_ready probe_trtllm "trtllm" 120 || true
+  wait_ready probe_trtllm "trtllm" 120
 }
 stop_trtllm(){
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
@@ -326,7 +322,7 @@ case "$cmd" in
           log_ollama_models
         fi
         ;;
-      mlx) start_mlx ;;
+      mlx) start_mlx "${2:-}" ;;
       trtllm) start_trtllm "${2:-}" ;;
       comfyui) start_comfyui ;;
       *) err "Unknown backend: ${1:-}"; exit 2;;
@@ -335,9 +331,9 @@ case "$cmd" in
   stop-backend) case "${1:-}" in ollama) stop_ollama ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
   start-ollama) start_ollama ;;
   stop-ollama) stop_ollama ;;
-  start-mlx) start_mlx ;;
+  start-mlx) start_mlx "${1:-}" ;;
   stop-mlx) stop_mlx ;;
-  start-trtllm) start_trtllm ;;
+  start-trtllm) start_trtllm "${1:-}" ;;
   stop-trtllm) stop_trtllm ;;
   start-comfyui) start_comfyui ;;
   stop-comfyui) stop_comfyui ;;
