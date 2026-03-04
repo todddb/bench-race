@@ -196,15 +196,16 @@ start_mlx(){
   local launcher="${AGENT_DIR}/backends/mlx_run.sh"
   [[ -x "$launcher" ]] || { err "Missing ${launcher}"; return 4; }
 
+  local model_name="${1:-}"
+  if [[ -z "$model_name" ]]; then
+    echo "ERROR: model argument required for mlx" >&2
+    exit 2
+  fi
+
   # Always stop stale mlx before start to ensure deterministic restart behavior.
   MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" stop >>"$MLX_LOGFILE" 2>&1 || true
 
-  local model_name="${1:-}"
-  if [[ -n "$model_name" ]]; then
-    MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" start "$model_name" >>"$MLX_LOGFILE" 2>&1
-  else
-    MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" start >>"$MLX_LOGFILE" 2>&1
-  fi
+  MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" start "$model_name" >>"$MLX_LOGFILE" 2>&1
 
   local pid
   pid="$(read_pid "$MLX_PIDFILE")"
@@ -228,7 +229,10 @@ start_trtllm(){
   [[ -x "$launcher" ]] || { err "Missing ${launcher}. Run ./scripts/install_trtllm.sh"; return 4; }
 
   local model_dir="${1:-}"
-  [[ -n "$model_dir" ]] || { err "model required"; echo "ERROR: model required" >&2; return 2; }
+  if [[ -z "$model_dir" ]]; then
+    echo "ERROR: model argument required for trtllm" >&2
+    exit 2
+  fi
 
   TRTLLM_PORT="$TRTLLM_PORT" "$launcher" start "$model_dir" >>"$TRTLLM_LOGFILE" 2>&1
   local cpid

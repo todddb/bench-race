@@ -1557,11 +1557,11 @@ async def start_engine(req: EngineStartRequest):
         _track_engine_task(engine, task)
         return {"status": "starting", "engine": engine, "accepted": True}
 
-    if engine == "trtllm" and not req.model:
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "error": "Model required for trtllm backend"
-        })
+    if engine in ["trtllm", "mlx"] and not req.model:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "error": "Model required"},
+        )
 
     result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
     if result.get("ok"):

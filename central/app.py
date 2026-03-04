@@ -2265,93 +2265,106 @@ BACKEND_SWITCH_LOCK = threading.Lock()
 @app.post("/api/backend/switch")
 def api_backend_switch():
     try:
-        payload = request.get_json(silent=True) or {}
-        backend = str(payload.get("backend") or "").strip().lower()
-        model = str(payload.get("model") or "").strip()
-        if backend not in {"custom", "ollama"}:
-            return jsonify({"results": [], "error": "backend must be custom or ollama"}), 400
-        if backend == "ollama" and not model:
-            return jsonify({"results": [], "error": "model is required for ollama"}), 400
+        data = request.get_json(force=True) or {}
+        backend = str(data.get("backend") or "").strip().lower()
+        model = str(data.get("model") or "").strip()
 
-        machines = load_machines_config()
+        if not backend:
+            return jsonify({"status": "error", "error": "backend field required"}), 400
+
+        if backend not in {"custom", "ollama", "mlx", "trtllm"}:
+            return jsonify({"status": "error", "error": "backend must be custom, ollama, mlx, or trtllm"}), 400
+
+        if backend == "custom" and not model:
+            return jsonify({"status": "error", "error": "Model required for custom backend"}), 400
+
+        machines_cfg = load_machines_config()
+        machines = machines_cfg.get("machines", []) if isinstance(machines_cfg, dict) else machines_cfg
         results: List[Dict[str, Any]] = []
 
         for machine in machines:
             machine_id = machine.get("machine_id")
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
-            gpu_type = str((machine.get("gpu") or {}).get("type") or detect_vendor(machine) or "").strip().lower()
+            gpu_type = str(
+                machine.get("gpu_type")
+                or (machine.get("gpu") or {}).get("type")
+                or detect_vendor(machine)
+                or ""
+            ).strip().lower()
 
             if backend == "custom":
-                if gpu_type == "apple":
-                    engine = "mlx"
-                elif gpu_type == "nvidia":
+                if gpu_type == "nvidia":
                     engine = "trtllm"
+                elif gpu_type == "apple":
+                    engine = "mlx"
                 else:
                     results.append({
                         "machine": machine_id,
                         "status": "error",
-                        "engine": "custom",
-                        "model": model,
-                        "error": f"Unknown gpu type: {gpu_type or 'missing'}",
+                        "error": f"Unsupported gpu_type: {gpu_type or 'missing'}",
                     })
                     continue
             else:
                 engine = backend
 
-            if engine == "trtllm" and not model:
-                results.append({
-                    "machine": machine_id,
-                    "status": "error",
-                    "engine": engine,
-                    "model": model,
-                    "error": "model is required for trtllm",
-                })
-                continue
-
             try:
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
 
-                for other in ("ollama", "mlx", "trtllm"):
-                    if other == engine:
-                        continue
-                    requests.post(
-                        f"{base_url}/api/engine/stop",
-                        json={"engine": other},
-                        timeout=15,
-                    )
-
-                start_payload = {"engine": engine}
-                if model and engine in {"ollama", "trtllm"}:
-                    start_payload["model"] = model
-
-                start_resp = requests.post(
-                    f"{base_url}/api/engine/start",
-                    json=start_payload,
-                    timeout=120,
+                requests.post(
+                    f"{base_url}/api/engine/stop",
+                    json={"engine": "ollama"},
+                    timeout=10,
                 )
-                start_data = start_resp.json() if start_resp.content else {}
-                if not start_resp.ok:
-                    raise RuntimeError(start_data.get("error") or f"HTTP {start_resp.status_code}")
+                requests.post(
+                    f"{base_url}/api/engine/stop",
+                    json={"engine": "mlx"},
+                    timeout=10,
+                )
+                requests.post(
+                    f"{base_url}/api/engine/stop",
+                    json={"engine": "trtllm"},
+                    timeout=10,
+                )
 
-                results.append({
-                    "machine": machine_id,
-                    "status": "ok",
-                    "engine": engine,
-                    "model": model,
-                })
+                resp = requests.post(
+                    f"{base_url}/api/engine/start",
+                    json={"engine": engine, "model": model or None},
+                    timeout=60,
+                )
+
+                if resp.status_code != 200:
+                    results.append({
+                        "machine": machine_id,
+                        "status": "error",
+                        "error": resp.text,
+                    })
+                else:
+                    results.append({
+                        "machine": machine_id,
+                        "status": "ok",
+                        "engine": engine,
+                        "model": model or None,
+                    })
             except Exception as exc:
                 results.append({
                     "machine": machine_id,
                     "status": "error",
-                    "engine": engine,
-                    "model": model,
                     "error": str(exc),
                 })
 
-        return jsonify({"results": results})
+        return jsonify({"status": "ok", "results": results})
+
     except Exception as exc:
-        return jsonify({"results": [], "error": str(exc)}), 500
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.post("/api/backend/select")
+def legacy_backend_select():
+    return jsonify({
+        "status": "error",
+        "error": "Deprecated endpoint. Use /api/backend/switch.",
+    }), 400
 
 
 @app.get("/api/backend/switch/<switch_id>/status")
