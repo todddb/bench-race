@@ -2270,8 +2270,8 @@ def api_backend_switch():
         model = str(payload.get("model") or "").strip()
         if backend not in {"custom", "ollama"}:
             return jsonify({"results": [], "error": "backend must be custom or ollama"}), 400
-        if not model:
-            return jsonify({"results": [], "error": "model is required"}), 400
+        if backend == "ollama" and not model:
+            return jsonify({"results": [], "error": "model is required for ollama"}), 400
 
         machines = load_machines_config()
         results: List[Dict[str, Any]] = []
@@ -2298,6 +2298,16 @@ def api_backend_switch():
             else:
                 engine = backend
 
+            if engine == "trtllm" and not model:
+                results.append({
+                    "machine": machine_id,
+                    "status": "error",
+                    "engine": engine,
+                    "model": model,
+                    "error": "model is required for trtllm",
+                })
+                continue
+
             try:
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
@@ -2311,9 +2321,13 @@ def api_backend_switch():
                         timeout=15,
                     )
 
+                start_payload = {"engine": engine}
+                if model and engine in {"ollama", "trtllm"}:
+                    start_payload["model"] = model
+
                 start_resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"engine": engine, "model": model},
+                    json=start_payload,
                     timeout=120,
                 )
                 start_data = start_resp.json() if start_resp.content else {}
