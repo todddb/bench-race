@@ -1783,15 +1783,10 @@ def _resolved_validation_model_for_machine(machine: Dict[str, Any], backend: str
     active_backend = (backend or "").lower()
     if not model_name:
         return None
-
-    # Prevent cross-backend resolution
-    if active_backend == "ollama" and model_name.endswith("-custom"):
+    try:
+        return resolve_runtime_model(machine, active_backend, model_name)
+    except (StopIteration, ValueError):
         return None
-
-    if active_backend == "custom" and not model_name.endswith("-custom"):
-        return None
-
-    return _resolve_model_for_machine(machine, active_backend, model_name)
 
 
 def estimate_model_size_gb(model_name: str, num_ctx: int) -> Optional[float]:
@@ -2234,9 +2229,10 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
         return {"phase": "error", "detail": str(exc), "backend": None}
 
 
-def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
-    """Resolve registry model_id into backend runtime identifier and engine for a machine."""
+def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) -> str:
+    """Resolve a UI model id into the concrete runtime identifier used by an agent."""
     selected_id = (model_id or "").strip()
+    backend = (backend or "").strip().lower()
     if not selected_id:
         raise ValueError("model_id is required")
 
@@ -2250,43 +2246,53 @@ def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: 
 
     if backend == "custom":
         custom_models = registry.get("custom", [])
-        model_entry = next(
-            (m for m in custom_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id),
-            None,
-        )
-        if not model_entry:
-            raise ValueError(f"Unknown custom model id: {selected_id}")
+        model_entry = next(m for m in custom_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id)
 
         if gpu_type == "nvidia":
             resolved_model = str(model_entry.get("trt-llm_engine_dir") or "").strip()
             if not resolved_model:
                 raise ValueError(f"Missing trt-llm_engine_dir for model id: {selected_id}")
-            return "trtllm", resolved_model
+            return resolved_model
         if gpu_type == "apple":
             resolved_model = str(model_entry.get("mlx_hf_id") or "").strip()
             if not resolved_model:
                 raise ValueError(f"Missing mlx_hf_id for model id: {selected_id}")
-            return "mlx", resolved_model
+            return resolved_model
         raise ValueError(f"Unsupported gpu_type: {gpu_type or 'missing'}")
 
     if backend == "ollama":
         ollama_models = registry.get("ollama", [])
-        model_entry = next(
-            (m for m in ollama_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id),
-            None,
-        )
-        if not model_entry:
-            raise ValueError(f"Unknown ollama model id: {selected_id}")
+        model_entry = next(m for m in ollama_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id)
 
         resolved_model = str(model_entry.get("apple") if gpu_type == "apple" else model_entry.get("nvidia") or "").strip()
         if not resolved_model:
             raise ValueError(f"Missing backend identifier for model id: {selected_id}")
-        return "ollama", resolved_model
+        return resolved_model
 
     if backend in {"mlx", "trtllm"}:
-        return backend, selected_id
+        return selected_id
 
-    raise ValueError(f"Unsupported backend: {backend}")
+    raise ValueError(f"Unknown backend {backend}")
+
+
+def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
+    """Resolve registry model_id into backend engine + runtime identifier for a machine."""
+    backend = (backend or "").strip().lower()
+    try:
+        resolved_model = resolve_runtime_model(machine, backend, model_id)
+    except StopIteration as exc:
+        raise ValueError(f"Unknown {backend} model id: {model_id}") from exc
+    if backend == "custom":
+        gpu_type = str(
+            machine.get("gpu_type")
+            or (machine.get("gpu") or {}).get("type")
+            or detect_vendor(machine)
+            or ""
+        ).strip().lower()
+        return ("trtllm", resolved_model) if gpu_type == "nvidia" else ("mlx", resolved_model)
+    if backend in {"ollama", "mlx", "trtllm"}:
+        return backend, resolved_model
+    raise ValueError(f"Unknown backend {backend}")
 
 
 BACKEND_SWITCH_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -2337,7 +2343,7 @@ def api_backend_switch():
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
             try:
                 engine, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
-            except ValueError as exc:
+            except (ValueError, StopIteration) as exc:
                 results.append({
                     "machine": machine_id,
                     "status": "error",
@@ -2464,7 +2470,7 @@ def api_agent_switch_backend(machine_id: str):
 
     try:
         agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
-    except ValueError as exc:
+    except (ValueError, StopIteration) as exc:
         return jsonify({"error": str(exc), "ok": False}), 400
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
@@ -2501,7 +2507,7 @@ def api_agent_load_model(machine_id: str):
     backend = (status.get("backend") or "ollama").lower()
     try:
         agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
-    except ValueError as exc:
+    except (ValueError, StopIteration) as exc:
         return jsonify({"error": str(exc), "ok": False}), 400
 
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
@@ -2722,12 +2728,13 @@ def api_status():
                 app.logger.warning(f"Model resolution failed in api_status: {e}")
                 resolved_selected_model = None
             has_selected_model = bool(resolved_selected_model and model_satisfied(resolved_selected_model, available_llm))
+            missing_required_llm: List[str] = []
+            for model in required["llm"]:
+                resolved_required_model = _resolved_validation_model_for_machine(m, active_backend, model)
+                if not resolved_required_model or not model_satisfied(resolved_required_model, available_llm):
+                    missing_required_llm.append(model)
             missing_required = {
-                "llm": [
-                    model
-                    for model in required["llm"]
-                    if not model_satisfied(_resolved_validation_model_for_machine(m, active_backend, model), available_llm)
-                ],
+                "llm": missing_required_llm,
                 "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
                 "sdxl_profiles": [
                     profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
@@ -2738,7 +2745,8 @@ def api_status():
                 memory_label = "VRAM"
             elif cap.get("accelerator_type") == "metal":
                 memory_label = "Unified"
-            fit = _compute_fit(m, cap, selected_model or "", num_ctx)
+            fit_model = resolved_selected_model or (selected_model or "")
+            fit = _compute_fit(m, cap, fit_model, num_ctx)
             statuses.append(
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
@@ -3345,7 +3353,10 @@ def api_start_llm():
             continue
 
         try:
-            resolved_model = _resolve_model_for_machine(m, "ollama", model)
+            try:
+                resolved_model = resolve_runtime_model(m, "ollama", model)
+            except (StopIteration, ValueError):
+                resolved_model = model
             model_fit = _machine_model_fit(m, resolved_model, num_ctx)
             r = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/jobs",
