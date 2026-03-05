@@ -2207,6 +2207,26 @@ def api_models():
     return jsonify(manifest)
 
 
+
+
+def _wait_for_backend_ready(machine: Dict[str, Any], requested_backend: str, timeout_s: int = 120) -> tuple[bool, str]:
+    agent_base_url = str(machine.get("agent_base_url") or "").rstrip("/")
+    if not agent_base_url:
+        return False, "Missing agent_base_url"
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
+            payload = response.json() if response.content else {}
+            active = str(payload.get("backend") or payload.get("active_backend") or "").strip().lower()
+            state = str(payload.get("state") or "").strip().lower()
+            if response.ok and active == requested_backend and state == "ready":
+                return True, "ready"
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return False, f"Timed out waiting for backend {requested_backend} ready"
 def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
     agent_base_url = machine.get("agent_base_url", "").rstrip("/")
     if not agent_base_url:
@@ -2392,6 +2412,28 @@ def api_backend_switch():
                         "error": resp.text,
                     })
                 else:
+                    ready, ready_detail = _wait_for_backend_ready(machine, resolved_backend)
+                    if not ready:
+                        results.append({
+                            "machine": machine_id,
+                            "status": "error",
+                            "error": ready_detail,
+                        })
+                        continue
+
+                    sync_resp = requests.post(
+                        f"{request.host_url.rstrip('/')}/api/agents/{machine_id}/sync_models",
+                        json={"models": [model_id]},
+                        timeout=60,
+                    )
+                    if sync_resp.status_code not in (200, 202):
+                        results.append({
+                            "machine": machine_id,
+                            "status": "error",
+                            "error": f"sync_models failed: {sync_resp.text}",
+                        })
+                        continue
+
                     results.append({
                         "machine": machine_id,
                         "status": "ok",
