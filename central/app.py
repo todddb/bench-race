@@ -3427,7 +3427,7 @@ def api_start_llm():
                 resolved_model = model
             model_fit = _machine_model_fit(m, resolved_model, num_ctx)
             r = requests.post(
-                f"{m['agent_base_url'].rstrip('/')}/jobs",
+                f"{m['agent_base_url'].rstrip('/')}/api/job",
                 json={
                     "test_type": "llm_generate",
                     "model": resolved_model,
@@ -3853,7 +3853,7 @@ def api_generate_sample_prompt():
 
     try:
         r = requests.post(
-            f"{machine['agent_base_url'].rstrip('/')}/jobs",
+            f"{machine['agent_base_url'].rstrip('/')}/api/job",
             json={
                 "test_type": "llm_generate",
                 "model": model,

@@ -2643,6 +2643,34 @@ async def comfy_sync_status():
     return CHECKPOINT_SYNC_STATUS
 
 
+
+
+@app.post("/api/job", response_model=JobStartResponse)
+async def start_job(req: LLMRequest):
+    """Start an LLM inference job."""
+    active_backend_name = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "ollama"
+    active_backend = backend_manager.get_active_backend()
+    api_backend = "custom" if active_backend_name in {"mlx", "trtllm"} else active_backend_name
+
+    if active_backend.backend_type == BackendType.MANAGED and not agent_state.running:
+        raise HTTPException(status_code=400, detail="Engine not started")
+
+    if not registry_entry_matches_backend(req.model, api_backend):
+        raise HTTPException(status_code=400, detail=f"Model {req.model} not valid for backend {api_backend}")
+
+    job_id = str(uuid.uuid4())
+    slog.info("job_backend_selected", job_id=job_id, backend=api_backend, runtime_backend=active_backend_name, model=req.model)
+
+    task = asyncio.create_task(_job_runner_llm(job_id, req))
+    RUNNING_JOBS[job_id] = task
+
+    def _on_done(t: asyncio.Task):
+        RUNNING_JOBS.pop(job_id, None)
+        if t.exception():
+            slog.error("job_failed", job_id=job_id, error="Task exception", stack_trace=str(t.exception()))
+
+    task.add_done_callback(_on_done)
+    return JobStartResponse(job_id=job_id)
 # ---------------------------
 # Background job: LLM streaming
 # ---------------------------
@@ -2723,11 +2751,19 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 f"Requested backend {active_backend_name} but model not available: {model}"
             )
 
-        if active_backend_name == "ollama":
-            async def on_token(chunk: str, now: float):
-                await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": chunk, "timestamp_s": now}))
+        api_backend = "custom" if active_backend_name in {"mlx", "trtllm"} else active_backend_name
 
-            ollama_base = CFG.get("ollama", {}).get("base_url") or CFG.get("ollama_base_url") or "http://127.0.0.1:11434"
+        async def on_token(chunk: str, now: float):
+            await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": chunk, "timestamp_s": now}))
+
+        if api_backend == "ollama":
+            inference_base = CFG.get("ollama", {}).get("base_url") or CFG.get("ollama_base_url") or "http://127.0.0.1:11434"
+        elif api_backend == "custom":
+            inference_base = os.environ.get("WRAPPER_BASE_URL", "http://127.0.0.1:9002")
+        else:
+            inference_base = None
+
+        if inference_base:
             result = await stream_ollama_generate(
                 job_id=job_id,
                 model=model,
@@ -2735,9 +2771,10 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 num_ctx=req.num_ctx,
-                base_url=ollama_base,
+                base_url=inference_base,
                 on_token=on_token,
             )
+            result["engine"] = api_backend
         else:
             token_count = 0
             async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
