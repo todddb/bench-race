@@ -1252,6 +1252,20 @@ async function fetchStatus() {
   }
 }
 
+function refreshStatus() {
+  return fetchStatus();
+}
+
+function refreshAllModelAvailability() {
+  fetch("/api/models/config")
+    .then((r) => r.json())
+    .then(() => {
+      // trigger status refresh
+      refreshStatus();
+    })
+    .catch(console.error);
+}
+
 function getPreflightStatus() {
   const blocked = [];
   const ready = [];
