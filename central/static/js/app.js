@@ -1189,7 +1189,8 @@ const openSparklineModal = (machineId, type) => {
 function updateSyncButton(machine) {
   const btn = document.getElementById(`sync-${machine.machine_id}`);
   if (!btn) return;
-  if (MODE === "compute") {
+  const currentBackend = getSelectedBackend();
+  if (MODE === "compute" || currentBackend === "ollama") {
     btn.classList.add("hidden");
     return;
   }
@@ -2936,7 +2937,12 @@ const autoSelectFirstModel = async () => {
 
 const validateModelAvailability = async (machineId, selectedModel) => {
   const btn = document.getElementById(`sync-${machineId}`);
-  if (!btn || !selectedModel) return;
+  if (!btn) return;
+  const currentBackend = getSelectedBackend();
+  if (currentBackend === "ollama" || !selectedModel) {
+    btn.classList.add("hidden");
+    return;
+  }
   try {
     const resp = await fetch(`/api/agent/${encodeURIComponent(machineId)}/models`);
     if (!resp.ok) throw new Error("model list failed");
@@ -2979,42 +2985,44 @@ const selectModel = async (modelId) => {
   const machineIds = getActiveMachineIds();
   machineIds.forEach((machineId) => setAgentSwitchStatus(machineId, "Loading model...", "status-loading"));
   try {
+    const currentBackend = getSelectedBackend();
     await Promise.all(machineIds.map(async (machineId) => {
-      // Ensure required Ollama model is present on the target agent before loading.
-      const syncResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_models`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ models: [modelId] }),
-      });
-      const syncData = await syncResp.json();
-      if (!syncResp.ok) {
-        throw new Error(`${machineId}: ${syncData.error || "sync start failed"}`);
-      }
-
-      const jobId = syncData.job_id;
-      if (!jobId) {
-        throw new Error(`${machineId}: sync job id missing`);
-      }
-
-      let syncDone = false;
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        const statusResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_status/${encodeURIComponent(jobId)}`);
-        const statusData = await statusResp.json();
-        if (!statusResp.ok) {
-          throw new Error(`${machineId}: ${statusData.error || "sync status failed"}`);
+      if (currentBackend !== "ollama") {
+        const syncResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_models`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ models: [modelId] }),
+        });
+        const syncData = await syncResp.json();
+        if (!syncResp.ok) {
+          throw new Error(`${machineId}: ${syncData.error || "sync start failed"}`);
         }
-        if (["completed", "partial", "failed"].includes(statusData.status)) {
-          if (statusData.status !== "completed") {
-            throw new Error(`${machineId}: model sync ${statusData.status}`);
+
+        const jobId = syncData.job_id;
+        if (!jobId) {
+          throw new Error(`${machineId}: sync job id missing`);
+        }
+
+        let syncDone = false;
+        for (let attempt = 0; attempt < 300; attempt += 1) {
+          const statusResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_status/${encodeURIComponent(jobId)}`);
+          const statusData = await statusResp.json();
+          if (!statusResp.ok) {
+            throw new Error(`${machineId}: ${statusData.error || "sync status failed"}`);
           }
-          syncDone = true;
-          break;
+          if (["completed", "partial", "failed"].includes(statusData.status)) {
+            if (statusData.status !== "completed") {
+              throw new Error(`${machineId}: model sync ${statusData.status}`);
+            }
+            syncDone = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
 
-      if (!syncDone) {
-        throw new Error(`${machineId}: model sync timed out`);
+        if (!syncDone) {
+          throw new Error(`${machineId}: model sync timed out`);
+        }
       }
 
       const response = await fetch(`/api/agent/${encodeURIComponent(machineId)}/load_model`, {
@@ -3025,6 +3033,9 @@ const selectModel = async (modelId) => {
       const data = await response.json();
       if (!response.ok || data.ok === false) {
         throw new Error(`${machineId}: ${data.error || "load model failed"}`);
+      }
+      if (currentBackend === "ollama") {
+        setMachineState(machineId, "ready");
       }
       setAgentSwitchStatus(machineId, "Ready", "status-ready");
     }));
