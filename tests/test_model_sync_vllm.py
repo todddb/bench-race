@@ -1,4 +1,4 @@
-"""Tests for the vLLM model sync and status endpoints on central."""
+"""Tests validating legacy central sync endpoints are removed."""
 import importlib
 from pathlib import Path
 
@@ -16,42 +16,23 @@ def _ensure_config():
         )
 
 
-def test_sync_models_unknown_machine():
+def test_sync_models_route_removed():
     _ensure_config()
     central_app = importlib.import_module("central.app")
     central_app.app.config["TESTING"] = True
 
     with central_app.app.test_client() as client:
-        resp = client.post(
-            "/api/agents/nonexistent/sync_models",
-            json={"models": ["llama3.1:8b"]},
-        )
+        resp = client.post("/api/agents/agent1/sync_models", json={"models": ["m1"]})
     assert resp.status_code == 404
 
 
-def test_sync_models_no_models():
-    _ensure_config()
-    central_app = importlib.import_module("central.app")
-    central_app.app.config["TESTING"] = True
-    # Override required models to empty
-    import central.app as ca
-    ca.MACHINES = [{"machine_id": "agent1", "agent_base_url": "http://127.0.0.1:9001"}]
-
-    with central_app.app.test_client() as client:
-        resp = client.post(
-            "/api/agents/agent1/sync_models",
-            json={"models": []},
-        )
-    assert resp.status_code == 400
-
-
-def test_sync_status_not_found():
+def test_sync_status_route_removed():
     _ensure_config()
     central_app = importlib.import_module("central.app")
     central_app.app.config["TESTING"] = True
 
     with central_app.app.test_client() as client:
-        resp = client.get("/api/agents/agent1/sync_status/no-such-job")
+        resp = client.get("/api/agents/agent1/sync_status/job-1")
     assert resp.status_code == 404
 
 
@@ -61,12 +42,8 @@ def test_model_status_unreachable_agent(monkeypatch):
     import central.app as ca
 
     ca.MACHINES = [{"machine_id": "agent1", "agent_base_url": "http://127.0.0.1:9999"}]
-    monkeypatch.setattr(
-        ca, "_required_models",
-        lambda: {"llm": ["llama3.1:8b"], "whisper": [], "sdxl_profiles": []},
-    )
+    monkeypatch.setattr(ca, "_required_models", lambda: {"llm": ["llama3.1:8b"], "whisper": [], "sdxl_profiles": []})
 
-    # Both agent internal and capabilities will fail
     def fail_get(url, timeout=None):
         raise ConnectionError("unreachable")
 
@@ -76,16 +53,3 @@ def test_model_status_unreachable_agent(monkeypatch):
     with ca.app.test_client() as client:
         resp = client.get("/api/agents/agent1/model_status")
     assert resp.status_code == 502
-
-
-def test_delete_model_unknown_machine():
-    _ensure_config()
-    central_app = importlib.import_module("central.app")
-    central_app.app.config["TESTING"] = True
-
-    with central_app.app.test_client() as client:
-        resp = client.post(
-            "/api/agents/nonexistent/delete_model",
-            json={"id": "some-model"},
-        )
-    assert resp.status_code == 404

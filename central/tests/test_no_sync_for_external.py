@@ -25,13 +25,14 @@ def _load_central_app_with_test_machines():
             CFG_PATH.write_text(original, encoding="utf-8")
 
 
-def test_backend_switch_skips_sync_for_ollama(monkeypatch):
+def test_backend_switch_never_calls_legacy_sync(monkeypatch):
     app_mod = _load_central_app_with_test_machines()
     app_mod.app.config["TESTING"] = True
 
     monkeypatch.setattr(app_mod, "load_machines_config", lambda: {"machines": [{"machine_id": "test1", "agent_base_url": "http://agent"}]})
     monkeypatch.setattr(app_mod, "_wait_for_backend_ready", lambda *_args, **_kwargs: (True, "ready"))
     monkeypatch.setattr(app_mod, "resolve_runtime_model", lambda *_args, **_kwargs: "llama3:8b")
+    monkeypatch.setattr(app_mod, "_machine_llm_hardware", lambda *_args, **_kwargs: "nvidia")
     monkeypatch.setattr(app_mod, "load_models_registry", lambda: {"ollama": [{"id": "m1"}], "custom": [{"id": "m1"}]})
 
     called_urls = []
@@ -51,6 +52,8 @@ def test_backend_switch_skips_sync_for_ollama(monkeypatch):
 
     with app_mod.app.test_client() as client:
         resp = client.post("/api/backend/switch", json={"backend": "ollama", "model_id": "m1"})
+        assert resp.status_code == 200
+        resp = client.post("/api/backend/switch", json={"backend": "custom", "model_id": "m1"})
         assert resp.status_code == 200
 
     assert any("/api/engine/start" in url for url in called_urls)

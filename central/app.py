@@ -2455,22 +2455,6 @@ def api_backend_switch():
                         "error": ready_detail,
                     }
 
-                if target_backend != "ollama":
-                    sync_resp = requests.post(
-                        f"{central_base_url}/api/agents/{machine_id}/sync_models",
-                        json={"models": [target_model_id]},
-                        timeout=60,
-                    )
-                    if sync_resp.status_code not in (200, 202):
-                        msg = f"sync_models failed: {sync_resp.text}"
-                        machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
-                        machine_states[str(machine_id)]["error"] = msg
-                        return {
-                            "machine": machine_id,
-                            "status": "error",
-                            "error": msg,
-                        }
-
                 machine_states[str(machine_id)]["state"] = SwitchState.READY.value
                 machine_states[str(machine_id)]["error"] = None
                 return {
@@ -3246,54 +3230,6 @@ def api_get_checkpoint(checkpoint_name: str):
     return send_file(file_path, as_attachment=True)
 
 
-@app.post("/api/machines/<machine_id>/sync")
-def api_sync_models(machine_id: str):
-    required = _required_models()
-    backend = request.args.get("backend", "ollama")
-    selected_model = (request.args.get("model") or "").strip()
-    if selected_model and selected_model not in (required.get("llm") or []):
-        required.setdefault("llm", []).append(selected_model)
-    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
-    if not machine:
-        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
-
-    try:
-        r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
-        r.raise_for_status()
-        cap = r.json()
-        active_backend = (cap.get("active_backend") or "ollama").lower()
-        available_llm = _available_llm_models(cap, active_backend)
-        missing_llm = [model for model in required["llm"] if not model_satisfied(model, available_llm)]
-        if backend.lower() == "ollama" and missing_llm:
-            missing_llm = [
-                str(entry.get("display_name") or "").strip()
-                for entry in _registry_model_entries_for_sync(missing_llm, backend="ollama")
-                if str(entry.get("display_name") or "").strip()
-            ]
-
-        missing = {
-            "llm": missing_llm,
-            "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
-            "sdxl_profiles": [
-                profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
-            ],
-            "backend": backend,
-            "target_dir": "ollama",
-            "sanitize_names": True,
-        }
-        if not any((missing["llm"], missing["whisper"], missing["sdxl_profiles"])):
-            return jsonify({"sync_id": None, "message": "No missing required models"})
-        sync_resp = requests.post(
-            f"{machine['agent_base_url'].rstrip('/')}/models/sync",
-            json=missing,
-            timeout=5,
-        )
-        sync_resp.raise_for_status()
-        return jsonify(sync_resp.json())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.post("/api/machines/<machine_id>/sync_image")
 def api_sync_image_models(machine_id: str):
     settings = _load_comfy_settings()
@@ -4029,10 +3965,6 @@ def api_set_comfy_settings():
 # Model Sync / Validate / Convert API
 # Endpoints for syncing Ollama models and converting for vLLM on agents.
 # -----------------------------------------------------------------------------
-SYNC_JOBS: Dict[str, Dict[str, Any]] = {}
-SYNC_JOBS_LOCK = threading.Lock()
-
-
 def _registry_model_entries_for_sync(models: List[str], backend: str) -> List[Dict[str, Any]]:
     """Resolve UI-selected model ids into agent sync entries using registry metadata."""
     requested = [m for m in models if isinstance(m, str) and m.strip()]
@@ -4143,89 +4075,6 @@ def api_validate_models():
         results.append(entry)
 
     return jsonify({"results": results})
-
-
-@app.post("/api/agents/<machine_id>/sync_models")
-def api_agent_sync_models(machine_id: str):
-    """Trigger model sync + optional vLLM conversion on a specific agent."""
-    machine = next((m for m in MACHINES if m.get("machine_id") == machine_id), None)
-    if not machine:
-        return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
-
-    payload = request.get_json(force=True) or {}
-    models = payload.get("models")
-    if models is None:
-        # Default: sync all required models
-        required = _required_models()
-        models = required.get("llm") or []
-    if not isinstance(models, list) or not models:
-        return jsonify({"error": "No models to sync"}), 400
-
-    job_id = str(uuid.uuid4())
-
-    # Build per-model entries from registry metadata so Ollama pulls use canonical tags.
-    model_entries = _registry_model_entries_for_sync(models, backend="ollama")
-    if not model_entries:
-        return jsonify({"error": "No valid models to sync"}), 400
-
-    with SYNC_JOBS_LOCK:
-        SYNC_JOBS[job_id] = {
-            "job_id": job_id,
-            "machine_id": machine_id,
-            "status": "pending",
-            "models": {e["id"]: {"status": "pending", "error_message": None} for e in model_entries},
-            "created_at": time.time(),
-        }
-
-    # Fire off the sync to the agent asynchronously in a thread
-    def _run_sync():
-        try:
-            with SYNC_JOBS_LOCK:
-                SYNC_JOBS[job_id]["status"] = "running"
-
-            resp = requests.post(
-                f"{machine['agent_base_url'].rstrip('/')}/_internal/sync_models",
-                json={"job_id": job_id, "models": model_entries},
-                timeout=600,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-
-            with SYNC_JOBS_LOCK:
-                job = SYNC_JOBS[job_id]
-                for mr in result.get("results", []):
-                    mid = mr.get("id") or mr.get("display_name")
-                    if mid in job["models"]:
-                        job["models"][mid]["status"] = mr.get("status", "unknown")
-                        job["models"][mid]["error_message"] = mr.get("error_message")
-                        job["models"][mid]["ollama_path"] = mr.get("ollama_path")
-                        job["models"][mid]["vllm_path"] = mr.get("vllm_path")
-                        job["models"][mid]["sanitized_name"] = mr.get("sanitized_name")
-                all_done = all(m["status"] in ("success", "failed") for m in job["models"].values())
-                any_failed = any(m["status"] == "failed" for m in job["models"].values())
-                job["status"] = "completed" if all_done and not any_failed else "partial" if all_done else "running"
-        except Exception as e:
-            log.exception("Sync job %s failed: %s", job_id, e)
-            with SYNC_JOBS_LOCK:
-                SYNC_JOBS[job_id]["status"] = "failed"
-                SYNC_JOBS[job_id]["error"] = str(e)
-
-    thread = threading.Thread(target=_run_sync, daemon=True)
-    thread.start()
-
-    return jsonify({"job_id": job_id, "status": "pending", "models": [e["id"] for e in model_entries]})
-
-
-@app.get("/api/agents/<machine_id>/sync_status/<job_id>")
-def api_agent_sync_status(machine_id: str, job_id: str):
-    """Poll sync job status for a specific agent."""
-    with SYNC_JOBS_LOCK:
-        job = SYNC_JOBS.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    if job.get("machine_id") != machine_id:
-        return jsonify({"error": "Job does not belong to this machine"}), 404
-    return jsonify(job)
 
 
 @app.get("/api/agents/<machine_id>/model_status")
