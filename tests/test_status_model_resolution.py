@@ -63,7 +63,7 @@ def test_api_status_validates_ollama_registry_id_against_resolved_tag(monkeypatc
 
     payload = resp.get_json()
     machine = payload["machines"][0]
-    assert machine["selected_model"] == "llama3.1-8b-q4"
+    assert machine["selected_model"] == "llama3.1:8b-instruct-q4_K_M"
     assert machine["resolved_selected_model"] == "llama3.1:8b-instruct-q4_K_M"
     assert machine["has_selected_model"] is True
 
