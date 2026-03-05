@@ -58,3 +58,30 @@ def test_backend_switch_never_calls_legacy_sync(monkeypatch):
 
     assert any("/api/engine/start" in url for url in called_urls)
     assert not any("/api/agents/test1/sync_models" in url for url in called_urls)
+
+
+def test_load_model_skips_for_custom_backend(monkeypatch):
+    app_mod = _load_central_app_with_test_machines()
+    app_mod.app.config["TESTING"] = True
+
+    machine = {"machine_id": "test1", "agent_base_url": "http://agent"}
+    monkeypatch.setattr(app_mod, "MACHINES", [machine])
+    monkeypatch.setattr(app_mod, "_proxy_backend_status", lambda *_args, **_kwargs: {"backend": "custom"})
+
+    post_calls = []
+
+    def fake_post(url, *args, **kwargs):
+        post_calls.append(url)
+        raise AssertionError("requests.post should not be called for custom backend")
+
+    monkeypatch.setattr(app_mod.requests, "post", fake_post)
+
+    with app_mod.app.test_client() as client:
+        resp = client.post("/api/agent/test1/load_model", json={"model_id": "m1"})
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["skipped"] is True
+    assert "ollama" in payload["reason"]
+    assert post_calls == []

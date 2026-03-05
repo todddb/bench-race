@@ -2598,6 +2598,9 @@ def api_agent_load_model(machine_id: str):
 
     status = _proxy_backend_status(machine)
     backend = (status.get("backend") or "ollama").lower()
+    if backend in {"custom", "mlx", "trtllm"}:
+        return jsonify({"ok": True, "skipped": True, "reason": "load_model only applies to ollama backend"}), 200
+
     resolution_backend = "custom" if backend in {"custom", "mlx", "trtllm"} else backend
     try:
         agent_backend, resolved_model = _resolve_model_for_machine(machine, resolution_backend, model_id)
