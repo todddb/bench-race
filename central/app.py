@@ -2257,36 +2257,25 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
         raise ValueError("model_id is required")
 
     registry = load_models_registry()
-    gpu_type = str(
+    arch = str(
         machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
         or detect_vendor(machine)
         or ""
     ).strip().lower()
 
-    if backend == "custom":
-        custom_models = registry.get("custom", [])
-        model_entry = next(m for m in custom_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id)
-
-        if gpu_type == "nvidia":
-            resolved_model = str(model_entry.get("trt-llm_engine_dir") or "").strip()
-            if not resolved_model:
-                raise ValueError(f"Missing trt-llm_engine_dir for model id: {selected_id}")
-            return resolved_model
-        if gpu_type == "apple":
-            resolved_model = str(model_entry.get("mlx_hf_id") or "").strip()
-            if not resolved_model:
-                raise ValueError(f"Missing mlx_hf_id for model id: {selected_id}")
-            return resolved_model
-        raise ValueError(f"Unsupported gpu_type: {gpu_type or 'missing'}")
-
-    if backend == "ollama":
-        ollama_models = registry.get("ollama", [])
-        model_entry = next(m for m in ollama_models if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id)
-
-        resolved_model = str(model_entry.get("apple") if gpu_type == "apple" else model_entry.get("nvidia") or "").strip()
+    if backend in {"custom", "ollama"}:
+        backend_models = registry.get(backend, [])
+        model_entry = next(
+            m
+            for m in backend_models
+            if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id
+        )
+        if arch not in model_entry:
+            raise ValueError(f"Model '{selected_id}' missing architecture key '{arch}'")
+        resolved_model = str(model_entry.get(arch) or "").strip()
         if not resolved_model:
-            raise ValueError(f"Missing backend identifier for model id: {selected_id}")
+            raise ValueError(f"Model '{selected_id}' has empty architecture value for '{arch}'")
         return resolved_model
 
     if backend in {"mlx", "trtllm"}:
