@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import platform
 import shutil
 import time
 import uuid
@@ -73,6 +74,7 @@ from agent.reset_helpers import (
     HEALTH_POLL_INTERVAL_S,
 )
 from agent.backends.backend_manager import BackendManager
+from agent.model_registry import resolve_model_for_machine
 
 
 async def check_vllm_available(_base_url: str) -> bool:
@@ -1577,47 +1579,82 @@ async def select_backend(req: BackendSelectRequest):
         )
 
 
+async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
+    if model is None:
+        raise RuntimeError("Resolved model is None")
+
+    if backend == "trtllm":
+        await broadcast_status("Starting TRT Engine")
+    elif backend == "mlx":
+        await broadcast_status("Loading MLX Model")
+
+    await _atomic_switch_backend(backend, model)
+    await broadcast_status("Warming Model")
+    await broadcast_status("Ready")
+    return {"status": "started", "engine": backend, "accepted": True}
+
+
 @app.post("/api/engine/start")
-async def start_engine(req: EngineStartRequest):
-    """
-    Start backend engine and switch active backend atomically.
-    """
-    requested_backend = getattr(req, "backend", None)
-    engine = (req.engine or requested_backend or "").strip().lower()
-    valid_backends = {"ollama", "mlx", "trtllm"}
-    if not engine:
-        raise HTTPException(status_code=400, detail="engine is required")
-    if engine not in valid_backends and engine != "comfyui":
-        return JSONResponse(status_code=400, content={"error": f"Invalid backend '{engine}'"})
+async def start_engine(payload: dict):
+    model_id = payload.get("model")
+    backend = payload.get("backend")
 
-    if engine == "comfyui":
-        existing = _ENGINE_TASKS.get(engine)
-        if existing and not existing.done():
-            return {"status": "starting", "engine": engine, "accepted": True}
-        task = asyncio.create_task(_start_comfyui())
-        _track_engine_task(engine, task)
-        return {"status": "starting", "engine": engine, "accepted": True}
-
-    valid, reason = await _validate_engine_start_request(engine, req.model)
-    if not valid:
-        return JSONResponse(
+    if not model_id:
+        raise HTTPException(
             status_code=400,
-            content={"status": "error", "engine": engine, "accepted": True, "error": reason},
+            detail="Missing required field: model"
         )
 
-    try:
-        if engine == "trtllm":
-            await broadcast_status("Starting TRT Engine")
-        elif engine == "mlx":
-            await broadcast_status("Loading MLX Model")
-        await _atomic_switch_backend(engine, req.model)
-        await broadcast_status("Warming Model")
-        await broadcast_status("Ready")
-        return {"status": "started", "engine": engine, "accepted": True}
-    except ValueError as e:
-        return JSONResponse(
+    if not backend:
+        raise HTTPException(
             status_code=400,
-            content={"status": "error", "engine": engine, "accepted": True, "error": str(e)},
+            detail="Missing required field: backend"
+        )
+
+    backend = str(backend).strip().lower()
+    resolved = resolve_model_for_machine(str(model_id).strip(), backend)
+
+    if not resolved:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model resolution failed for model_id={model_id}, backend={backend}"
+        )
+
+    log.info(
+        "ENGINE_START request backend=%s model_id=%s resolved=%s",
+        backend,
+        model_id,
+        resolved,
+    )
+
+    if backend not in {"ollama", "custom"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported backend for /api/engine/start: {backend}"
+        )
+
+    engine_backend = backend
+    if backend == "custom":
+        arch = os.environ.get("BENCH_AGENT_PLATFORM", "").strip().lower()
+        if arch in {"nvidia", "linux"}:
+            engine_backend = "trtllm"
+        elif arch in {"apple", "mac", "darwin"}:
+            engine_backend = "mlx"
+        else:
+            engine_backend = "mlx" if platform.system().lower() == "darwin" else "trtllm"
+
+    try:
+        return await start_backend_engine(engine_backend, resolved)
+    except Exception as e:
+        log.error(
+            "ENGINE_START failure backend=%s model_id=%s: %s",
+            backend,
+            model_id,
+            str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Engine start failed: {str(e)}"
         )
 
 
@@ -2542,16 +2579,10 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     try:
         available_models = await backend.list_models()
         if model not in available_models:
-            result = {
-                "error": "Model not available",
-                "engine": (_ACTIVE_BACKEND or None),
-                "model": model,
-                "available_models": available_models,
-                "total_ms": 0,
-                "tokens_generated": 0,
-            }
-            await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
-            return
+            active_backend = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "unknown"
+            raise RuntimeError(
+                f"Requested backend {active_backend} but model not available: {model}"
+            )
 
         token_count = 0
         async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
