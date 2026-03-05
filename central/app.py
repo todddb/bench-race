@@ -2321,6 +2321,12 @@ SWITCH_LOCK = Lock()
 SWITCH_ACTIVE = False
 backend_switch_in_progress = False
 
+# Backend switch state
+backend_switch_state = {
+    "status": "idle",   # idle | switching | ready | failed
+    "errors": []
+}
+
 
 @app.post("/api/backend/switch")
 def api_backend_switch():
@@ -2329,6 +2335,8 @@ def api_backend_switch():
         return jsonify({"ok": False, "error": "Switch already in progress"}), 409
 
     backend_switch_in_progress = True
+    backend_switch_state["status"] = "switching"
+    backend_switch_state["errors"] = []
 
     try:
         data = request.get_json(force=True) or {}
@@ -2460,15 +2468,20 @@ def api_backend_switch():
                         })
 
         if errors:
+            backend_switch_state["status"] = "failed"
+            backend_switch_state["errors"] = errors
             return jsonify({
-                "status": "partial_failure",
+                "status": "failed",
                 "errors": errors,
-                "results": results,
-            }), 207
+            }), 500
+
+        backend_switch_state["status"] = "ready"
 
         return jsonify({"status": "ok", "machines": len(results), "results": results})
 
     except Exception as exc:
+        backend_switch_state["status"] = "failed"
+        backend_switch_state["errors"] = [{"machine": "central", "error": str(exc)}]
         return jsonify({"status": "error", "error": str(exc)}), 500
     finally:
         backend_switch_in_progress = False
@@ -2765,6 +2778,17 @@ def api_capabilities():
 
 @app.get("/api/status")
 def api_status():
+    if backend_switch_state["status"] == "failed":
+        return jsonify({
+            "backend_status": "failed",
+            "errors": backend_switch_state["errors"]
+        }), 500
+
+    if backend_switch_state["status"] == "switching":
+        return jsonify({
+            "backend_status": "switching"
+        })
+
     selected_model = request.args.get("model")
     try:
         num_ctx = int(request.args.get("num_ctx", 4096))
