@@ -22,7 +22,7 @@ import subprocess
 import signal
 from PIL import Image
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # ---------------------------
@@ -46,7 +46,6 @@ from backends.ollama_backend import (
     fetch_installed_ollama_tags,
     resolved_ollama_pull_name,
 )
-from backends.vllm_backend import check_vllm_available, stream_vllm_generate, get_vllm_models
 
 # Import agent-specific modules
 from agent.logging_utils import init_logging, get_logger, HOSTNAME
@@ -73,6 +72,19 @@ from agent.reset_helpers import (
     COMFYUI_START_TIMEOUT_S,
     HEALTH_POLL_INTERVAL_S,
 )
+from agent.backends.backend_manager import BackendManager
+
+
+async def check_vllm_available(_base_url: str) -> bool:
+    return False
+
+
+async def get_vllm_models(_base_url: str) -> list[str]:
+    return []
+
+
+async def stream_vllm_generate(**_kwargs):
+    raise RuntimeError("vLLM backend has been archived")
 
 # ---------------------------
 # Logging
@@ -1326,6 +1338,14 @@ async def health():
 
 # Track which inference backend is currently active
 _ACTIVE_BACKEND: Optional[str] = None  # "ollama", "mlx", "trtllm", "vllm", "comfyui", or None
+
+backend_manager = BackendManager(
+    ollama_base_url=CFG.get("ollama_base_url", CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")),
+    mlx_host=os.environ.get("MLX_HOST", "127.0.0.1"),
+    mlx_port=int(os.environ.get("MLX_PORT", "8321")),
+    trt_host=os.environ.get("TRTLLM_HOST", "127.0.0.1"),
+    trt_port=int(os.environ.get("TRTLLM_PORT", "8000")),
+)
 _BACKEND_KEEP_WARM: bool = False
 _BACKEND_IDLE_SECS: int = int(os.environ.get("AGENT_BACKEND_IDLE_SECS", "0"))
 _BACKEND_IDLE_TASK: Optional[asyncio.Task] = None
@@ -1480,7 +1500,7 @@ async def select_backend(req: BackendSelectRequest):
     global _ACTIVE_BACKEND, _BACKEND_KEEP_WARM
 
     backend = req.backend.lower()
-    if backend not in ("ollama", "vllm", "comfyui"):
+    if backend not in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
 
     model_to_use = req.model
@@ -2460,194 +2480,60 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
 
 
 async def _job_runner_llm(job_id: str, req: LLMRequest):
-    """
-    Background runner for llm_generate jobs.
-    Tries Ollama streaming first; falls back to mock streaming on failure.
-    Emits events while running and a final 'job_done' event with metrics.
-    """
+    """Background runner for llm_generate jobs via unified backend wrapper."""
     model = req.model
     prompt = req.prompt
-    max_tokens = req.max_tokens
-    temperature = req.temperature
-    num_ctx = req.num_ctx
 
-    # Log job received (already logged in POST /jobs)
-    # Log job accepted
-    slog.info(
-        "job_accepted",
-        job_id=job_id,
-        job_type="llm",
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        num_ctx=num_ctx,
-        prompt_length=len(prompt),
-    )
-
-    log.info("Starting job %s model=%s", job_id, model)
-
-    # Determine which LLM backend to use based on active backend selection
-    ollama_base_url = CFG.get("ollama_base_url", "http://127.0.0.1:11434")
-    vllm_cfg = CFG.get("vllm", {})
-    vllm_base_url = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
-
-    backend_selected = None
-    active_backend = (_ACTIVE_BACKEND or "").strip().lower()
-    if active_backend not in {"ollama", "vllm", "mlx", "trtllm"}:
+    try:
+        backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
+    except ValueError:
         result = {
             "error": "No active backend",
-            "engine": active_backend or None,
+            "engine": (_ACTIVE_BACKEND or None),
             "model": model,
             "fallback_reason": "no_active_backend",
             "total_ms": 0,
             "tokens_generated": 0,
         }
-        slog.info("job_backend_selected", job_id=job_id, backend="none", reason="no_active_backend")
-        ev = Event(job_id=job_id, type="job_done", payload=result)
-        await _broadcast_event(ev)
+        await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
         return
 
     try:
-        if active_backend == "vllm":
-            # Try vLLM first
-            vllm_available = await check_vllm_available(vllm_base_url)
-            if vllm_available:
-                backend_selected = "vllm"
-                slog.info("job_backend_selected", job_id=job_id, backend="vllm", reason="active_backend")
-                log.info("Using vLLM backend for job %s", job_id)
+        available_models = await backend.list_models()
+        if model not in available_models:
+            result = {
+                "error": "Model not available",
+                "engine": (_ACTIVE_BACKEND or None),
+                "model": model,
+                "available_models": available_models,
+                "total_ms": 0,
+                "tokens_generated": 0,
+            }
+            await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
+            return
 
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
+        token_count = 0
+        async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
+            token_count += len(str(token).split())
+            await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": token, "timestamp_s": time.perf_counter()}))
 
-                async def _on_token_vllm(text: str, timestamp_s: float) -> None:
-                    ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
-                    await _broadcast_event(ev)
-
-                result = await stream_vllm_generate(
-                    job_id=job_id,
-                    model=model,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    num_ctx=num_ctx,
-                    base_url=vllm_base_url,
-                    on_token=_on_token_vllm,
-                )
-                # Reset idle timer on activity
-                _reset_idle_timer()
-            else:
-                backend_selected = "mock"
-                slog.info("job_backend_selected", job_id=job_id, backend="mock", reason="vllm_unreachable")
-                log.warning("vLLM unreachable; falling back to mock backend for job %s", job_id)
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
-                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="vllm_unreachable")
-        else:
-            if active_backend != "ollama":
-                raise RuntimeError(f"Active backend '{active_backend}' is not supported for LLM jobs")
-            # Explicit ollama backend only
-            available = await check_ollama_available(ollama_base_url)
-            if not available:
-                backend_selected = "mock"
-                slog.info(
-                    "job_backend_selected",
-                    job_id=job_id,
-                    backend=backend_selected,
-                    reason="ollama_unreachable",
-                )
-                log.warning("Ollama unreachable; falling back to mock backend for job %s", job_id)
-
-                slog.info("job_started", job_id=job_id, backend=backend_selected)
-                result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="ollama_unreachable")
-            else:
-                # Resolve Ollama pull name based on installed tags.
-                try:
-                    installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags)
-                    resolved_model = resolved_ollama_pull_name({"model": model}, installed_tags)
-                    if resolved_model:
-                        log.info("Resolved job model '%s' -> '%s'", model, resolved_model)
-                        model = resolved_model
-                except Exception as e:
-                    log.warning(
-                        "Failed to resolve model '%s' during job dispatch: %s",
-                        model,
-                        e,
-                    )
-
-                # Check if model is available on Ollama
-                ollama_models = await get_ollama_models(ollama_base_url)
-
-                if model not in ollama_models:
-                    backend_selected = "mock"
-                    slog.info(
-                        "job_backend_selected",
-                        job_id=job_id,
-                        backend=backend_selected,
-                        reason="missing_model",
-                        available_models=ollama_models,
-                    )
-                    log.warning("Model %s not found on Ollama (available: %s); falling back to mock for job %s", model, ollama_models, job_id)
-
-                    slog.info("job_started", job_id=job_id, backend=backend_selected)
-                    result = await _run_mock_stream(job_id, model, prompt, max_tokens, temperature, num_ctx, fallback_reason="missing_model")
-                else:
-                    backend_selected = "ollama"
-                    slog.info(
-                        "job_backend_selected",
-                        job_id=job_id,
-                        backend=backend_selected,
-                        reason="model_available",
-                    )
-                    log.info("Using Ollama backend for job %s", job_id)
-
-                    slog.info("job_started", job_id=job_id, backend=backend_selected)
-
-                    async def _on_token(text: str, timestamp_s: float) -> None:
-                        ev = Event(job_id=job_id, type="llm_token", payload={"text": text, "timestamp_s": timestamp_s})
-                        await _broadcast_event(ev)
-
-                    result = await stream_ollama_generate(
-                        job_id=job_id,
-                        model=model,
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        num_ctx=num_ctx,
-                        base_url=ollama_base_url,
-                        on_token=_on_token,
-                    )
-                    # Reset idle timer on activity
-                    _reset_idle_timer()
+        result = {
+            "engine": _ACTIVE_BACKEND,
+            "model": model,
+            "tokens_generated": token_count,
+        }
+        _reset_idle_timer()
     except Exception as e:
-        backend_selected = active_backend or "unknown"
-        slog.info(
-            "job_backend_selected",
-            job_id=job_id,
-            backend=backend_selected,
-            reason="stream_error",
-            error=str(e),
-        )
-        log.warning("LLM stream failed (%s); returning error", e)
         result = {
             "error": str(e),
-            "engine": backend_selected,
+            "engine": (_ACTIVE_BACKEND or None),
             "model": model,
             "fallback_reason": "stream_error",
             "total_ms": 0,
             "tokens_generated": 0,
         }
 
-    # Log job completion
-    slog.info(
-        "job_completed",
-        job_id=job_id,
-        job_type="llm",
-        tokens_generated=result.get("tokens_generated", 0),
-        duration_ms=result.get("total_ms", 0),
-    )
-
-    # Emit final metrics event
-    ev = Event(job_id=job_id, type="job_done", payload=result)
-    await _broadcast_event(ev)
-    log.info("Job %s done. result=%s", job_id, result)
+    await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
 
 
 async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
@@ -3996,3 +3882,37 @@ async def _shutdown():
         except Exception:
             pass
     WS_CLIENTS.clear()
+
+
+@app.get("/v1/models")
+async def v1_models():
+    backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
+    models = await backend.list_models()
+    return {
+        "object": "list",
+        "data": [{"id": m, "object": "model"} for m in models],
+    }
+
+
+@app.post("/v1/chat/completions")
+async def v1_chat_completions(payload: Dict[str, Any]):
+    backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
+    model = str(payload.get("model") or "").strip()
+    messages = payload.get("messages") or []
+    models = await backend.list_models()
+    if model not in models:
+        return JSONResponse(status_code=400, content={"error": {"message": "Model not available", "type": "invalid_request_error"}})
+
+    async def _event_stream():
+        chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+        async for token in backend.generate(model=model, messages=messages, stream=True):
+            chunk = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
+                "model": model,
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
