@@ -1609,10 +1609,10 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
         backend_manager.set_active_backend(selected_backend, backend)
         _ACTIVE_BACKEND = backend
         agent_state.current_model = model
-        # Do NOT set agent_state.running for external backends — they have
-        # no managed running state.  The /jobs guard checks availability instead.
+        # Mark as running so lifecycle callers see a consistent ready state.
         await broadcast_status("Ready")
-        return {"status": "started", "engine": backend, "accepted": True}
+        agent_state.running = True
+        return {"status": "ok"}
 
     # Managed backends (MLX, TRT-LLM): full lifecycle management.
     if backend == "trtllm":
@@ -1643,6 +1643,16 @@ async def start_engine(payload: dict):
 
     if backend not in {"ollama", "custom"}:
         raise HTTPException(status_code=400, detail=f"Unsupported backend for /api/engine/start: {backend}")
+
+    if backend == "ollama":
+        try:
+            result = await start_backend_engine("ollama", model_id)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, model_id, str(e))
+            raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
     if not registry_entry_matches_backend(model_id, backend):
         raise HTTPException(
@@ -1725,7 +1735,7 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
             _ACTIVE_BACKEND = None
         agent_state.current_model = None
         agent_state.running = False
-        return {"ok": True}
+        return {"status": "ok"}
 
     result = await _run_agent_script("stop-backend", engine)
     if result.get("ok"):
@@ -3680,10 +3690,8 @@ async def start_job(req: LLMRequest):
     if active_backend.backend_type == BackendType.MANAGED and not agent_state.running:
         raise HTTPException(status_code=400, detail="Engine not started")
     if active_backend.backend_type == BackendType.EXTERNAL:
-        if not agent_state.current_model:
-            raise HTTPException(status_code=400, detail="No model selected")
-        if not await active_backend.is_available():
-            raise HTTPException(status_code=503, detail="Ollama unavailable")
+        if not req.model:
+            raise HTTPException(status_code=400, detail="Missing required field: model")
 
     if not registry_entry_matches_backend(req.model, backend_group):
         raise HTTPException(
@@ -3773,6 +3781,12 @@ class InternalDeleteRequest(BaseModel):
 @app.post("/_internal/sync_models")
 async def internal_sync_models(req: InternalSyncRequest):
     """Sync and optionally convert models for Ollama + vLLM."""
+    active_backend_name = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+    if active_backend_name:
+        active_backend = backend_manager.create_backend(active_backend_name)
+        if active_backend.backend_type == BackendType.EXTERNAL:
+            return {"status": "ok"}
+
     results = []
     sync_script = AGENT_DIR / "scripts" / "ollama_sync_and_convert.sh"
 
