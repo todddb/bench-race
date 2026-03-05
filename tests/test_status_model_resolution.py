@@ -81,13 +81,19 @@ def test_api_status_keeps_non_ollama_model_validation_as_selected(monkeypatch):
                 "label": "Custom Agent",
                 "active_backend": "mlx",
                 "ollama_models": [],
-                "llm_models": ["llama3.1-8b-custom"],
+                "llm_models": ["mlx-community/Llama-3.1-8B-Instruct-4bit"],
             }
 
     monkeypatch.setattr(
         central_app,
         "MACHINES",
-        [{"machine_id": "m1", "label": "Custom Agent", "agent_base_url": "http://agent", "excluded": False}],
+        [{
+            "machine_id": "m1",
+            "label": "Custom Agent",
+            "agent_base_url": "http://agent",
+            "vendor": "apple",
+            "excluded": False,
+        }],
     )
     monkeypatch.setattr(central_app.requests, "get", lambda url, timeout=2: _Resp())
 
@@ -97,5 +103,5 @@ def test_api_status_keeps_non_ollama_model_validation_as_selected(monkeypatch):
 
     payload = resp.get_json()
     machine = payload["machines"][0]
-    assert machine["resolved_selected_model"] == "llama3.1-8b-custom"
+    assert machine["resolved_selected_model"] == "mlx-community/Llama-3.1-8B-Instruct-4bit"
     assert machine["has_selected_model"] is True
