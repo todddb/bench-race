@@ -56,11 +56,11 @@ def test_resolve_model_for_machine_custom_uses_vendor_runtime_model(monkeypatch)
     nvidia = {"machine_id": "m2", "vendor": "nvidia"}
 
     assert app_mod._resolve_model_for_machine(apple, "custom", "llama3.1-8b-custom") == (
-        "mlx",
+        "custom",
         "mlx-community/Llama-3.1-8B-Instruct-4bit",
     )
     assert app_mod._resolve_model_for_machine(nvidia, "custom", "llama3.1-8b-custom") == (
-        "trtllm",
+        "custom",
         "Llama-3.1-8B-Instruct-NVFP4-engine",
     )
 
@@ -99,7 +99,7 @@ def test_api_engine_start_resolves_registry_model_before_agent_call(monkeypatch)
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/api/engine/start")
-    assert captured["json"]["backend"] == "mlx"
+    assert captured["json"]["backend"] == "custom"
     assert captured["json"]["model"] == "mlx-community/Llama-3.1-8B-Instruct-4bit"
 
 

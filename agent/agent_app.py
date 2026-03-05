@@ -1665,6 +1665,8 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
 
 @app.post("/api/engine/start")
 async def start_engine(payload: dict):
+    global _ACTIVE_BACKEND
+
     model_id = payload.get("model")
     backend = payload.get("backend")
 
@@ -1676,7 +1678,8 @@ async def start_engine(payload: dict):
     backend = str(backend).strip().lower()
     model_id = str(model_id).strip()
 
-    if backend not in {"ollama", "custom"}:
+    allowed_backends = {"ollama", "custom"}
+    if backend not in allowed_backends:
         raise HTTPException(status_code=400, detail=f"Unsupported backend for /api/engine/start: {backend}")
 
     if backend == "ollama":
@@ -1708,19 +1711,31 @@ async def start_engine(payload: dict):
 
     log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, model_id, resolved)
 
-    engine_backend = "ollama"
+    engine_type = "ollama"
     if backend == "custom":
         arch = os.environ.get("BENCH_AGENT_PLATFORM", "").strip().lower()
         if arch in {"nvidia", "linux"}:
-            engine_backend = "trtllm"
+            engine_type = "trtllm"
         elif arch in {"apple", "mac", "darwin"}:
-            engine_backend = "mlx"
+            engine_type = "mlx"
         else:
-            engine_backend = "mlx" if platform.system().lower() == "darwin" else "trtllm"
+            engine_type = "mlx" if platform.system().lower() == "darwin" else "trtllm"
 
     try:
-        result = await start_backend_engine(engine_backend, resolved)
-        if result.get("status") != "started":
+        if backend == "custom":
+            await _run_agent_script("start-backend", engine_type, resolved)
+            custom_backend = backend_manager.create_backend(engine_type)
+            backend_manager.set_active_backend(custom_backend, engine_type)
+            _ACTIVE_BACKEND = engine_type
+            agent_state.current_model = resolved
+            agent_state.running = True
+            _ENGINE_LAST_START_TS[engine_type] = time.time()
+            result = {"status": "started", "engine": backend, "engine_type": engine_type, "accepted": True}
+        else:
+            result = await start_backend_engine("ollama", model_id)
+            result["engine"] = "ollama"
+
+        if result.get("status") not in {"started", "ok"}:
             raise RuntimeError(result.get("error") or "backend did not report started")
 
         await asyncio.to_thread(start_wrapper)
