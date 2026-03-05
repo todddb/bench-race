@@ -4,7 +4,7 @@ import json
 import os
 import platform
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -129,6 +129,32 @@ def get_registry_entry(model_id: str) -> Optional[Dict[str, Any]]:
     return _load_registry().get((model_id or "").strip())
 
 
+def get_all_registry_entries() -> List[Dict[str, str]]:
+    entries: List[Dict[str, str]] = []
+    for model_id, entry in _load_registry().items():
+        if not isinstance(entry, dict):
+            continue
+        combined_apple = str(((entry.get("ollama") or {}).get("apple") or "")).strip()
+        combined_nvidia = str(((entry.get("ollama") or {}).get("nvidia") or "")).strip()
+        if not combined_apple and not combined_nvidia:
+            combined_apple = str(((entry.get("custom") or {}).get("apple") or "")).strip()
+            combined_nvidia = str(((entry.get("custom") or {}).get("nvidia") or "")).strip()
+        entries.append({"id": model_id, "apple": combined_apple, "nvidia": combined_nvidia})
+    return entries
+
+
+def resolve_standard_id_from_runtime(runtime_id: str) -> Optional[str]:
+    runtime_id = (runtime_id or "").strip()
+    if not runtime_id:
+        return None
+
+    for entry in get_all_registry_entries():
+        for field in ("apple", "nvidia"):
+            if str(entry.get(field) or "").strip() == runtime_id:
+                return str(entry.get("id") or "").strip() or None
+    return None
+
+
 def get_machine_architecture() -> str:
     env = (os.getenv("BENCH_AGENT_PLATFORM") or "").strip().lower()
     if env in {"apple", "mac", "darwin"}:
@@ -156,7 +182,37 @@ def resolve_model_for_machine(model_id: str, backend: str):
 
 
 def registry_entry_matches_backend(model_id: str, backend: str) -> bool:
-    entry = get_registry_entry(model_id)
-    if not entry:
+    """
+    Validation semantics:
+
+    - For MANAGED backends:
+        model_id must equal standardized registry "id".
+    - For EXTERNAL backends:
+        model_id must match runtime field ("apple" or "nvidia") for this machine.
+    """
+
+    backend = (backend or "").strip().lower()
+    if backend not in {"custom", "ollama"}:
         return False
-    return isinstance(entry.get((backend or "").strip().lower()), dict)
+
+    from agent.backends.base import BackendType
+
+    try:
+        from agent.agent_app import backend_manager as active_backend_manager
+    except Exception:
+        return False
+
+    active_backend = active_backend_manager.get_active_backend()
+
+    if active_backend.backend_type == BackendType.MANAGED:
+        entry = get_registry_entry(model_id)
+        return entry is not None
+
+    if active_backend.backend_type == BackendType.EXTERNAL:
+        machine_arch = get_machine_architecture()
+        for entry in get_all_registry_entries():
+            if str(entry.get(machine_arch) or "").strip() == (model_id or "").strip():
+                return True
+        return False
+
+    return False

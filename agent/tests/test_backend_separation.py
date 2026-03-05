@@ -287,6 +287,55 @@ def test_jobs_allow_external_without_availability_probe(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Registry validation semantics by backend type
+# ---------------------------------------------------------------------------
+
+
+def test_external_runtime_id_allowed(monkeypatch):
+    """EXTERNAL backends must accept runtime IDs present in registry mappings."""
+    _ensure_agent_config()
+    reg = importlib.import_module("agent.model_registry")
+    mod = importlib.import_module("agent.agent_app")
+
+    class _ExternalBackend:
+        backend_type = mod.BackendType.EXTERNAL
+
+    class _Manager:
+        def get_active_backend(self):
+            return _ExternalBackend()
+
+    monkeypatch.setattr(mod, "backend_manager", _Manager())
+    monkeypatch.setattr(reg, "get_machine_architecture", lambda: "apple")
+    monkeypatch.setattr(
+        reg,
+        "get_all_registry_entries",
+        lambda: [{"id": "llama3.1-8b-q4", "apple": "llama3.1:8b-instruct-q4_K_M", "nvidia": "llama3.1:8b-instruct-q4_K_M"}],
+    )
+
+    assert reg.registry_entry_matches_backend("llama3.1:8b-instruct-q4_K_M", "ollama") is True
+
+
+def test_managed_rejects_runtime_id(monkeypatch):
+    """MANAGED backends must accept only standardized IDs, not runtime IDs."""
+    _ensure_agent_config()
+    reg = importlib.import_module("agent.model_registry")
+    mod = importlib.import_module("agent.agent_app")
+
+    class _ManagedBackend:
+        backend_type = mod.BackendType.MANAGED
+
+    class _Manager:
+        def get_active_backend(self):
+            return _ManagedBackend()
+
+    monkeypatch.setattr(mod, "backend_manager", _Manager())
+    monkeypatch.setattr(reg, "get_registry_entry", lambda model_id: {"custom": {}} if model_id == "llama3.1-8b-q4" else None)
+
+    assert reg.registry_entry_matches_backend("llama3.1:8b-instruct-q4_K_M", "custom") is False
+    assert reg.registry_entry_matches_backend("llama3.1-8b-q4", "custom") is True
+
+
+# ---------------------------------------------------------------------------
 # Atomic switch: external backends are never stopped
 # ---------------------------------------------------------------------------
 
