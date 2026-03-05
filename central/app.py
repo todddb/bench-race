@@ -2814,7 +2814,7 @@ def api_status():
             "backend_status": "switching"
         })
 
-    selected_model = request.args.get("model")
+    model_id = request.args.get("model")
     try:
         num_ctx = int(request.args.get("num_ctx", 4096))
     except Exception:
@@ -2831,13 +2831,12 @@ def api_status():
             cap["agent_reachable"] = True
             active_backend = (cap.get("active_backend") or "ollama").lower()
             available_llm = _available_llm_models(cap, active_backend)
-            try:
-                resolved_selected_model = _resolved_validation_model_for_machine(
-                    m, active_backend, selected_model or ""
-                )
-            except Exception as e:
-                app.logger.warning(f"Model resolution failed in api_status: {e}")
-                resolved_selected_model = None
+            if model_id:
+                try:
+                    _, resolved_selected_model = _resolve_model_for_machine(m, active_backend, model_id)
+                except Exception as e:
+                    app.logger.warning(f"Model resolution failed in api_status: {e}")
+                    resolved_selected_model = None
             has_selected_model = bool(resolved_selected_model and model_satisfied(resolved_selected_model, available_llm))
             missing_required_llm: List[str] = []
             for model in required["llm"]:
@@ -2856,7 +2855,7 @@ def api_status():
                 memory_label = "VRAM"
             elif cap.get("accelerator_type") == "metal":
                 memory_label = "Unified"
-            fit_model = resolved_selected_model or (selected_model or "")
+            fit_model = resolved_selected_model or (model_id or "")
             fit = _compute_fit(m, cap, fit_model, num_ctx)
             statuses.append(
                 {
@@ -2866,7 +2865,7 @@ def api_status():
                     "excluded": m.get("excluded", False),
                     "reachable": True,
                     "agent_reachable": True,
-                    "selected_model": selected_model,
+                    "selected_model": model_id,
                     "resolved_selected_model": resolved_selected_model,
                     "has_selected_model": has_selected_model,
                     "backend": active_backend,
@@ -2898,7 +2897,7 @@ def api_status():
                     "excluded": m.get("excluded", False),
                     "reachable": False,
                     "agent_reachable": False,
-                    "selected_model": selected_model,
+                    "selected_model": model_id,
                     "resolved_selected_model": resolved_selected_model,
                     "has_selected_model": False,
                     "backend": "ollama",
@@ -2917,7 +2916,7 @@ def api_status():
                     "runtime_metrics": RUNTIME_METRICS.get(m.get("machine_id")),
                 }
             )
-    response_dict = {"model": selected_model, "required": required, "machines": statuses}
+    response_dict = {"model": model_id, "required": required, "machines": statuses}
     return jsonify(response_dict), 200
 
 
