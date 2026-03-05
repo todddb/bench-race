@@ -1584,7 +1584,10 @@ async def switch_backend(req: BackendSwitchRequest):
             raise HTTPException(status_code=500, detail="Custom backend started but wrapper is not running")
         return {"ok": True, "backend": "custom", "runtime_backend": runtime_backend, "model": resolved, "wrapper_running": True}
 
-    await asyncio.to_thread(stop_wrapper)
+    await _run_agent_script("stop-wrapper")
+    await _run_agent_script("stop-backend", "mlx")
+    await _run_agent_script("stop-backend", "trtllm")
+    await _run_agent_script("stop-backend", "ollama", model)
     result = await start_engine({"backend": "ollama", "model": model})
     return {"ok": True, "backend": "ollama", "model": model, "wrapper_running": False, "result": result}
 
@@ -1687,7 +1690,10 @@ async def start_engine(payload: dict):
 
     if backend == "ollama":
         try:
-            await asyncio.to_thread(stop_wrapper)
+            await _run_agent_script("stop-wrapper")
+            await _run_agent_script("stop-backend", "mlx")
+            await _run_agent_script("stop-backend", "trtllm")
+            await _run_agent_script("stop-backend", "ollama", model_id)
             result = await start_backend_engine("ollama", model_id)
             return result
         except HTTPException:
@@ -1833,6 +1839,7 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
 async def backend_status(request: Request):
     """Return status for selected backend only."""
     active_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+    api_backend = "custom" if active_backend in {"mlx", "trtllm"} else active_backend
 
     statuses = {}
     selected_for_health = active_backend if active_backend in {"ollama", "mlx", "trtllm", "comfyui"} else None
@@ -1876,7 +1883,7 @@ async def backend_status(request: Request):
         active_backend=active_backend,
         backends=statuses,
         keep_warm=_BACKEND_KEEP_WARM,
-        backend=active_backend,
+        backend=api_backend,
         state=state,
     ).model_dump()
     payload["engine_running"] = agent_state.running

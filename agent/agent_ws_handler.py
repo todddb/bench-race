@@ -56,45 +56,45 @@ def _detect_platform_tag() -> str:
 
 async def handle_backend_switch(payload: Dict[str, Any], send: SendPayload) -> None:
     backend = str(payload.get("backend") or "").strip().lower()
-    target = str(payload.get("target") or "").strip().lower()
     request_id = str(payload.get("request_id") or "")
+    model = str(payload.get("model") or "").strip()
     if not request_id:
         return
 
-    await _send_status(send, request_id, "offline", "Going offline to switch backend")
-    await _send_status(send, request_id, "stopping", "Stopping Ollama")
-
-    rc = await _run_script_and_stream(send, request_id, "stopping", "./scripts/agent stop-ollama")
-    if rc != 0:
-        await _send_status(send, request_id, "error", f"./scripts/agent stop-ollama exited {rc}")
-        return
-
-    if backend == "ollama":
-        start_cmd = "./scripts/agent start-ollama"
-    elif backend == "custom":
-        platform_tag = _detect_platform_tag()
-        pick = target
-        if pick not in {"mlx", "trtllm"}:
-            pick = "mlx" if platform_tag == "mac" else "trtllm"
-        start_cmd = "./scripts/agent start-mlx" if pick == "mlx" else "./scripts/agent start-trtllm"
-    else:
+    if backend not in {"ollama", "custom"}:
         await _send_status(send, request_id, "error", f"Unsupported backend: {backend}")
         return
 
-    if "start-mlx" in start_cmd:
-        await _send_status(send, request_id, "starting", "Starting MLX")
-    elif "start-trtllm" in start_cmd:
-        await _send_status(send, request_id, "starting", "Starting TRT-LLM")
+    await _send_status(send, request_id, "offline", "Going offline to switch backend")
+
+    if backend == "custom":
+        platform_tag = _detect_platform_tag()
+        engine_type = "mlx" if platform_tag == "mac" else "trtllm"
+        await _send_status(send, request_id, "starting", f"Starting custom backend ({engine_type})")
+        rc = await _run_script_and_stream(send, request_id, "starting", f"./scripts/agent start-backend {engine_type} {model}" if model else f"./scripts/agent start-backend {engine_type}")
+        if rc != 0:
+            await _send_status(send, request_id, "error", f"start-backend {engine_type} exited {rc}")
+            return
+        rc = await _run_script_and_stream(send, request_id, "starting", "./scripts/agent start-wrapper")
+        if rc != 0:
+            await _send_status(send, request_id, "error", f"./scripts/agent start-wrapper exited {rc}")
+            return
     else:
-        await _send_status(send, request_id, "starting", "Starting Ollama")
+        await _send_status(send, request_id, "stopping", "Stopping wrapper and managed custom backends")
+        for cmd in (
+            "./scripts/agent stop-wrapper",
+            "./scripts/agent stop-backend mlx",
+            "./scripts/agent stop-backend trtllm",
+            f"./scripts/agent stop-backend ollama {model}" if model else "./scripts/agent stop-backend ollama",
+        ):
+            rc = await _run_script_and_stream(send, request_id, "stopping", cmd)
+            if rc != 0:
+                await _send_status(send, request_id, "error", f"{cmd} exited {rc}")
+                return
+        await _send_status(send, request_id, "starting", "Using Ollama system service")
 
-    rc = await _run_script_and_stream(send, request_id, "starting", start_cmd)
-    if rc != 0:
-        await _send_status(send, request_id, "error", f"{start_cmd} exited {rc}")
-        return
-
-    await _send_status(send, request_id, "starting", "Loading model...")
     await _send_status(send, request_id, "running", "Ready")
+
 
 
 async def maybe_handle_ws_command(raw: str, send: SendPayload) -> bool:

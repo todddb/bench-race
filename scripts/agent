@@ -354,7 +354,26 @@ case "$cmd" in
       *) err "Unknown backend: ${1:-}"; exit 2;;
     esac
     ;;
-  stop-backend) case "${1:-}" in ollama) log "ollama is externally managed; nothing to stop" ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
+  stop-backend)
+    case "${1:-}" in
+      ollama)
+        if [[ -n "${2:-}" ]]; then
+          log "unloading ollama model: ${2}"
+          if run_cmd_logged ollama rm "${2}"; then
+            log "Unloaded Ollama model; service remains running."
+          else
+            log "[WARN] failed to unload ollama model: ${2}"
+          fi
+        else
+          log "ollama is externally managed; no model specified to unload"
+        fi
+        ;;
+      mlx) stop_mlx ;;
+      trtllm) stop_trtllm ;;
+      comfyui) stop_comfyui ;;
+      *) err "Unknown backend: ${1:-}"; exit 2 ;;
+    esac
+    ;;
   start-ollama) stop_wrapper || true; check_ollama_available || true ;;
   stop-ollama) log "ollama is externally managed; nothing to stop" ;;
   start-mlx) start_mlx "${1:-}" ;;
