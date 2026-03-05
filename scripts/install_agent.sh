@@ -582,18 +582,23 @@ install_or_update_ollama() {
 
     log_step "Installing/updating Ollama..."
 
+    local ollama_installed=false
     if command -v ollama &>/dev/null; then
+        ollama_installed=true
         log_info "Ollama already installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-        if [[ "$UPDATE_MODE" != true ]]; then
-            log_info "Use --update to upgrade Ollama"
-            return 0
-        fi
     fi
 
     if [[ "$OS_TYPE" == "macos" ]]; then
         if command -v brew &>/dev/null; then
-            log_info "Installing Ollama via Homebrew..."
-            run_command brew install ollama
+            if [[ "$ollama_installed" != true ]]; then
+                log_info "Installing Ollama via Homebrew..."
+                run_command brew install ollama
+            else
+                log_info "Ollama already installed; skipping brew install"
+            fi
+
+            log_info "Ensuring Ollama service is started via Homebrew..."
+            run_command brew services start ollama
         else
             log_warning "Homebrew not found."
             log_info "Install Ollama from the macOS DMG: https://ollama.com/download/mac"
@@ -620,11 +625,21 @@ install_or_update_ollama() {
             fi
         fi
 
-        log_info "Installing Ollama via official install script..."
-        if [[ "$DRY_RUN" == true ]]; then
-            echo "[DRY-RUN] Would execute: curl -fsSL https://ollama.com/install.sh | sh"
+        if [[ "$ollama_installed" != true ]]; then
+            log_info "Installing Ollama via official install script..."
+            if [[ "$DRY_RUN" == true ]]; then
+                echo "[DRY-RUN] Would execute: curl -fsSL https://ollama.com/install.sh | sh"
+            else
+                curl -fsSL https://ollama.com/install.sh | sh
+            fi
         else
-            curl -fsSL https://ollama.com/install.sh | sh
+            log_info "Ollama already installed; skipping install script"
+        fi
+
+        if command -v systemctl &>/dev/null; then
+            log_info "Ensuring ollama systemd service is enabled and started..."
+            run_privileged systemctl enable ollama
+            run_privileged systemctl start ollama
         fi
     fi
 
@@ -632,30 +647,11 @@ install_or_update_ollama() {
     if command -v ollama &>/dev/null; then
         log_success "Ollama installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
 
-        # Try to start Ollama
-        if ! curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-            log_info "Starting Ollama service..."
-
-            if [[ "$OS_TYPE" == "linux" ]] && command -v systemctl &>/dev/null; then
-                run_command systemctl start ollama 2>/dev/null || true
-                sleep 1
-            fi
-
-            # If still not running, start manually
-            if ! curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-                log_info "Starting 'ollama serve' in background..."
-                if [[ "$DRY_RUN" != true ]]; then
-                    nohup ollama serve >"/tmp/ollama-serve.log" 2>&1 &
-                    sleep 2
-                fi
-            fi
-        fi
-
         # Final check
         if curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
             log_success "Ollama API is reachable"
         else
-            log_warning "Ollama API not responding. You may need to start 'ollama serve' manually."
+            log_warning "Ollama API not responding on port 11434. Ensure the system-managed service is running."
         fi
     else
         log_error "Ollama installation failed"
