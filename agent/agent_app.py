@@ -1435,11 +1435,14 @@ async def _atomic_switch_backend(engine: str, model: Optional[str]) -> Dict[str,
     backend_manager.set_active_backend(new_backend, engine)
     _ACTIVE_BACKEND = engine
 
+    # Only stop the previous backend if it was MANAGED (has lifecycle).
+    # External backends like Ollama are never stopped by the agent.
     if old_backend_name and old_backend_name != engine:
-        try:
-            await old_backend.stop()
-        except Exception as stop_err:
-            slog.warning("backend_stop_previous_failed", backend=old_backend_name, error=str(stop_err))
+        if hasattr(old_backend, 'backend_type') and old_backend.backend_type == BackendType.MANAGED:
+            try:
+                await old_backend.stop()
+            except Exception as stop_err:
+                slog.warning("backend_stop_previous_failed", backend=old_backend_name, error=str(stop_err))
 
     _ENGINE_LAST_START_TS[engine] = time.time()
     return {"ok": True}
@@ -1601,13 +1604,17 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
 
     selected_backend = backend_manager.create_backend(backend)
     if selected_backend.backend_type == BackendType.EXTERNAL:
+        # External backends (e.g. Ollama): no lifecycle management.
+        # Just register as active and record the selected model.
         backend_manager.set_active_backend(selected_backend, backend)
         _ACTIVE_BACKEND = backend
         agent_state.current_model = model
-        agent_state.running = True
+        # Do NOT set agent_state.running for external backends — they have
+        # no managed running state.  The /jobs guard checks availability instead.
         await broadcast_status("Ready")
         return {"status": "started", "engine": backend, "accepted": True}
 
+    # Managed backends (MLX, TRT-LLM): full lifecycle management.
     if backend == "trtllm":
         await broadcast_status("Starting TRT Engine")
     elif backend == "mlx":

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, List
 
 import uvicorn
 import yaml
@@ -204,5 +205,185 @@ async def infer_stream(payload: Dict[str, Any], request: Request) -> StreamingRe
     return StreamingResponse(event_stream(), media_type="text/plain")
 
 
+# ---------------------------------------------------------------------------
+# Ollama-compatible API surface
+#
+# These endpoints allow the wrapper to be used as a drop-in replacement for
+# Ollama from the UI's perspective.  The UI selects a backend by base_url
+# only — port 11434 for real Ollama, port 9002 for managed engines.
+# ---------------------------------------------------------------------------
+
+def _ollama_model_entry(model_id: str, backend: str) -> Dict[str, Any]:
+    """Build an Ollama-compatible model descriptor for /api/tags."""
+    return {
+        "name": model_id,
+        "model": model_id,
+        "modified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "size": 0,
+        "digest": "",
+        "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": backend,
+            "families": [backend],
+            "parameter_size": "",
+            "quantization_level": "",
+        },
+    }
+
+
+@app.get("/api/tags")
+async def ollama_tags() -> Dict[str, Any]:
+    """Ollama-compatible GET /api/tags — list available models."""
+    models: List[Dict[str, Any]] = []
+    for name, adapter in adapters.items():
+        try:
+            for m in await adapter.list_models():
+                mid = m["id"] if isinstance(m, dict) else str(m)
+                models.append(_ollama_model_entry(mid, name))
+        except Exception:
+            continue
+    return {"models": models}
+
+
+@app.post("/api/generate")
+async def ollama_generate(payload: Dict[str, Any], request: Request) -> StreamingResponse:
+    """Ollama-compatible POST /api/generate — streaming or non-streaming."""
+    model_id = payload.get("model", "")
+    prompt = payload.get("prompt", "")
+    stream = payload.get("stream", True)
+    backend = route_model_to_backend(model_id, cfg)
+
+    if backend not in adapters:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
+
+    if not active_state.get("backend"):
+        raise HTTPException(status_code=503, detail="No managed engine running. Start a model first.")
+
+    infer_payload = {
+        "prompt": prompt,
+        "max_tokens": int(payload.get("options", {}).get("num_predict", 256)),
+        "temperature": float(payload.get("options", {}).get("temperature", 0.7)),
+    }
+
+    if not stream:
+        response = await adapters[backend].infer(model_id, {**infer_payload, "stream": False})
+        text = response.get("text", "")
+        tokens = int(response.get("tokens", 0))
+        return JSONResponse({
+            "model": model_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "response": text,
+            "done": True,
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "eval_count": tokens,
+            "eval_duration": 0,
+        })
+
+    async def _stream() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in adapters[backend].infer_stream(model_id, infer_payload):
+                if await request.is_disconnected():
+                    break
+                text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                frame = json.dumps({
+                    "model": model_id,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "response": text,
+                    "done": False,
+                })
+                yield (frame + "\n").encode("utf-8")
+        except Exception:
+            pass
+        done_frame = json.dumps({
+            "model": model_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "response": "",
+            "done": True,
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "eval_count": 0,
+            "eval_duration": 0,
+        })
+        yield (done_frame + "\n").encode("utf-8")
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/api/chat")
+async def ollama_chat(payload: Dict[str, Any], request: Request) -> StreamingResponse:
+    """Ollama-compatible POST /api/chat — chat-style inference."""
+    model_id = payload.get("model", "")
+    messages = payload.get("messages", [])
+    stream = payload.get("stream", True)
+    backend = route_model_to_backend(model_id, cfg)
+
+    if backend not in adapters:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
+
+    if not active_state.get("backend"):
+        raise HTTPException(status_code=503, detail="No managed engine running. Start a model first.")
+
+    prompt = "\n".join(
+        str(m.get("content", "")) for m in messages if isinstance(m, dict)
+    )
+    infer_payload = {
+        "prompt": prompt,
+        "max_tokens": int(payload.get("options", {}).get("num_predict", 256)),
+        "temperature": float(payload.get("options", {}).get("temperature", 0.7)),
+    }
+
+    if not stream:
+        response = await adapters[backend].infer(model_id, {**infer_payload, "stream": False})
+        text = response.get("text", "")
+        tokens = int(response.get("tokens", 0))
+        return JSONResponse({
+            "model": model_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "message": {"role": "assistant", "content": text},
+            "done": True,
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "eval_count": tokens,
+            "eval_duration": 0,
+        })
+
+    async def _stream() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in adapters[backend].infer_stream(model_id, infer_payload):
+                if await request.is_disconnected():
+                    break
+                text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                frame = json.dumps({
+                    "model": model_id,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "message": {"role": "assistant", "content": text},
+                    "done": False,
+                })
+                yield (frame + "\n").encode("utf-8")
+        except Exception:
+            pass
+        done_frame = json.dumps({
+            "model": model_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "eval_count": 0,
+            "eval_duration": 0,
+        })
+        yield (done_frame + "\n").encode("utf-8")
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+
+
+WRAPPER_PORT = int(os.getenv("WRAPPER_PORT", "9002"))
+
 if __name__ == "__main__":
-    uvicorn.run("agent.backends.wrapper.app:app", host="0.0.0.0", port=9010, reload=False)
+    uvicorn.run("agent.backends.wrapper.app:app", host="0.0.0.0", port=WRAPPER_PORT, reload=False)

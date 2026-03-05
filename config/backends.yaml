@@ -13,3 +13,9 @@ mlx:
 ollama:
   host: 127.0.0.1
   port: 11434
+
+# Managed wrapper: Ollama-compatible API surface backed by MLX/TRT-LLM.
+# Runs on a separate port from Ollama. The UI selects backend by base_url only.
+wrapper:
+  host: 127.0.0.1
+  port: 9002
