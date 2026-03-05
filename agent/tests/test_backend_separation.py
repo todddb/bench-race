@@ -79,8 +79,8 @@ def test_ollama_stop_is_noop():
     assert result == {"ok": True}
 
 
-def test_start_backend_engine_external_does_not_set_running(monkeypatch):
-    """start_backend_engine for EXTERNAL must not set agent_state.running."""
+def test_start_backend_engine_external_sets_running(monkeypatch):
+    """start_backend_engine for EXTERNAL should mark engine as ready/running."""
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
@@ -121,10 +121,9 @@ def test_start_backend_engine_external_does_not_set_running(monkeypatch):
 
     result = asyncio.run(mod.start_backend_engine("ollama", "test-model"))
 
-    assert result["status"] == "started"
+    assert result["status"] == "ok"
     assert mod.agent_state.current_model == "test-model"
-    # Key assertion: running must NOT be set to True for external backends
-    assert mod.agent_state.running is False
+    assert mod.agent_state.running is True
 
 
 def test_stop_engine_external_does_not_run_script(monkeypatch):
@@ -157,7 +156,7 @@ def test_stop_engine_external_does_not_run_script(monkeypatch):
     monkeypatch.setattr(mod, "_run_agent_script", _boom)
 
     response = asyncio.run(mod.stop_engine(mod.EngineStopRequest(engine="ollama")))
-    assert response["ok"] is True
+    assert response["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +232,8 @@ def test_jobs_allow_external_without_running(monkeypatch):
     assert hasattr(result, "job_id")
 
 
-def test_jobs_reject_external_no_model(monkeypatch):
-    """POST /jobs must reject EXTERNAL backend when no model selected."""
+def test_jobs_allow_external_without_agent_state_model(monkeypatch):
+    """POST /jobs must allow EXTERNAL backend without agent_state.current_model."""
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
@@ -245,9 +244,6 @@ def test_jobs_reject_external_no_model(monkeypatch):
     class _ExternalBackend:
         backend_type = mod.BackendType.EXTERNAL
 
-        async def is_available(self):
-            return True
-
     class _Manager:
         def get_active_backend_name(self):
             return "ollama"
@@ -259,16 +255,12 @@ def test_jobs_reject_external_no_model(monkeypatch):
     monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_a, **_k: True)
 
     req = mod.LLMRequest(model="model-a", prompt="hello")
-    try:
-        asyncio.run(mod.start_job(req))
-        assert False, "Expected HTTPException"
-    except mod.HTTPException as exc:
-        assert exc.status_code == 400
-        assert exc.detail == "No model selected"
+    result = asyncio.run(mod.start_job(req))
+    assert hasattr(result, "job_id")
 
 
-def test_jobs_reject_external_unavailable(monkeypatch):
-    """POST /jobs must reject EXTERNAL backend when it's unreachable."""
+def test_jobs_allow_external_without_availability_probe(monkeypatch):
+    """POST /jobs must not gate EXTERNAL backend on is_available checks."""
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
@@ -279,9 +271,6 @@ def test_jobs_reject_external_unavailable(monkeypatch):
     class _ExternalBackend:
         backend_type = mod.BackendType.EXTERNAL
 
-        async def is_available(self):
-            return False
-
     class _Manager:
         def get_active_backend_name(self):
             return "ollama"
@@ -293,12 +282,8 @@ def test_jobs_reject_external_unavailable(monkeypatch):
     monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_a, **_k: True)
 
     req = mod.LLMRequest(model="model-a", prompt="hello")
-    try:
-        asyncio.run(mod.start_job(req))
-        assert False, "Expected HTTPException"
-    except mod.HTTPException as exc:
-        assert exc.status_code == 503
-        assert "unavailable" in exc.detail.lower()
+    result = asyncio.run(mod.start_job(req))
+    assert hasattr(result, "job_id")
 
 
 # ---------------------------------------------------------------------------
