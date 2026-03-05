@@ -1702,12 +1702,7 @@ async def start_engine(payload: dict):
             detail=f"Model {model_id} not valid for backend {backend}",
         )
 
-    resolved = resolve_model_for_machine(model_id, backend)
-    if not resolved:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model resolution failed for model_id={model_id}, backend={backend}",
-        )
+    resolved = model_id
 
     log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, model_id, resolved)
 

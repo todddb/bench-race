@@ -86,25 +86,10 @@ def test_engine_start_missing_required_fields():
         assert exc.detail == "Missing required field: model"
 
 
-def test_engine_start_resolution_failure(monkeypatch):
+def test_engine_start_custom_uses_model_id_without_resolution(monkeypatch):
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
-    monkeypatch.setattr(mod, "resolve_model_for_machine", lambda model_id, backend: None)
-
-    try:
-        asyncio.run(mod.start_engine({"backend": "custom", "model": "bad-model"}))
-        assert False, "Expected HTTPException"
-    except mod.HTTPException as exc:
-        assert exc.status_code == 400
-        assert "Model bad-model not valid for backend custom" == exc.detail
-
-
-def test_engine_start_custom_uses_resolved_model(monkeypatch):
-    _ensure_agent_config()
-    mod = importlib.import_module("agent.agent_app")
-
-    monkeypatch.setattr(mod, "resolve_model_for_machine", lambda _model_id, _backend: "resolved-model")
     monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_args, **_kwargs: True)
 
     calls = []
@@ -122,7 +107,7 @@ def test_engine_start_custom_uses_resolved_model(monkeypatch):
     assert response["engine"] == "custom"
     assert response["engine_type"] in {"mlx", "trtllm"}
     assert response["accepted"] is True
-    assert any(call[0] == "start-backend" and call[-1] == "resolved-model" for call in calls)
+    assert any(call[0] == "start-backend" and call[-1] == "llama3.1-8b-custom" for call in calls)
     mod._ACTIVE_BACKEND = None
 
 
