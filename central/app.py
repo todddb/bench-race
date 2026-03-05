@@ -2217,10 +2217,7 @@ def _wait_for_backend_ready(machine: Dict[str, Any], requested_backend: str, tim
         return False, "Missing agent_base_url"
 
     requested_backend = (requested_backend or "").strip().lower()
-    if requested_backend == "custom":
-        expected_backends = {"mlx", "trtllm"}
-    else:
-        expected_backends = {requested_backend}
+    expected_backends = {requested_backend}
 
     deadline = time.time() + timeout_s
     failures = 0
@@ -2319,8 +2316,6 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
     """Resolve registry model_id into backend engine + runtime identifier for a machine."""
     backend = (backend or "").strip().lower()
-    if backend in {"mlx", "trtllm"}:
-        backend = "custom"
     resolved_model = resolve_runtime_model(machine, backend, model_id)
     if backend in {"ollama", "custom"}:
         return backend, resolved_model
@@ -2369,8 +2364,8 @@ def api_backend_switch():
         if not backend:
             return jsonify({"status": "error", "error": "backend field required"}), 400
 
-        if backend not in {"custom", "ollama", "mlx", "trtllm"}:
-            return jsonify({"status": "error", "error": "backend must be custom, ollama, mlx, or trtllm"}), 400
+        if backend not in {"custom", "ollama"}:
+            return jsonify({"status": "error", "error": "backend must be custom or ollama"}), 400
 
         if not model_id:
             return jsonify({"status": "error", "error": "model_id field required"}), 400
@@ -2406,6 +2401,12 @@ def api_backend_switch():
                     f"{base_url}/api/engine/start",
                     json={"backend": resolved_backend, "model": resolved_runtime_model},
                     timeout=300,
+                )
+                log.info(
+                    "Backend switch request sent to agent machine=%s backend=%s model=%s",
+                    machine_id,
+                    resolved_backend,
+                    resolved_runtime_model,
                 )
 
                 if resp.status_code != 200:
