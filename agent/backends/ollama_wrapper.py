@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -11,6 +14,7 @@ from agent.backends.base import BaseBackend
 class OllamaBackendWrapper(BaseBackend):
     def __init__(self, base_url: str = "http://127.0.0.1:11434") -> None:
         self.base_url = base_url.rstrip("/")
+        self.repo_root = Path(__file__).resolve().parents[2]
 
     async def list_models(self) -> list[str]:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -41,7 +45,13 @@ class OllamaBackendWrapper(BaseBackend):
                         break
 
     async def start(self, model: str):
-        return {"ok": True, "backend": "ollama", "model": model}
+        cmd = [str(self.repo_root / "scripts" / "agent"), "start-backend", "ollama"]
+        if model:
+            cmd.append(model)
+        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        return {"ok": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}
 
     async def stop(self):
-        return {"ok": True, "backend": "ollama"}
+        cmd = [str(self.repo_root / "scripts" / "agent"), "stop-backend", "ollama"]
+        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
+        return {"ok": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}

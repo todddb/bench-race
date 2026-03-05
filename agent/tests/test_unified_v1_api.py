@@ -22,7 +22,7 @@ class _FakeBackend:
 
 
 class _FakeManager:
-    def get_active_backend(self, _active):
+    def get_active_backend(self):
         return _FakeBackend()
 
 

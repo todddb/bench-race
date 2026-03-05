@@ -21,7 +21,7 @@ import websockets
 import subprocess
 import signal
 from PIL import Image
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1394,6 +1394,45 @@ def _track_engine_task(engine: str, task: asyncio.Task) -> None:
     task.add_done_callback(_on_done)
 
 
+async def _validate_engine_start_request(engine: str, model: Optional[str]) -> tuple[bool, Optional[str]]:
+    if engine in {"mlx", "trtllm"} and not (model or "").strip():
+        return False, f"Model is required for backend '{engine}'"
+
+    if engine == "ollama" and (model or "").strip():
+        tags_url = CFG.get("ollama", {}).get("base_url", "http://127.0.0.1:11434").rstrip("/") + "/api/tags"
+        installed_tags = await asyncio.to_thread(fetch_installed_ollama_tags, tags_url)
+        resolved_model = resolved_ollama_pull_name({"model": model, "id": model}, installed_tags)
+        if not resolved_model:
+            return False, f"Model '{model}' is not installed for backend 'ollama'"
+
+    return True, None
+
+
+async def _atomic_switch_backend(engine: str, model: Optional[str]) -> Dict[str, Any]:
+    global _ACTIVE_BACKEND
+
+    new_backend = backend_manager.create_backend(engine)
+    old_backend = backend_manager.get_active_backend()
+    old_backend_name = backend_manager.get_active_backend_name()
+
+    start_result = await new_backend.start((model or "").strip())
+    if isinstance(start_result, dict) and not start_result.get("ok", True):
+        error = start_result.get("stderr") or start_result.get("error") or "Unknown error"
+        raise ValueError(str(error))
+
+    backend_manager.set_active_backend(new_backend, engine)
+    _ACTIVE_BACKEND = engine
+
+    if old_backend_name and old_backend_name != engine:
+        try:
+            await old_backend.stop()
+        except Exception as stop_err:
+            slog.warning("backend_stop_previous_failed", backend=old_backend_name, error=str(stop_err))
+
+    _ENGINE_LAST_START_TS[engine] = time.time()
+    return {"ok": True}
+
+
 async def _check_backend_health(backend: str) -> Dict[str, Any]:
     """Check if a backend is healthy and return status info."""
     vllm_cfg = CFG.get("vllm", {})
@@ -1479,6 +1518,7 @@ async def _idle_timeout_watcher():
     if _ACTIVE_BACKEND and not _BACKEND_KEEP_WARM:
         slog.info("backend_idle_timeout", backend=_ACTIVE_BACKEND, idle_secs=_BACKEND_IDLE_SECS)
         await _run_agent_script("stop-backend", _ACTIVE_BACKEND)
+        backend_manager.clear_active_backend()
         _ACTIVE_BACKEND = None
 
 
@@ -1495,13 +1535,15 @@ def _reset_idle_timer():
 async def select_backend(req: BackendSelectRequest):
     """
     Select and start an inference backend.
-    Stops any conflicting backend first (only-one-active-LLM-backend policy).
     """
-    global _ACTIVE_BACKEND, _BACKEND_KEEP_WARM
+    global _BACKEND_KEEP_WARM
 
     backend = req.backend.lower()
     if backend not in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
+
+    if backend in {"vllm", "comfyui"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend for this endpoint: {backend}")
 
     model_to_use = req.model
     if backend == "ollama" and req.model:
@@ -1510,27 +1552,17 @@ async def select_backend(req: BackendSelectRequest):
         resolved_model = resolved_ollama_pull_name({"model": model_to_use, "id": req.model}, installed_tags)
         if resolved_model:
             model_to_use = resolved_model
-        slog.info(
-            "backend_select_ollama_model_resolved",
-            requested_model=req.model,
-            resolved_model=model_to_use,
-        )
+
+    valid, reason = await _validate_engine_start_request(backend, model_to_use)
+    if not valid:
+        raise HTTPException(status_code=400, detail=reason)
 
     slog.info("backend_select", backend=backend, model=model_to_use, keep_warm=req.keep_warm)
     _BACKEND_KEEP_WARM = req.keep_warm
 
-    # Build args for start-backend
-    args = [backend]
-    if model_to_use:
-        args.append(model_to_use)
-
-    result = await _run_agent_script("start-backend", *args)
-
-    if result.get("ok"):
-        _ACTIVE_BACKEND = backend
+    try:
+        await _atomic_switch_backend(backend, model_to_use)
         _reset_idle_timer()
-
-        # Wait for health
         health_info = await _check_backend_health(backend)
         return {
             "ok": True,
@@ -1538,34 +1570,25 @@ async def select_backend(req: BackendSelectRequest):
             "state": "ready" if health_info.get("healthy") else "starting",
             "health": health_info,
         }
-    else:
+    except ValueError as e:
         return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "backend": backend,
-                "state": "error",
-                "error": result.get("stderr", result.get("error", "Unknown error")),
-            },
+            status_code=400,
+            content={"ok": False, "backend": backend, "state": "error", "error": str(e)},
         )
 
 
 @app.post("/api/engine/start")
 async def start_engine(req: EngineStartRequest):
     """
-    Start backend engine asynchronously so callers can poll readiness separately.
+    Start backend engine and switch active backend atomically.
     """
-    global _ACTIVE_BACKEND
     requested_backend = getattr(req, "backend", None)
     engine = (req.engine or requested_backend or "").strip().lower()
     valid_backends = {"ollama", "mlx", "trtllm"}
     if not engine:
         raise HTTPException(status_code=400, detail="engine is required")
     if engine not in valid_backends and engine != "comfyui":
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Invalid backend '{engine}'"},
-        )
+        return JSONResponse(status_code=400, content={"error": f"Invalid backend '{engine}'"})
 
     if engine == "comfyui":
         existing = _ENGINE_TASKS.get(engine)
@@ -1575,29 +1598,26 @@ async def start_engine(req: EngineStartRequest):
         _track_engine_task(engine, task)
         return {"status": "starting", "engine": engine, "accepted": True}
 
+    valid, reason = await _validate_engine_start_request(engine, req.model)
+    if not valid:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "engine": engine, "accepted": True, "error": reason},
+        )
+
     try:
-        if engine == "ollama":
-            await broadcast_status("Stopping Ollama")
-        elif engine == "trtllm":
+        if engine == "trtllm":
             await broadcast_status("Starting TRT Engine")
         elif engine == "mlx":
             await broadcast_status("Loading MLX Model")
-        result = await _run_agent_script("start-backend", engine, req.model) if req.model else await _run_agent_script("start-backend", engine)
-        if result.get("ok"):
-            _ENGINE_LAST_START_TS[engine] = time.time()
-            _ACTIVE_BACKEND = engine
-            await broadcast_status("Warming Model")
-            await broadcast_status("Ready")
-            return {"status": "started", "engine": engine, "accepted": True}
-        raise subprocess.CalledProcessError(
-            returncode=int(result.get("returncode") or 1),
-            cmd="start-backend",
-            stderr=result.get("stderr") or result.get("error") or "Unknown error",
-        )
-    except subprocess.CalledProcessError as e:
+        await _atomic_switch_backend(engine, req.model)
+        await broadcast_status("Warming Model")
+        await broadcast_status("Ready")
+        return {"status": "started", "engine": engine, "accepted": True}
+    except ValueError as e:
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "engine": engine, "accepted": True, "error": str(e.stderr or str(e))},
+            content={"status": "error", "engine": engine, "accepted": True, "error": str(e)},
         )
 
 
@@ -1606,6 +1626,7 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
     """
     Stop one backend engine or all inference engines when engine is omitted.
     """
+    global _ACTIVE_BACKEND
     engine = ((req.engine if req else "") or "").strip().lower()
 
     if not engine:
@@ -1629,6 +1650,9 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
 
     result = await _run_agent_script("stop-backend", engine)
     if result.get("ok"):
+        if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
+            backend_manager.clear_active_backend()
+            _ACTIVE_BACKEND = None
         return {"ok": True}
     return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
 
@@ -1638,14 +1662,16 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
     """Stop a specific backend or the active one."""
     global _ACTIVE_BACKEND
 
-    target = backend or _ACTIVE_BACKEND
+    active_name = backend_manager.get_active_backend_name()
+    target = backend or active_name or _ACTIVE_BACKEND
     if not target:
         return {"ok": True, "message": "No active backend to stop"}
 
     slog.info("backend_stop", backend=target)
     result = await _run_agent_script("stop-backend", target)
 
-    if _ACTIVE_BACKEND == target:
+    if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == target:
+        backend_manager.clear_active_backend()
         _ACTIVE_BACKEND = None
 
     return {
@@ -1656,7 +1682,7 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
 
 
 @app.get("/api/backend/status")
-async def backend_status():
+async def backend_status(request: Request):
     """Return status of all backends."""
     statuses = {}
     for b in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
@@ -1666,23 +1692,37 @@ async def backend_status():
             statuses[b] = {"name": b, "healthy": False, "error": str(e)}
 
     state = "ready"
-    if _ACTIVE_BACKEND:
-        active_status = statuses.get(_ACTIVE_BACKEND) or {}
+    active_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+    selected_model = (request.query_params.get("model") or "").strip()
+    has_selected_model = False
+
+    if active_backend:
+        active_status = statuses.get(active_backend) or {}
         healthy = bool(active_status.get("healthy"))
-        last_start = _ENGINE_LAST_START_TS.get(_ACTIVE_BACKEND, 0)
+        last_start = _ENGINE_LAST_START_TS.get(active_backend, 0)
         in_transient_window = (time.time() - last_start) < _ENGINE_TRANSIENT_WINDOW_S
         if not healthy and in_transient_window:
             state = "starting"
         elif not healthy:
             state = "offline"
 
-    return BackendStatusResponse(
-        active_backend=_ACTIVE_BACKEND,
+    if selected_model:
+        try:
+            backend_models = await backend_manager.get_active_backend().list_models()
+            has_selected_model = selected_model in backend_models
+        except Exception:
+            has_selected_model = False
+
+    payload = BackendStatusResponse(
+        active_backend=active_backend,
         backends=statuses,
         keep_warm=_BACKEND_KEEP_WARM,
-        backend=_ACTIVE_BACKEND,
+        backend=active_backend,
         state=state,
-    )
+    ).model_dump()
+    payload["has_selected_model"] = has_selected_model
+    payload["selected_model"] = selected_model or None
+    return payload
 
 
 async def _stop_ollama() -> dict:
@@ -2131,10 +2171,23 @@ async def capabilities():
         comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
     cap_dict = cap.model_dump()
+    active_backend_name = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND or "ollama"
+    backend_models: List[str] = []
+    try:
+        backend_models = await backend_manager.get_active_backend().list_models()
+    except Exception:
+        backend_models = []
+
+    if active_backend_name == "ollama":
+        cap_dict["ollama_models"] = ollama_models
+        cap_dict["llm_models"] = ollama_models
+    else:
+        cap_dict["llm_models"] = backend_models
+
     # Add extended backend info (not in base schema but useful for UI)
     cap_dict["vllm_reachable"] = vllm_reachable
     cap_dict["vllm_models"] = vllm_models
-    cap_dict["active_backend"] = _ACTIVE_BACKEND
+    cap_dict["active_backend"] = active_backend_name
     return JSONResponse(cap_dict)
 
 
@@ -2484,19 +2537,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     model = req.model
     prompt = req.prompt
 
-    try:
-        backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
-    except ValueError:
-        result = {
-            "error": "No active backend",
-            "engine": (_ACTIVE_BACKEND or None),
-            "model": model,
-            "fallback_reason": "no_active_backend",
-            "total_ms": 0,
-            "tokens_generated": 0,
-        }
-        await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
-        return
+    backend = backend_manager.get_active_backend()
 
     try:
         available_models = await backend.list_models()
@@ -3886,7 +3927,7 @@ async def _shutdown():
 
 @app.get("/v1/models")
 async def v1_models():
-    backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
+    backend = backend_manager.get_active_backend()
     models = await backend.list_models()
     return {
         "object": "list",
@@ -3896,7 +3937,7 @@ async def v1_models():
 
 @app.post("/v1/chat/completions")
 async def v1_chat_completions(payload: Dict[str, Any]):
-    backend = backend_manager.get_active_backend(_ACTIVE_BACKEND)
+    backend = backend_manager.get_active_backend()
     model = str(payload.get("model") or "").strip()
     messages = payload.get("messages") or []
     models = await backend.list_models()

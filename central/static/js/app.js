@@ -1260,6 +1260,7 @@ function getPreflightStatus() {
     } else if (!machine.reachable) {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
     } else if (MODE !== "compute" && machine.selected_model && !machine.has_selected_model) {
+      if (backendSwitch?.inProgress) return;
       blocked.push({
         machine_id: machineId,
         label: machine.label,
