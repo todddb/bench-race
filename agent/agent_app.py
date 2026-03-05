@@ -76,6 +76,11 @@ from agent.reset_helpers import (
 from agent.backends.backend_manager import BackendManager
 from agent.backends.base import BackendType
 from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend
+from agent.wrapper_lifecycle import (
+    is_wrapper_running,
+    start_wrapper,
+    stop_wrapper,
+)
 
 
 async def check_vllm_available(_base_url: str) -> bool:
@@ -1368,6 +1373,11 @@ class BackendSelectRequest(BaseModel):
     keep_warm: bool = False
 
 
+class BackendSwitchRequest(BaseModel):
+    backend: str  # "custom" or "ollama"
+    model: Optional[str] = None
+
+
 class BackendStatusResponse(BaseModel):
     active_backend: Optional[str] = None
     backends: Dict[str, Any] = Field(default_factory=dict)
@@ -1550,6 +1560,35 @@ def _reset_idle_timer():
         _BACKEND_IDLE_TASK = asyncio.create_task(_idle_timeout_watcher())
 
 
+@app.post("/api/backend/switch")
+async def switch_backend(req: BackendSwitchRequest):
+    backend = (req.backend or "").strip().lower()
+    model = (req.model or "").strip()
+
+    if backend not in {"custom", "ollama"}:
+        raise HTTPException(status_code=400, detail="backend must be custom or ollama")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+
+    if backend == "custom":
+        if not registry_entry_matches_backend(model, "custom"):
+            raise HTTPException(status_code=400, detail=f"Model {model} not valid for backend custom")
+        resolved = resolve_model_for_machine(model, "custom")
+        if not resolved:
+            raise HTTPException(status_code=400, detail=f"Model resolution failed for model_id={model}, backend=custom")
+        result = await start_engine({"backend": "custom", "model": model})
+        runtime_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+        if runtime_backend not in {"mlx", "trtllm"}:
+            raise HTTPException(status_code=500, detail="Custom backend switch did not activate a managed runtime backend")
+        if not is_wrapper_running():
+            raise HTTPException(status_code=500, detail="Custom backend started but wrapper is not running")
+        return {"ok": True, "backend": "custom", "runtime_backend": runtime_backend, "model": resolved, "wrapper_running": True}
+
+    await asyncio.to_thread(stop_wrapper)
+    result = await start_engine({"backend": "ollama", "model": model})
+    return {"ok": True, "backend": "ollama", "model": model, "wrapper_running": False, "result": result}
+
+
 @app.post("/api/backend/select")
 async def select_backend(req: BackendSelectRequest):
     """
@@ -1604,6 +1643,8 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
 
     selected_backend = backend_manager.create_backend(backend)
     if selected_backend.backend_type == BackendType.EXTERNAL:
+        if backend == "ollama":
+            await asyncio.to_thread(stop_wrapper)
         # External backends (e.g. Ollama): no lifecycle management.
         # Just register as active and record the selected model.
         backend_manager.set_active_backend(selected_backend, backend)
@@ -1646,6 +1687,7 @@ async def start_engine(payload: dict):
 
     if backend == "ollama":
         try:
+            await asyncio.to_thread(stop_wrapper)
             result = await start_backend_engine("ollama", model_id)
             return result
         except HTTPException:
@@ -1683,6 +1725,8 @@ async def start_engine(payload: dict):
         result = await start_backend_engine(engine_backend, resolved)
         if result.get("status") != "started":
             raise RuntimeError(result.get("error") or "backend did not report started")
+
+        await asyncio.to_thread(start_wrapper)
         return result
     except HTTPException:
         raise
@@ -1839,6 +1883,7 @@ async def backend_status(request: Request):
     payload["current_model"] = agent_state.current_model
     payload["has_selected_model"] = has_selected_model
     payload["selected_model"] = selected_model or None
+    payload["wrapper_running"] = is_wrapper_running()
     return payload
 
 

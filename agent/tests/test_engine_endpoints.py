@@ -105,11 +105,13 @@ def test_engine_start_custom_uses_resolved_model(monkeypatch):
     mod = importlib.import_module("agent.agent_app")
 
     monkeypatch.setattr(mod, "resolve_model_for_machine", lambda _model_id, _backend: "resolved-model")
+    monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_args, **_kwargs: True)
 
     async def fake_start_backend_engine(backend, model):
         return {"status": "started", "engine": backend, "model": model, "accepted": True}
 
     monkeypatch.setattr(mod, "start_backend_engine", fake_start_backend_engine)
+    monkeypatch.setattr(mod, "start_wrapper", lambda: 1234)
 
     response = asyncio.run(mod.start_engine({"backend": "custom", "model": "llama3.1-8b-custom"}))
 
@@ -207,6 +209,9 @@ def test_stop_engine_ollama_does_not_run_stop_script(monkeypatch):
         def get_active_backend_name(self):
             return "ollama"
 
+        def get_active_backend(self):
+            return _Backend()
+
         def create_backend(self, _name):
             return _Backend()
 
@@ -222,5 +227,47 @@ def test_stop_engine_ollama_does_not_run_stop_script(monkeypatch):
 
     response = asyncio.run(mod.stop_engine(mod.EngineStopRequest(engine="ollama")))
     assert response["status"] == "ok"
-    assert mod.agent_state.running is False
-    assert mod.agent_state.current_model is None
+    assert mod.agent_state.running is True
+    assert mod.agent_state.current_model == "model-a"
+
+
+def test_backend_switch_custom_requires_wrapper_healthy(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
+
+    async def fake_start_engine(payload):
+        assert payload["backend"] == "custom"
+        return {"status": "started", "engine": "mlx", "accepted": True}
+
+    monkeypatch.setattr(mod, "start_engine", fake_start_engine)
+    monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mod, "resolve_model_for_machine", lambda *_args, **_kwargs: "resolved")
+    monkeypatch.setattr(mod, "is_wrapper_running", lambda: False)
+
+    try:
+        asyncio.run(mod.switch_backend(mod.BackendSwitchRequest(backend="custom", model="m1")))
+        assert False, "Expected HTTPException"
+    except mod.HTTPException as exc:
+        assert exc.status_code == 500
+
+
+def test_backend_switch_ollama_stops_wrapper(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
+
+    called = {"stop": 0}
+
+    async def fake_start_engine(payload):
+        assert payload["backend"] == "ollama"
+        return {"status": "ok"}
+
+    def fake_stop_wrapper():
+        called["stop"] += 1
+
+    monkeypatch.setattr(mod, "start_engine", fake_start_engine)
+    monkeypatch.setattr(mod, "stop_wrapper", fake_stop_wrapper)
+
+    resp = asyncio.run(mod.switch_backend(mod.BackendSwitchRequest(backend="ollama", model="llama3")))
+    assert resp["ok"] is True
+    assert called["stop"] == 1
+    assert resp["wrapper_running"] is False
