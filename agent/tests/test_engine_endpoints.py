@@ -15,22 +15,16 @@ def _ensure_agent_config():
         cfg.write_text("machine_id: test-machine\nlabel: Test\n", encoding="utf-8")
 
 
-def test_engine_start_comfyui_returns_immediately(monkeypatch):
+def test_engine_start_rejects_unsupported_backend():
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
-    async def fake_start():
-        await asyncio.sleep(0.01)
-        return {"started": True}
-
-    monkeypatch.setattr(mod, "_start_comfyui", fake_start)
-    mod._ENGINE_TASKS.clear()
-
-    response = asyncio.run(mod.start_engine(mod.EngineStartRequest(engine="comfyui")))
-
-    assert response["engine"] == "comfyui"
-    assert response["status"] == "starting"
-    assert response["accepted"] is True
+    try:
+        asyncio.run(mod.start_engine({"backend": "mlx", "model": "anything"}))
+        assert False, "Expected HTTPException"
+    except mod.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "Model resolution failed" in exc.detail
 
 
 def test_engine_stop_comfyui_returns_immediately(monkeypatch):
@@ -46,9 +40,7 @@ def test_engine_stop_comfyui_returns_immediately(monkeypatch):
 
     response = asyncio.run(mod.stop_engine(mod.EngineStopRequest(engine="comfyui")))
 
-    assert response["engine"] == "comfyui"
-    assert response["status"] == "stopping"
-    assert response["accepted"] is True
+    assert response["ok"] is True
 
 
 def test_comfy_health_exposes_status(monkeypatch):
@@ -82,19 +74,47 @@ def test_comfy_health_exposes_status(monkeypatch):
     assert payload["status"] == "healthy"
 
 
-def test_engine_start_mlx_without_model(monkeypatch):
+def test_engine_start_missing_required_fields():
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
-    async def fake_run_agent_script(*_args):
-        return {"ok": True}
+    try:
+        asyncio.run(mod.start_engine({"backend": "custom"}))
+        assert False, "Expected HTTPException"
+    except mod.HTTPException as exc:
+        assert exc.status_code == 400
+        assert exc.detail == "Missing required field: model"
 
-    monkeypatch.setattr(mod, "_run_agent_script", fake_run_agent_script)
 
-    response = asyncio.run(mod.start_engine(mod.EngineStartRequest(engine="mlx")))
+def test_engine_start_resolution_failure(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
 
-    assert response["engine"] == "mlx"
+    monkeypatch.setattr(mod, "resolve_model_for_machine", lambda model_id, backend: None)
+
+    try:
+        asyncio.run(mod.start_engine({"backend": "custom", "model": "bad-model"}))
+        assert False, "Expected HTTPException"
+    except mod.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "Model resolution failed" in exc.detail
+
+
+def test_engine_start_custom_uses_resolved_model(monkeypatch):
+    _ensure_agent_config()
+    mod = importlib.import_module("agent.agent_app")
+
+    monkeypatch.setattr(mod, "resolve_model_for_machine", lambda _model_id, _backend: "resolved-model")
+
+    async def fake_start_backend_engine(backend, model):
+        return {"status": "started", "engine": backend, "model": model, "accepted": True}
+
+    monkeypatch.setattr(mod, "start_backend_engine", fake_start_backend_engine)
+
+    response = asyncio.run(mod.start_engine({"backend": "custom", "model": "llama3.1-8b-custom"}))
+
     assert response["status"] == "started"
+    assert response["model"] == "resolved-model"
     assert response["accepted"] is True
 
 
@@ -107,7 +127,7 @@ def test_backend_status_includes_mlx_and_trtllm(monkeypatch):
 
     monkeypatch.setattr(mod, "_check_backend_health", fake_check_backend_health)
 
-    payload = asyncio.run(mod.backend_status())
+    payload = asyncio.run(mod.backend_status(type("Req", (), {"query_params": {}})()))
 
-    assert "mlx" in payload.backends
-    assert "trtllm" in payload.backends
+    assert "mlx" in payload["backends"]
+    assert "trtllm" in payload["backends"]
