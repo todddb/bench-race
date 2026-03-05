@@ -12,6 +12,7 @@ MLX_PIDFILE="${RUN_DIR}/mlx.pid"
 TRTLLM_PIDFILE="${RUN_DIR}/trtllm.pid"
 COMFYUI_PIDFILE="${RUN_DIR}/comfyui.pid"
 WRAPPER_PIDFILE="${RUN_DIR}/wrapper.pid"
+OLLAMA_MODEL_STATEFILE="${RUN_DIR}/ollama-active-model"
 
 AGENT_LOGFILE="${LOG_DIR}/agent.log"
 MLX_LOGFILE="${LOG_DIR}/mlx.log"
@@ -77,6 +78,22 @@ read_pid(){
 }
 write_pid(){ echo "$2" > "$1"; }
 rm_pid(){ rm -f "$1"; }
+
+read_ollama_active_model(){
+  [[ -f "$OLLAMA_MODEL_STATEFILE" ]] || { echo ""; return 0; }
+  local model
+  model="$(cat "$OLLAMA_MODEL_STATEFILE" 2>/dev/null || true)"
+  echo "${model}"
+}
+
+write_ollama_active_model(){
+  local model="${1:-}"
+  if [[ -n "$model" ]]; then
+    printf '%s' "$model" > "$OLLAMA_MODEL_STATEFILE"
+  else
+    rm -f "$OLLAMA_MODEL_STATEFILE"
+  fi
+}
 
 probe_url(){ curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
 probe_ollama(){ probe_url "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags"; }
@@ -345,6 +362,7 @@ case "$cmd" in
           log "central requested ollama model sync/pull for: ${2}"
           run_cmd_logged ollama pull "${2}"
           log "ollama pull finished for model: ${2}"
+          write_ollama_active_model "${2}"
           log_ollama_models
         fi
         ;;
@@ -357,15 +375,22 @@ case "$cmd" in
   stop-backend)
     case "${1:-}" in
       ollama)
-        if [[ -n "${2:-}" ]]; then
-          log "unloading ollama model: ${2}"
-          if run_cmd_logged ollama rm "${2}"; then
+        local requested_model="${2:-}"
+        local active_model
+        active_model="$(read_ollama_active_model)"
+        if [[ -n "$requested_model" && "$requested_model" != "$active_model" ]]; then
+          log "requested ollama model '${requested_model}' ignored; unloading active model only"
+        fi
+        if [[ -n "$active_model" ]]; then
+          log "unloading active ollama model: ${active_model}"
+          if run_cmd_logged ollama rm "${active_model}"; then
+            write_ollama_active_model ""
             log "Unloaded Ollama model; service remains running."
           else
-            log "[WARN] failed to unload ollama model: ${2}"
+            log "[WARN] failed to unload active ollama model: ${active_model}"
           fi
         else
-          log "ollama is externally managed; no model specified to unload"
+          log "ollama is externally managed; no active model recorded to unload"
         fi
         ;;
       mlx) stop_mlx ;;
