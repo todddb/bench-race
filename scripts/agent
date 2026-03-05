@@ -124,7 +124,12 @@ log_ollama_models(){
 stop_process(){
   local pidfile="$1" name="$2" pid
   if [[ ! -f "$pidfile" ]]; then
-    log "[WARN] $name PID file not found, skipping stop"
+    log "[WARN] $name PID file not found, attempting fallback stop"
+    case "$name" in
+      trtllm) pkill -f trtllm 2>/dev/null || true ;;
+      mlx) pkill -f mlx 2>/dev/null || true ;;
+      ollama) pkill -f ollama 2>/dev/null || true ;;
+    esac
     return 0
   fi
 

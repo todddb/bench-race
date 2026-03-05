@@ -63,6 +63,7 @@ from central.config_loader import (
     load_policy_config,
 )
 from central.agent_protocol import build_backend_switch_message, do_backend_switch
+from central.backend_switch import SwitchState, init_machine_states
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -2215,17 +2216,27 @@ def _wait_for_backend_ready(machine: Dict[str, Any], requested_backend: str, tim
     if not agent_base_url:
         return False, "Missing agent_base_url"
 
+    requested_backend = (requested_backend or "").strip().lower()
+    if requested_backend == "custom":
+        expected_backends = {"mlx", "trtllm"}
+    else:
+        expected_backends = {requested_backend}
+
     deadline = time.time() + timeout_s
+    failures = 0
     while time.time() < deadline:
         try:
             response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
             payload = response.json() if response.content else {}
             active = str(payload.get("backend") or payload.get("active_backend") or "").strip().lower()
             state = str(payload.get("state") or "").strip().lower()
-            if response.ok and active == requested_backend and state == "ready":
+            if response.ok and active in expected_backends and state == "ready":
                 return True, "ready"
-        except Exception:
-            pass
+            failures = 0
+        except Exception as exc:
+            failures += 1
+            if failures >= 3:
+                return False, f"Backend status check failed: {exc}"
         time.sleep(1.0)
     return False, f"Timed out waiting for backend {requested_backend} ready"
 def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
@@ -2323,8 +2334,9 @@ backend_switch_in_progress = False
 
 # Backend switch state
 backend_switch_state = {
-    "status": "idle",   # idle | switching | ready | failed
-    "errors": []
+    "status": SwitchState.IDLE.value,
+    "errors": [],
+    "machines": {},
 }
 
 
@@ -2335,7 +2347,7 @@ def api_backend_switch():
         return jsonify({"ok": False, "error": "Switch already in progress"}), 409
 
     backend_switch_in_progress = True
-    backend_switch_state["status"] = "switching"
+    backend_switch_state["status"] = SwitchState.SWITCHING.value
     backend_switch_state["errors"] = []
 
     try:
@@ -2364,12 +2376,16 @@ def api_backend_switch():
 
         machines_cfg = load_machines_config()
         machines = machines_cfg.get("machines", []) if isinstance(machines_cfg, dict) else machines_cfg
+        central_base_url = request.host_url.rstrip("/")
         results: List[Dict[str, Any]] = []
         errors: List[Dict[str, str]] = []
+        machine_states = init_machine_states(machines)
+        backend_switch_state["machines"] = machine_states
 
         def _switch_backend_for_machine(machine: Dict[str, Any], target_backend: str, target_model_id: str) -> Dict[str, Any]:
             machine_id = machine.get("machine_id")
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
+            machine_states[str(machine_id)]["state"] = SwitchState.SWITCHING.value
             try:
                 resolved_runtime_model = resolve_runtime_model(machine, target_backend, target_model_id)
             except (ValueError, StopIteration) as exc:
@@ -2399,11 +2415,13 @@ def api_backend_switch():
 
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"backend": resolved_backend, "model": resolved_runtime_model},
+                    json={"backend": target_backend, "model": target_model_id},
                     timeout=300,
                 )
 
                 if resp.status_code != 200:
+                    machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
+                    machine_states[str(machine_id)]["error"] = resp.text
                     return {
                         "machine": machine_id,
                         "status": "error",
@@ -2412,6 +2430,8 @@ def api_backend_switch():
 
                 ready, ready_detail = _wait_for_backend_ready(machine, resolved_backend)
                 if not ready:
+                    machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
+                    machine_states[str(machine_id)]["error"] = ready_detail
                     return {
                         "machine": machine_id,
                         "status": "error",
@@ -2419,17 +2439,22 @@ def api_backend_switch():
                     }
 
                 sync_resp = requests.post(
-                    f"{request.host_url.rstrip('/')}/api/agents/{machine_id}/sync_models",
+                    f"{central_base_url}/api/agents/{machine_id}/sync_models",
                     json={"models": [target_model_id]},
                     timeout=60,
                 )
                 if sync_resp.status_code not in (200, 202):
+                    msg = f"sync_models failed: {sync_resp.text}"
+                    machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
+                    machine_states[str(machine_id)]["error"] = msg
                     return {
                         "machine": machine_id,
                         "status": "error",
-                        "error": f"sync_models failed: {sync_resp.text}",
+                        "error": msg,
                     }
 
+                machine_states[str(machine_id)]["state"] = SwitchState.READY.value
+                machine_states[str(machine_id)]["error"] = None
                 return {
                     "machine": machine_id,
                     "status": "ok",
@@ -2437,6 +2462,8 @@ def api_backend_switch():
                     "model": resolved_runtime_model,
                 }
             except Exception as exc:
+                machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
+                machine_states[str(machine_id)]["error"] = str(exc)
                 return {
                     "machine": machine_id,
                     "status": "error",
@@ -2444,7 +2471,7 @@ def api_backend_switch():
                 }
 
         if machines:
-            with ThreadPoolExecutor(max_workers=len(machines)) as executor:
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(machines)))) as executor:
                 futures = {
                     executor.submit(_switch_backend_for_machine, machine, backend, model_id): machine
                     for machine in machines
@@ -2468,19 +2495,19 @@ def api_backend_switch():
                         })
 
         if errors:
-            backend_switch_state["status"] = "failed"
+            backend_switch_state["status"] = SwitchState.FAILED.value
             backend_switch_state["errors"] = errors
             return jsonify({
                 "status": "failed",
                 "errors": errors,
             }), 500
 
-        backend_switch_state["status"] = "ready"
+        backend_switch_state["status"] = SwitchState.READY.value
 
         return jsonify({"status": "ok", "machines": len(results), "results": results})
 
     except Exception as exc:
-        backend_switch_state["status"] = "failed"
+        backend_switch_state["status"] = SwitchState.FAILED.value
         backend_switch_state["errors"] = [{"machine": "central", "error": str(exc)}]
         return jsonify({"status": "error", "error": str(exc)}), 500
     finally:
@@ -2500,7 +2527,11 @@ def api_backend_switch_status(switch_id: str):
         machine_id = machine.get("machine_id")
         if not machine_id:
             continue
-        status = _proxy_backend_status(machine)
+        machine_state = (backend_switch_state.get("machines") or {}).get(machine_id, {})
+        if machine_state.get("state") == SwitchState.FAILED.value:
+            status = {"phase": "error", "detail": machine_state.get("error") or "switch failed", "backend": None}
+        else:
+            status = _proxy_backend_status(machine)
         phase = status.get("phase")
         if phase == "ready" and status.get("backend") != job.get("backend"):
             phase = "starting"

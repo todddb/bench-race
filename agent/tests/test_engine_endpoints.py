@@ -24,7 +24,7 @@ def test_engine_start_rejects_unsupported_backend():
         assert False, "Expected HTTPException"
     except mod.HTTPException as exc:
         assert exc.status_code == 400
-        assert "Model resolution failed" in exc.detail
+        assert "Unsupported backend" in exc.detail
 
 
 def test_engine_stop_comfyui_returns_immediately(monkeypatch):
@@ -97,7 +97,7 @@ def test_engine_start_resolution_failure(monkeypatch):
         assert False, "Expected HTTPException"
     except mod.HTTPException as exc:
         assert exc.status_code == 400
-        assert "Model resolution failed" in exc.detail
+        assert "Model bad-model not valid for backend custom" == exc.detail
 
 
 def test_engine_start_custom_uses_resolved_model(monkeypatch):
@@ -118,7 +118,7 @@ def test_engine_start_custom_uses_resolved_model(monkeypatch):
     assert response["accepted"] is True
 
 
-def test_backend_status_includes_mlx_and_trtllm(monkeypatch):
+def test_backend_status_selected_backend_only(monkeypatch):
     _ensure_agent_config()
     mod = importlib.import_module("agent.agent_app")
 
@@ -129,5 +129,8 @@ def test_backend_status_includes_mlx_and_trtllm(monkeypatch):
 
     payload = asyncio.run(mod.backend_status(type("Req", (), {"query_params": {}})()))
 
-    assert "mlx" in payload["backends"]
-    assert "trtllm" in payload["backends"]
+    assert payload["backends"] == {}
+
+    mod._ACTIVE_BACKEND = "ollama"
+    payload = asyncio.run(mod.backend_status(type("Req", (), {"query_params": {}})()))
+    assert "ollama" in payload["backends"]

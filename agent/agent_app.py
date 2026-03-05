@@ -74,7 +74,7 @@ from agent.reset_helpers import (
     HEALTH_POLL_INTERVAL_S,
 )
 from agent.backends.backend_manager import BackendManager
-from agent.model_registry import resolve_model_for_machine
+from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend
 
 
 async def check_vllm_available(_base_url: str) -> bool:
@@ -1600,40 +1600,32 @@ async def start_engine(payload: dict):
     backend = payload.get("backend")
 
     if not model_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required field: model"
-        )
-
+        raise HTTPException(status_code=400, detail="Missing required field: model")
     if not backend:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required field: backend"
-        )
+        raise HTTPException(status_code=400, detail="Missing required field: backend")
 
     backend = str(backend).strip().lower()
-    resolved = resolve_model_for_machine(str(model_id).strip(), backend)
+    model_id = str(model_id).strip()
 
+    if backend not in {"ollama", "custom"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend for /api/engine/start: {backend}")
+
+    if not registry_entry_matches_backend(model_id, backend):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {model_id} not valid for backend {backend}",
+        )
+
+    resolved = resolve_model_for_machine(model_id, backend)
     if not resolved:
         raise HTTPException(
             status_code=400,
-            detail=f"Model resolution failed for model_id={model_id}, backend={backend}"
+            detail=f"Model resolution failed for model_id={model_id}, backend={backend}",
         )
 
-    log.info(
-        "ENGINE_START request backend=%s model_id=%s resolved=%s",
-        backend,
-        model_id,
-        resolved,
-    )
+    log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, model_id, resolved)
 
-    if backend not in {"ollama", "custom"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported backend for /api/engine/start: {backend}"
-        )
-
-    engine_backend = backend
+    engine_backend = "ollama"
     if backend == "custom":
         arch = os.environ.get("BENCH_AGENT_PLATFORM", "").strip().lower()
         if arch in {"nvidia", "linux"}:
@@ -1644,18 +1636,15 @@ async def start_engine(payload: dict):
             engine_backend = "mlx" if platform.system().lower() == "darwin" else "trtllm"
 
     try:
-        return await start_backend_engine(engine_backend, resolved)
+        result = await start_backend_engine(engine_backend, resolved)
+        if result.get("status") != "started":
+            raise RuntimeError(result.get("error") or "backend did not report started")
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
-        log.error(
-            "ENGINE_START failure backend=%s model_id=%s: %s",
-            backend,
-            model_id,
-            str(e),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Engine start failed: {str(e)}"
-        )
+        log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, model_id, str(e))
+        raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
 
 @app.post("/api/engine/stop")
@@ -1720,16 +1709,27 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
 
 @app.get("/api/backend/status")
 async def backend_status(request: Request):
-    """Return status of all backends."""
+    """Return status for selected backend only."""
+    active_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+
     statuses = {}
-    for b in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
+    selected_for_health = active_backend if active_backend in {"ollama", "mlx", "trtllm", "comfyui"} else None
+    if selected_for_health == "ollama":
+        targets = ("ollama",)
+    elif selected_for_health in {"mlx", "trtllm"}:
+        targets = ("mlx", "trtllm")
+    elif selected_for_health == "comfyui":
+        targets = ("comfyui",)
+    else:
+        targets = ()
+
+    for b in targets:
         try:
             statuses[b] = await _check_backend_health(b)
         except Exception as e:
             statuses[b] = {"name": b, "healthy": False, "error": str(e)}
 
     state = "ready"
-    active_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
     selected_model = (request.query_params.get("model") or "").strip()
     has_selected_model = False
 
@@ -2159,20 +2159,26 @@ async def reset_agent():
 @app.get("/capabilities")
 async def capabilities():
 
-    # Check Ollama reachability and get available models
-    base_url = __import__('os').environ.get('OLLAMA_BASE_URL','http://127.0.0.1:11434')
-    ollama_reachable = await check_ollama_available(base_url)
-    ollama_models = []
-    if ollama_reachable:
-        ollama_models = await get_ollama_models(base_url)
+    selected_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND or "ollama"
 
-    # Check vLLM reachability and get available models
+    # Only probe selected backend to avoid unrelated health polling.
+    base_url = __import__('os').environ.get('OLLAMA_BASE_URL','http://127.0.0.1:11434')
+    ollama_reachable = False
+    ollama_models = []
+    if selected_backend == "ollama":
+        ollama_reachable = await check_ollama_available(base_url)
+        if ollama_reachable:
+            ollama_models = await get_ollama_models(base_url)
+
+    # vLLM is archived; keep fields but avoid polling unless selected.
     vllm_cfg = CFG.get("vllm", {})
     vllm_base = f"http://{vllm_cfg.get('host', '127.0.0.1')}:{vllm_cfg.get('port', 8000)}"
-    vllm_reachable = await check_vllm_available(vllm_base)
+    vllm_reachable = False
     vllm_models = []
-    if vllm_reachable:
-        vllm_models = await get_vllm_models(vllm_base)
+    if selected_backend == "vllm":
+        vllm_reachable = await check_vllm_available(vllm_base)
+        if vllm_reachable:
+            vllm_models = await get_vllm_models(vllm_base)
 
     cap = Capabilities(
         machine_id=CFG.get("machine_id"),
@@ -2208,7 +2214,7 @@ async def capabilities():
         comfyui_cpu_ok=COMFYUI_PREFLIGHT.get("comfyui_cpu_ok"),
     )
     cap_dict = cap.model_dump()
-    active_backend_name = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND or "ollama"
+    active_backend_name = selected_backend
     backend_models: List[str] = []
     try:
         backend_models = await backend_manager.get_active_backend().list_models()
@@ -2589,20 +2595,26 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
             token_count += len(str(token).split())
             await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": token, "timestamp_s": time.perf_counter()}))
 
+        total_ms = 0.0
         result = {
-            "engine": _ACTIVE_BACKEND,
+            "ttft_ms": None,
+            "gen_tokens": token_count,
+            "gen_tokens_per_s": None,
+            "total_ms": total_ms,
             "model": model,
-            "tokens_generated": token_count,
+            "engine": _ACTIVE_BACKEND,
         }
         _reset_idle_timer()
     except Exception as e:
         result = {
             "error": str(e),
+            "ttft_ms": None,
+            "gen_tokens": 0,
+            "gen_tokens_per_s": None,
+            "total_ms": 0.0,
             "engine": (_ACTIVE_BACKEND or None),
             "model": model,
             "fallback_reason": "stream_error",
-            "total_ms": 0,
-            "tokens_generated": 0,
         }
 
     await _broadcast_event(Event(job_id=job_id, type="job_done", payload=result))
@@ -3593,6 +3605,20 @@ async def start_job(req: LLMRequest):
     # (not likely, but defensive)
     if job_id in RUNNING_JOBS:
         raise HTTPException(status_code=409, detail="job already running")
+
+    current_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+    if not current_backend:
+        raise HTTPException(status_code=400, detail="No active backend selected")
+
+    backend_group = "custom" if current_backend in {"mlx", "trtllm"} else current_backend
+    if backend_group not in {"custom", "ollama"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported active backend: {current_backend}")
+
+    if not registry_entry_matches_backend(req.model, backend_group):
+        raise HTTPException(
+            400,
+            f"Model {req.model} not valid for backend {backend_group}",
+        )
 
     # Launch background runner
     task = asyncio.create_task(_job_runner_llm(job_id, req))

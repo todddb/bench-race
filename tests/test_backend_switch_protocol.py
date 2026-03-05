@@ -53,6 +53,16 @@ def test_api_backend_switch_dispatch(monkeypatch):
 
     monkeypatch.setattr(app_mod.requests, "post", lambda *args, **kwargs: _Resp())
 
+    class _GetResp:
+        ok = True
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"backend": "ollama", "state": "ready"}
+
+    monkeypatch.setattr(app_mod.requests, "get", lambda *args, **kwargs: _GetResp())
+
     with app_mod.app.test_client() as client:
         resp = client.post("/api/backend/switch", json={"backend": "ollama", "model_id": "m1"})
         assert resp.status_code == 200
