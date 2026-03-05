@@ -74,6 +74,7 @@ from agent.reset_helpers import (
     HEALTH_POLL_INTERVAL_S,
 )
 from agent.backends.backend_manager import BackendManager
+from agent.backends.base import BackendType
 from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend
 
 
@@ -1353,6 +1354,14 @@ _BACKEND_IDLE_SECS: int = int(os.environ.get("AGENT_BACKEND_IDLE_SECS", "0"))
 _BACKEND_IDLE_TASK: Optional[asyncio.Task] = None
 
 
+class AgentEngineState(BaseModel):
+    running: bool = False
+    current_model: Optional[str] = None
+
+
+agent_state = AgentEngineState()
+
+
 class BackendSelectRequest(BaseModel):
     backend: str  # "ollama", "vllm", "comfyui"
     model: Optional[str] = None
@@ -1417,10 +1426,11 @@ async def _atomic_switch_backend(engine: str, model: Optional[str]) -> Dict[str,
     old_backend = backend_manager.get_active_backend()
     old_backend_name = backend_manager.get_active_backend_name()
 
-    start_result = await new_backend.start((model or "").strip())
-    if isinstance(start_result, dict) and not start_result.get("ok", True):
-        error = start_result.get("stderr") or start_result.get("error") or "Unknown error"
-        raise ValueError(str(error))
+    if new_backend.backend_type == BackendType.MANAGED:
+        start_result = await new_backend.start((model or "").strip())
+        if isinstance(start_result, dict) and not start_result.get("ok", True):
+            error = start_result.get("stderr") or start_result.get("error") or "Unknown error"
+            raise ValueError(str(error))
 
     backend_manager.set_active_backend(new_backend, engine)
     _ACTIVE_BACKEND = engine
@@ -1519,9 +1529,13 @@ async def _idle_timeout_watcher():
     await asyncio.sleep(_BACKEND_IDLE_SECS)
     if _ACTIVE_BACKEND and not _BACKEND_KEEP_WARM:
         slog.info("backend_idle_timeout", backend=_ACTIVE_BACKEND, idle_secs=_BACKEND_IDLE_SECS)
-        await _run_agent_script("stop-backend", _ACTIVE_BACKEND)
+        active_backend = backend_manager.get_active_backend()
+        if active_backend.backend_type == BackendType.MANAGED:
+            await _run_agent_script("stop-backend", _ACTIVE_BACKEND)
         backend_manager.clear_active_backend()
         _ACTIVE_BACKEND = None
+        agent_state.current_model = None
+        agent_state.running = False
 
 
 def _reset_idle_timer():
@@ -1580,8 +1594,19 @@ async def select_backend(req: BackendSelectRequest):
 
 
 async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
+    global _ACTIVE_BACKEND
+
     if model is None:
         raise RuntimeError("Resolved model is None")
+
+    selected_backend = backend_manager.create_backend(backend)
+    if selected_backend.backend_type == BackendType.EXTERNAL:
+        backend_manager.set_active_backend(selected_backend, backend)
+        _ACTIVE_BACKEND = backend
+        agent_state.current_model = model
+        agent_state.running = True
+        await broadcast_status("Ready")
+        return {"status": "started", "engine": backend, "accepted": True}
 
     if backend == "trtllm":
         await broadcast_status("Starting TRT Engine")
@@ -1589,6 +1614,8 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
         await broadcast_status("Loading MLX Model")
 
     await _atomic_switch_backend(backend, model)
+    agent_state.current_model = model
+    agent_state.running = True
     await broadcast_status("Warming Model")
     await broadcast_status("Ready")
     return {"status": "started", "engine": backend, "accepted": True}
@@ -1659,9 +1686,19 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
         engines = ["ollama", "mlx", "trtllm"]
         errors: Dict[str, str] = {}
         for target in engines:
+            target_backend = backend_manager.create_backend(target)
+            if target_backend.backend_type == BackendType.EXTERNAL:
+                if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == target:
+                    backend_manager.clear_active_backend()
+                    _ACTIVE_BACKEND = None
+                agent_state.current_model = None
+                agent_state.running = False
+                continue
+
             result = await _run_agent_script("stop-backend", target)
             if not result.get("ok"):
                 errors[target] = result.get("stderr", result.get("error", "Unknown error"))
+
         if not errors:
             return {"ok": True}
         return JSONResponse(status_code=500, content={"status": "error", "engine": "all", "accepted": True, "errors": errors})
@@ -1674,11 +1711,22 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
         _track_engine_task(engine, task)
         return {"ok": True}
 
+    target_backend = backend_manager.create_backend(engine)
+    if target_backend.backend_type == BackendType.EXTERNAL:
+        if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
+            backend_manager.clear_active_backend()
+            _ACTIVE_BACKEND = None
+        agent_state.current_model = None
+        agent_state.running = False
+        return {"ok": True}
+
     result = await _run_agent_script("stop-backend", engine)
     if result.get("ok"):
         if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
             backend_manager.clear_active_backend()
             _ACTIVE_BACKEND = None
+        agent_state.current_model = None
+        agent_state.running = False
         return {"ok": True}
     return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
 
@@ -1694,11 +1742,18 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
         return {"ok": True, "message": "No active backend to stop"}
 
     slog.info("backend_stop", backend=target)
-    result = await _run_agent_script("stop-backend", target)
+    target_backend = backend_manager.create_backend(target)
+    if target_backend.backend_type == BackendType.EXTERNAL:
+        result = {"ok": True}
+    else:
+        result = await _run_agent_script("stop-backend", target)
 
     if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == target:
         backend_manager.clear_active_backend()
         _ACTIVE_BACKEND = None
+
+    agent_state.current_model = None
+    agent_state.running = False
 
     return {
         "ok": result.get("ok", False),
@@ -3613,6 +3668,15 @@ async def start_job(req: LLMRequest):
     backend_group = "custom" if current_backend in {"mlx", "trtllm"} else current_backend
     if backend_group not in {"custom", "ollama"}:
         raise HTTPException(status_code=400, detail=f"Unsupported active backend: {current_backend}")
+
+    active_backend = backend_manager.get_active_backend()
+    if active_backend.backend_type == BackendType.MANAGED and not agent_state.running:
+        raise HTTPException(status_code=400, detail="Engine not started")
+    if active_backend.backend_type == BackendType.EXTERNAL:
+        if not agent_state.current_model:
+            raise HTTPException(status_code=400, detail="No model selected")
+        if not await active_backend.is_available():
+            raise HTTPException(status_code=503, detail="Ollama unavailable")
 
     if not registry_entry_matches_backend(req.model, backend_group):
         raise HTTPException(

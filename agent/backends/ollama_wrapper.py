@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import subprocess
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 
-from agent.backends.base import BaseBackend
+from agent.backends.base import BackendType, BaseBackend
 
 
 class OllamaBackendWrapper(BaseBackend):
+    backend_type = BackendType.EXTERNAL
+
     def __init__(self, base_url: str = "http://127.0.0.1:11434") -> None:
         self.base_url = base_url.rstrip("/")
-        self.repo_root = Path(__file__).resolve().parents[2]
 
     async def list_models(self) -> list[str]:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -44,14 +42,16 @@ class OllamaBackendWrapper(BaseBackend):
                     if isinstance(obj, dict) and obj.get("done") is True:
                         break
 
+    async def is_available(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{self.base_url}/api/tags")
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     async def start(self, model: str):
-        cmd = [str(self.repo_root / "scripts" / "agent"), "start-backend", "ollama"]
-        if model:
-            cmd.append(model)
-        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
-        return {"ok": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}
+        return {"ok": True, "selected_model": model}
 
     async def stop(self):
-        cmd = [str(self.repo_root / "scripts" / "agent"), "stop-backend", "ollama"]
-        proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
-        return {"ok": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}
+        return {"ok": True}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from agent.backends.base import BaseBackend
+from agent.backends.base import BackendType, BaseBackend
 from agent.backends.mlx_wrapper import MLXBackendWrapper
 from agent.backends.ollama_wrapper import OllamaBackendWrapper
 from agent.backends.trtllm_wrapper import TRTLLMBackendWrapper
@@ -10,6 +10,10 @@ from agent.backends.trtllm_wrapper import TRTLLMBackendWrapper
 
 class NullBackend:
     name = "null"
+    backend_type = BackendType.EXTERNAL
+
+    async def is_available(self):
+        return False
 
     async def list_models(self):
         return []
