@@ -3693,11 +3693,12 @@ async def start_job(req: LLMRequest):
         if not req.model:
             raise HTTPException(status_code=400, detail="Missing required field: model")
 
-    if not registry_entry_matches_backend(req.model, backend_group):
-        raise HTTPException(
-            400,
-            f"Model {req.model} not valid for backend {backend_group}",
-        )
+    if active_backend.backend_type == BackendType.MANAGED:
+        if not registry_entry_matches_backend(req.model, backend_group):
+            raise HTTPException(
+                400,
+                f"Model {req.model} not valid for backend {backend_group}",
+            )
 
     # Launch background runner
     task = asyncio.create_task(_job_runner_llm(job_id, req))
