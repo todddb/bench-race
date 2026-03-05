@@ -2381,16 +2381,6 @@ def api_backend_switch():
         if not model_id:
             return jsonify({"status": "error", "error": "model_id field required"}), 400
 
-        registry = load_models_registry()
-        if backend == "custom":
-            custom_models = [m for m in registry.get("custom", []) if isinstance(m, dict)]
-            if not any(str(m.get("id") or "").strip() == model_id for m in custom_models):
-                return jsonify({"status": "error", "error": f"Unknown custom model id: {model_id}"}), 400
-        elif backend == "ollama":
-            ollama_models = [m for m in registry.get("ollama", []) if isinstance(m, dict)]
-            if not any(str(m.get("id") or "").strip() == model_id for m in ollama_models):
-                return jsonify({"status": "error", "error": f"Unknown ollama model id: {model_id}"}), 400
-
         machines_cfg = load_machines_config()
         machines = machines_cfg.get("machines", []) if isinstance(machines_cfg, dict) else machines_cfg
         central_base_url = request.host_url.rstrip("/")
@@ -2404,7 +2394,7 @@ def api_backend_switch():
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
             machine_states[str(machine_id)]["state"] = SwitchState.SWITCHING.value
             try:
-                resolved_runtime_model = resolve_runtime_model(machine, target_backend, target_model_id)
+                resolved_backend, resolved_runtime_model = _resolve_model_for_machine(machine, target_backend, target_model_id)
             except (ValueError, StopIteration) as exc:
                 return {
                     "machine": machine_id,
@@ -2415,18 +2405,6 @@ def api_backend_switch():
             try:
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
-
-                llm_hardware = _machine_llm_hardware(machine)
-                # Translate UI backend → concrete runtime backend
-                if target_backend == "custom":
-                    if llm_hardware == "apple":
-                        resolved_backend = "mlx"
-                    elif llm_hardware == "nvidia":
-                        resolved_backend = "trtllm"
-                    else:
-                        raise ValueError(f"Unsupported hardware for custom backend: {llm_hardware}")
-                else:
-                    resolved_backend = target_backend
 
                 requests.post(f"{base_url}/api/engine/stop", timeout=30)
 
