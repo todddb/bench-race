@@ -1698,6 +1698,16 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
     """
     global _ACTIVE_BACKEND
     engine = ((req.engine if req else "") or "").strip().lower()
+    active_backend = backend_manager.get_active_backend()
+    active_backend_name = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
+
+    if not engine and active_backend_name and active_backend.backend_type == BackendType.EXTERNAL:
+        # EXTERNAL backends (e.g., Ollama) are not lifecycle-managed.
+        # Stop is a safe no-op.
+        return {
+            "status": "ok",
+            "message": "External backend does not support lifecycle stop",
+        }
 
     if not engine:
         engines = ["ollama", "mlx", "trtllm"]
@@ -1705,11 +1715,7 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
         for target in engines:
             target_backend = backend_manager.create_backend(target)
             if target_backend.backend_type == BackendType.EXTERNAL:
-                if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == target:
-                    backend_manager.clear_active_backend()
-                    _ACTIVE_BACKEND = None
-                agent_state.current_model = None
-                agent_state.running = False
+                # EXTERNAL backends are not lifecycle-managed; stop is a safe no-op.
                 continue
 
             result = await _run_agent_script("stop-backend", target)
@@ -1730,12 +1736,12 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
 
     target_backend = backend_manager.create_backend(engine)
     if target_backend.backend_type == BackendType.EXTERNAL:
-        if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
-            backend_manager.clear_active_backend()
-            _ACTIVE_BACKEND = None
-        agent_state.current_model = None
-        agent_state.running = False
-        return {"status": "ok"}
+        # EXTERNAL backends (e.g., Ollama) are not lifecycle-managed.
+        # Stop is a safe no-op.
+        return {
+            "status": "ok",
+            "message": "External backend does not support lifecycle stop",
+        }
 
     result = await _run_agent_script("stop-backend", engine)
     if result.get("ok"):
