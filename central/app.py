@@ -2319,16 +2319,10 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
     """Resolve registry model_id into backend engine + runtime identifier for a machine."""
     backend = (backend or "").strip().lower()
+    if backend in {"mlx", "trtllm"}:
+        backend = "custom"
     resolved_model = resolve_runtime_model(machine, backend, model_id)
-    if backend == "custom":
-        gpu_type = str(
-            machine.get("gpu_type")
-            or (machine.get("gpu") or {}).get("type")
-            or detect_vendor(machine)
-            or ""
-        ).strip().lower()
-        return ("trtllm", resolved_model) if gpu_type == "nvidia" else ("mlx", resolved_model)
-    if backend in {"ollama", "mlx", "trtllm"}:
+    if backend in {"ollama", "custom"}:
         return backend, resolved_model
     raise ValueError(f"Unknown backend {backend}")
 
@@ -2561,8 +2555,10 @@ def api_agent_switch_backend(machine_id: str):
     payload = request.get_json(silent=True) or {}
     backend = str(payload.get("backend") or "").strip().lower()
     model_id = str(payload.get("model_id") or "").strip()
-    if backend not in {"ollama", "custom", "mlx", "trtllm"}:
-        return jsonify({"error": "backend must be ollama, custom, mlx, or trtllm", "ok": False}), 400
+    if backend in {"mlx", "trtllm"}:
+        backend = "custom"
+    if backend not in {"ollama", "custom"}:
+        return jsonify({"error": "backend must be ollama or custom", "ok": False}), 400
 
     try:
         agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
@@ -2644,14 +2640,17 @@ def api_engine_start(machine_id: str):
         backend = str(payload.get("backend") or payload.get("engine") or "").strip().lower()
         model_id = str(payload.get("model") or payload.get("model_id") or "").strip()
 
-        if backend in {"custom", "ollama", "mlx", "trtllm"} and model_id:
+        if backend in {"mlx", "trtllm"}:
+            backend = "custom"
+
+        if backend in {"custom", "ollama"} and model_id:
             try:
                 agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
             except ValueError as exc:
                 return jsonify({"error": str(exc), "ok": False}), 400
             payload["backend"] = agent_backend
             payload["model"] = resolved_model
-            if "engine" in payload and payload["engine"] == backend:
+            if "engine" in payload:
                 payload["engine"] = agent_backend
 
         response = requests.post(

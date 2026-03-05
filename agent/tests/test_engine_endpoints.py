@@ -107,17 +107,23 @@ def test_engine_start_custom_uses_resolved_model(monkeypatch):
     monkeypatch.setattr(mod, "resolve_model_for_machine", lambda _model_id, _backend: "resolved-model")
     monkeypatch.setattr(mod, "registry_entry_matches_backend", lambda *_args, **_kwargs: True)
 
-    async def fake_start_backend_engine(backend, model):
-        return {"status": "started", "engine": backend, "model": model, "accepted": True}
+    calls = []
 
-    monkeypatch.setattr(mod, "start_backend_engine", fake_start_backend_engine)
+    async def fake_run_agent_script(*args):
+        calls.append(args)
+        return {"ok": True}
+
+    monkeypatch.setattr(mod, "_run_agent_script", fake_run_agent_script)
     monkeypatch.setattr(mod, "start_wrapper", lambda: 1234)
 
     response = asyncio.run(mod.start_engine({"backend": "custom", "model": "llama3.1-8b-custom"}))
 
     assert response["status"] == "started"
-    assert response["model"] == "resolved-model"
+    assert response["engine"] == "custom"
+    assert response["engine_type"] in {"mlx", "trtllm"}
     assert response["accepted"] is True
+    assert any(call[0] == "start-backend" and call[-1] == "resolved-model" for call in calls)
+    mod._ACTIVE_BACKEND = None
 
 
 def test_backend_status_selected_backend_only(monkeypatch):
