@@ -541,9 +541,10 @@ const buildMetricsHtml = (metrics, baselineMetrics) => {
   const tokSDelta = formatDelta(metrics.tok_s, baselineMetrics?.tok_s, true, " tok/s");
   const totalDelta = formatDelta(metrics.total_ms, baselineMetrics?.total_ms, false, " ms");
   const engine = renderEngineBadge(metrics.engine, metrics.fallback_reason);
+  const runtimeModel = metrics.current_model ?? metrics.model;
   return `
-    <div><strong>Model:</strong> ${metrics.model ?? "n/a"}</div>
     <div><strong>Engine:</strong> ${engine}</div>
+    <div><strong>Model:</strong> ${runtimeModel ?? "n/a"}</div>
     <div><strong>TTFT:</strong> ${ttft} ${ttftDelta}</div>
     <div><strong>Gen tokens:</strong> ${tokens}</div>
     <div><strong>Tokens/s:</strong> ${tokS} ${tokSDelta}</div>
@@ -1575,6 +1576,7 @@ const renderRunToPanes = (run) => {
     } else {
       const metricsData = {
         model: entry.model ?? run.model,
+        current_model: entry.model ?? run.model,
         engine: entry.engine,
         fallback_reason: entry.fallback_reason,
         ttft_ms: entry.ttft_ms,
@@ -2029,6 +2031,7 @@ socket.on("agent_event", (evt) => {
 
     const metricsData = {
       model: payload.model,
+      current_model: payload.model,
       engine,
       fallback_reason: payload.fallback_reason,
       ttft_ms: payload.ttft_ms,
@@ -3033,9 +3036,6 @@ const selectModel = async (modelId) => {
       const data = await response.json();
       if (!response.ok || data.ok === false) {
         throw new Error(`${machineId}: ${data.error || "load model failed"}`);
-      }
-      if (currentBackend === "ollama") {
-        setMachineState(machineId, "ready");
       }
       setAgentSwitchStatus(machineId, "Ready", "status-ready");
     }));
