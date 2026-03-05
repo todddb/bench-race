@@ -1829,6 +1829,8 @@ async def backend_status(request: Request):
         backend=active_backend,
         state=state,
     ).model_dump()
+    payload["engine_running"] = agent_state.running
+    payload["current_model"] = agent_state.current_model
     payload["has_selected_model"] = has_selected_model
     payload["selected_model"] = selected_model or None
     return payload
@@ -2653,29 +2655,44 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
     prompt = req.prompt
 
     backend = backend_manager.get_active_backend()
+    active_backend_name = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "unknown"
 
     try:
         available_models = await backend.list_models()
         if model not in available_models:
-            active_backend = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "unknown"
             raise RuntimeError(
-                f"Requested backend {active_backend} but model not available: {model}"
+                f"Requested backend {active_backend_name} but model not available: {model}"
             )
 
-        token_count = 0
-        async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
-            token_count += len(str(token).split())
-            await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": token, "timestamp_s": time.perf_counter()}))
+        if active_backend_name == "ollama":
+            async def on_token(chunk: str, now: float):
+                await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": chunk, "timestamp_s": now}))
 
-        total_ms = 0.0
-        result = {
-            "ttft_ms": None,
-            "gen_tokens": token_count,
-            "gen_tokens_per_s": None,
-            "total_ms": total_ms,
-            "model": model,
-            "engine": _ACTIVE_BACKEND,
-        }
+            ollama_base = CFG.get("ollama", {}).get("base_url") or CFG.get("ollama_base_url") or "http://127.0.0.1:11434"
+            result = await stream_ollama_generate(
+                job_id=job_id,
+                model=model,
+                prompt=prompt,
+                max_tokens=req.max_tokens,
+                temperature=req.temperature,
+                num_ctx=req.num_ctx,
+                base_url=ollama_base,
+                on_token=on_token,
+            )
+        else:
+            token_count = 0
+            async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
+                token_count += len(str(token).split())
+                await _broadcast_event(Event(job_id=job_id, type="llm_token", payload={"text": token, "timestamp_s": time.perf_counter()}))
+
+            result = {
+                "ttft_ms": None,
+                "gen_tokens": token_count,
+                "gen_tokens_per_s": None,
+                "total_ms": 0.0,
+                "model": model,
+                "engine": active_backend_name,
+            }
         _reset_idle_timer()
     except Exception as e:
         result = {
@@ -2684,7 +2701,7 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
             "gen_tokens": 0,
             "gen_tokens_per_s": None,
             "total_ms": 0.0,
-            "engine": (_ACTIVE_BACKEND or None),
+            "engine": (active_backend_name or None),
             "model": model,
             "fallback_reason": "stream_error",
         }

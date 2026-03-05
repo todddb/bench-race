@@ -2250,7 +2250,8 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
             return {"phase": "error", "detail": payload.get("error") or "backend status failed", "backend": None}
         active = payload.get("active_backend")
         state = str(payload.get("state") or "").lower()
-        if state == "starting":
+        engine_running = payload.get("engine_running")
+        if state == "starting" or engine_running is False:
             return {"phase": "starting", "detail": "Loading model...", "backend": active}
         if state == "offline":
             return {"phase": "error", "detail": "Backend offline", "backend": active}
@@ -2438,20 +2439,21 @@ def api_backend_switch():
                         "error": ready_detail,
                     }
 
-                sync_resp = requests.post(
-                    f"{central_base_url}/api/agents/{machine_id}/sync_models",
-                    json={"models": [target_model_id]},
-                    timeout=60,
-                )
-                if sync_resp.status_code not in (200, 202):
-                    msg = f"sync_models failed: {sync_resp.text}"
-                    machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
-                    machine_states[str(machine_id)]["error"] = msg
-                    return {
-                        "machine": machine_id,
-                        "status": "error",
-                        "error": msg,
-                    }
+                if target_backend != "ollama":
+                    sync_resp = requests.post(
+                        f"{central_base_url}/api/agents/{machine_id}/sync_models",
+                        json={"models": [target_model_id]},
+                        timeout=60,
+                    )
+                    if sync_resp.status_code not in (200, 202):
+                        msg = f"sync_models failed: {sync_resp.text}"
+                        machine_states[str(machine_id)]["state"] = SwitchState.FAILED.value
+                        machine_states[str(machine_id)]["error"] = msg
+                        return {
+                            "machine": machine_id,
+                            "status": "error",
+                            "error": msg,
+                        }
 
                 machine_states[str(machine_id)]["state"] = SwitchState.READY.value
                 machine_states[str(machine_id)]["error"] = None

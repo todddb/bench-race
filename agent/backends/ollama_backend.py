@@ -48,36 +48,36 @@ async def stream_ollama_generate(
 
     timeout = httpx.Timeout(connect=5.0, read=None, write=60.0, pool=60.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload, stream=True)
-        resp.raise_for_status()
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
 
-        async for line in resp.aiter_lines():
-            if not line:
-                continue
-            try:
-                chunk = json.loads(line)
-            except json.JSONDecodeError:
-                chunk = {"response": line}
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    chunk = {"response": line}
 
-            text = ""
-            if isinstance(chunk, dict):
-                if isinstance(chunk.get("response"), str):
-                    text = chunk["response"]
-                elif isinstance(chunk.get("token"), str):
-                    text = chunk["token"]
-                elif isinstance(chunk.get("delta"), str):
-                    text = chunk["delta"]
+                text = ""
+                if isinstance(chunk, dict):
+                    if isinstance(chunk.get("response"), str):
+                        text = chunk["response"]
+                    elif isinstance(chunk.get("token"), str):
+                        text = chunk["token"]
+                    elif isinstance(chunk.get("delta"), str):
+                        text = chunk["delta"]
 
-            if text:
-                now = time.perf_counter()
-                if t_first is None:
-                    t_first = now
-                gen_tokens += len(text.split())
-                await on_token(text, now)
+                if text:
+                    now = time.perf_counter()
+                    if t_first is None:
+                        t_first = now
+                    gen_tokens += len(text.split())
+                    await on_token(text, now)
 
-            if isinstance(chunk, dict) and chunk.get("done") is True:
-                t_end = time.perf_counter()
-                break
+                if isinstance(chunk, dict) and chunk.get("done") is True:
+                    t_end = time.perf_counter()
+                    break
 
     if t_end is None:
         t_end = time.perf_counter()
