@@ -2456,16 +2456,13 @@ def api_agent_models(machine_id: str):
     backend_status = _proxy_backend_status(machine)
     backend = backend_status.get("backend") or "ollama"
     try:
-        cap_resp = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=5)
-        cap_resp.raise_for_status()
-        cap = cap_resp.json()
+        resp = requests.get(f"{machine['agent_base_url'].rstrip('/')}/v1/models", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception:
         return jsonify({"backend": backend, "models": []})
 
-    if backend == "ollama":
-        models = cap.get("ollama_models") or []
-    else:
-        models = cap.get("llm_models") or []
+    models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
     return jsonify({"backend": backend, "models": models})
 
 
