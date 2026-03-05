@@ -2277,13 +2277,19 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
         or ""
     ).strip().lower()
 
+    def _find_entry(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id") or "").strip()
+            entry_display = str(entry.get("display_name") or "").strip()
+            if selected_id in {entry_id, entry_display}:
+                return entry
+        raise ValueError(f"Unknown {backend} model id: {selected_id}")
+
     if backend in {"custom", "ollama"}:
         backend_models = registry.get(backend, [])
-        model_entry = next(
-            m
-            for m in backend_models
-            if isinstance(m, dict) and str(m.get("id") or "").strip() == selected_id
-        )
+        model_entry = _find_entry(backend_models)
         if arch not in model_entry:
             raise ValueError(f"Model '{selected_id}' missing architecture key '{arch}'")
         resolved_model = str(model_entry.get(arch) or "").strip()
@@ -2292,6 +2298,19 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
         return resolved_model
 
     if backend in {"mlx", "trtllm"}:
+        custom_models = registry.get("custom", [])
+        try:
+            model_entry = _find_entry(custom_models)
+        except ValueError:
+            return selected_id
+        if arch not in model_entry:
+            raise ValueError(f"Model '{selected_id}' missing architecture key '{arch}'")
+        resolved_model = str(model_entry.get(arch) or "").strip()
+        if not resolved_model:
+            raise ValueError(f"Model '{selected_id}' has empty architecture value for '{arch}'")
+        return resolved_model
+
+    if backend == "comfyui":
         return selected_id
 
     raise ValueError(f"Unknown backend {backend}")
@@ -2300,10 +2319,7 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
     """Resolve registry model_id into backend engine + runtime identifier for a machine."""
     backend = (backend or "").strip().lower()
-    try:
-        resolved_model = resolve_runtime_model(machine, backend, model_id)
-    except StopIteration as exc:
-        raise ValueError(f"Unknown {backend} model id: {model_id}") from exc
+    resolved_model = resolve_runtime_model(machine, backend, model_id)
     if backend == "custom":
         gpu_type = str(
             machine.get("gpu_type")
@@ -2416,7 +2432,7 @@ def api_backend_switch():
 
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"backend": target_backend, "model": target_model_id},
+                    json={"backend": resolved_backend, "model": resolved_runtime_model},
                     timeout=300,
                 )
 
@@ -2662,9 +2678,23 @@ def api_engine_start(machine_id: str):
 
     try:
         from flask import request as flask_request
+        payload = flask_request.get_json(silent=True) or {}
+        backend = str(payload.get("backend") or payload.get("engine") or "").strip().lower()
+        model_id = str(payload.get("model") or payload.get("model_id") or "").strip()
+
+        if backend in {"custom", "ollama", "mlx", "trtllm"} and model_id:
+            try:
+                agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
+            except ValueError as exc:
+                return jsonify({"error": str(exc), "ok": False}), 400
+            payload["backend"] = agent_backend
+            payload["model"] = resolved_model
+            if "engine" in payload and payload["engine"] == backend:
+                payload["engine"] = agent_backend
+
         response = requests.post(
             f"{agent_base_url}/api/engine/start",
-            json=flask_request.get_json(silent=True) or {},
+            json=payload,
             timeout=600,
         )
         return jsonify(response.json()), response.status_code
