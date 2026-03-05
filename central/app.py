@@ -12,6 +12,7 @@ import random
 import shutil
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import time
 from datetime import datetime, timezone
@@ -2356,19 +2357,19 @@ def api_backend_switch():
         machines_cfg = load_machines_config()
         machines = machines_cfg.get("machines", []) if isinstance(machines_cfg, dict) else machines_cfg
         results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, str]] = []
 
-        for machine in machines:
+        def _switch_backend_for_machine(machine: Dict[str, Any], target_backend: str, target_model_id: str) -> Dict[str, Any]:
             machine_id = machine.get("machine_id")
             base_url = str(machine.get("agent_base_url") or "").rstrip("/")
             try:
-                resolved_runtime_model = resolve_runtime_model(machine, backend, model_id)
+                resolved_runtime_model = resolve_runtime_model(machine, target_backend, target_model_id)
             except (ValueError, StopIteration) as exc:
-                results.append({
+                return {
                     "machine": machine_id,
                     "status": "error",
                     "error": str(exc),
-                })
-                continue
+                }
 
             try:
                 if not base_url:
@@ -2376,7 +2377,7 @@ def api_backend_switch():
 
                 llm_hardware = _machine_llm_hardware(machine)
                 # Translate UI backend → concrete runtime backend
-                if backend == "custom":
+                if target_backend == "custom":
                     if llm_hardware == "apple":
                         resolved_backend = "mlx"
                     elif llm_hardware == "nvidia":
@@ -2384,7 +2385,7 @@ def api_backend_switch():
                     else:
                         raise ValueError(f"Unsupported hardware for custom backend: {llm_hardware}")
                 else:
-                    resolved_backend = backend
+                    resolved_backend = target_backend
 
                 requests.post(f"{base_url}/api/engine/stop", timeout=30)
 
@@ -2395,48 +2396,77 @@ def api_backend_switch():
                 )
 
                 if resp.status_code != 200:
-                    results.append({
+                    return {
                         "machine": machine_id,
                         "status": "error",
                         "error": resp.text,
-                    })
-                else:
-                    ready, ready_detail = _wait_for_backend_ready(machine, resolved_backend)
-                    if not ready:
-                        results.append({
-                            "machine": machine_id,
-                            "status": "error",
-                            "error": ready_detail,
-                        })
-                        continue
+                    }
 
-                    sync_resp = requests.post(
-                        f"{request.host_url.rstrip('/')}/api/agents/{machine_id}/sync_models",
-                        json={"models": [model_id]},
-                        timeout=60,
-                    )
-                    if sync_resp.status_code not in (200, 202):
-                        results.append({
-                            "machine": machine_id,
-                            "status": "error",
-                            "error": f"sync_models failed: {sync_resp.text}",
-                        })
-                        continue
-
-                    results.append({
+                ready, ready_detail = _wait_for_backend_ready(machine, resolved_backend)
+                if not ready:
+                    return {
                         "machine": machine_id,
-                        "status": "ok",
-                        "backend": resolved_backend,
-                        "model": resolved_runtime_model,
-                    })
+                        "status": "error",
+                        "error": ready_detail,
+                    }
+
+                sync_resp = requests.post(
+                    f"{request.host_url.rstrip('/')}/api/agents/{machine_id}/sync_models",
+                    json={"models": [target_model_id]},
+                    timeout=60,
+                )
+                if sync_resp.status_code not in (200, 202):
+                    return {
+                        "machine": machine_id,
+                        "status": "error",
+                        "error": f"sync_models failed: {sync_resp.text}",
+                    }
+
+                return {
+                    "machine": machine_id,
+                    "status": "ok",
+                    "backend": resolved_backend,
+                    "model": resolved_runtime_model,
+                }
             except Exception as exc:
-                results.append({
+                return {
                     "machine": machine_id,
                     "status": "error",
                     "error": str(exc),
-                })
+                }
 
-        return jsonify({"status": "ok", "results": results})
+        if machines:
+            with ThreadPoolExecutor(max_workers=len(machines)) as executor:
+                futures = {
+                    executor.submit(_switch_backend_for_machine, machine, backend, model_id): machine
+                    for machine in machines
+                }
+
+                for future in as_completed(futures):
+                    machine = futures[future]
+                    machine_id = machine.get("machine_id")
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        if result.get("status") != "ok":
+                            errors.append({
+                                "machine": str(result.get("machine") or machine_id or "unknown"),
+                                "error": str(result.get("error") or "unknown error"),
+                            })
+                    except Exception as exc:
+                        errors.append({
+                            "machine": str(machine_id or "unknown"),
+                            "error": str(exc),
+                        })
+
+        if errors:
+            return jsonify({
+                "status": "partial_failure",
+                "errors": errors,
+                "results": results,
+            }), 207
+
+        return jsonify({"status": "ok", "machines": len(results), "results": results})
 
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
