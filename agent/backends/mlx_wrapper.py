@@ -8,10 +8,12 @@ from typing import Any, AsyncIterator
 
 import websockets
 
-from agent.backends.base import BaseBackend
+from agent.backends.base import BackendType, BaseBackend
 
 
 class MLXBackendWrapper(BaseBackend):
+    backend_type = BackendType.MANAGED
+
     def __init__(self, host: str = "127.0.0.1", port: int = 8321) -> None:
         self.host = host
         self.port = port

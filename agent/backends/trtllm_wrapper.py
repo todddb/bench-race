@@ -8,10 +8,12 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from agent.backends.base import BaseBackend
+from agent.backends.base import BackendType, BaseBackend
 
 
 class TRTLLMBackendWrapper(BaseBackend):
+    backend_type = BackendType.MANAGED
+
     def __init__(self, host: str = "127.0.0.1", port: int = 8000) -> None:
         self.base_url = f"http://{host}:{port}"
         self.models_dir = Path(__file__).resolve().parents[1] / "models" / "trtllm"
