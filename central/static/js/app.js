@@ -2925,7 +2925,7 @@ const loadModelsForBackend = async (backend) => {
 };
 
 const refreshBackendStatus = async () => fetchStatus();
-const refreshCapabilities = async () => refreshAllModelAvailability();
+const refreshCapabilities = async () => {};
 const updateMachineCards = () => {
   updateAllMachineStatuses();
   updatePreflightBanner();
@@ -2938,48 +2938,12 @@ const autoSelectFirstModel = async () => {
   await selectModel(modelSelect.value);
 };
 
-const validateModelAvailability = async (machineId, selectedModel) => {
-  const btn = document.getElementById(`sync-${machineId}`);
-  if (!btn) return;
-  const currentBackend = getSelectedBackend();
-  if (currentBackend === "ollama" || !selectedModel) {
-    btn.classList.add("hidden");
-    return;
-  }
-  try {
-    const resp = await fetch(`/api/agent/${encodeURIComponent(machineId)}/models`);
-    if (!resp.ok) throw new Error("model list failed");
-    const data = await resp.json();
-    const models = data.models || [];
-    const available = models.includes(selectedModel);
-    btn.classList.toggle("hidden", available);
-    btn.disabled = backendSwitch.inProgress;
-    btn.title = available ? "" : `Selected model unavailable on ${data.backend || "current backend"}`;
-  } catch {
-    btn.classList.remove("hidden");
-    btn.disabled = backendSwitch.inProgress;
-    btn.title = "Unable to verify model availability";
-  }
-};
-
-const refreshAllModelAvailability = async () => {
-  const selectedModel = document.getElementById("model")?.value;
-  if (!selectedModel) return;
-  const ids = getActiveMachineIds();
-  await Promise.all(ids.map((id) => validateModelAvailability(id, selectedModel)));
-};
-
 backendToggleInputs.forEach((input) => {
   input.addEventListener("change", async () => {
     const selectedBackend = getSelectedBackend();
     localStorage.setItem(BACKEND_STORAGE_KEY, selectedBackend);
     await refreshModelsForBackend(selectedBackend);
-    await refreshAllModelAvailability();
   });
-});
-
-document.getElementById("model")?.addEventListener("change", async () => {
-  await refreshAllModelAvailability();
 });
 
 const selectModel = async (modelId) => {
@@ -2988,46 +2952,7 @@ const selectModel = async (modelId) => {
   const machineIds = getActiveMachineIds();
   machineIds.forEach((machineId) => setAgentSwitchStatus(machineId, "Loading model...", "status-loading"));
   try {
-    const currentBackend = getSelectedBackend();
     await Promise.all(machineIds.map(async (machineId) => {
-      if (currentBackend !== "ollama") {
-        const syncResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_models`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ models: [modelId] }),
-        });
-        const syncData = await syncResp.json();
-        if (!syncResp.ok) {
-          throw new Error(`${machineId}: ${syncData.error || "sync start failed"}`);
-        }
-
-        const jobId = syncData.job_id;
-        if (!jobId) {
-          throw new Error(`${machineId}: sync job id missing`);
-        }
-
-        let syncDone = false;
-        for (let attempt = 0; attempt < 300; attempt += 1) {
-          const statusResp = await fetch(`/api/agents/${encodeURIComponent(machineId)}/sync_status/${encodeURIComponent(jobId)}`);
-          const statusData = await statusResp.json();
-          if (!statusResp.ok) {
-            throw new Error(`${machineId}: ${statusData.error || "sync status failed"}`);
-          }
-          if (["completed", "partial", "failed"].includes(statusData.status)) {
-            if (statusData.status !== "completed") {
-              throw new Error(`${machineId}: model sync ${statusData.status}`);
-            }
-            syncDone = true;
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-
-        if (!syncDone) {
-          throw new Error(`${machineId}: model sync timed out`);
-        }
-      }
-
       const response = await fetch(`/api/agent/${encodeURIComponent(machineId)}/load_model`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
