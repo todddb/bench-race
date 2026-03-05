@@ -11,11 +11,13 @@ AGENT_PIDFILE="${RUN_DIR}/agent.pid"
 MLX_PIDFILE="${RUN_DIR}/mlx.pid"
 TRTLLM_PIDFILE="${RUN_DIR}/trtllm.pid"
 COMFYUI_PIDFILE="${RUN_DIR}/comfyui.pid"
+WRAPPER_PIDFILE="${RUN_DIR}/wrapper.pid"
 
 AGENT_LOGFILE="${LOG_DIR}/agent.log"
 MLX_LOGFILE="${LOG_DIR}/mlx.log"
 TRTLLM_LOGFILE="${LOG_DIR}/trtllm.log"
 COMFYUI_LOGFILE="${LOG_DIR}/comfyui.log"
+WRAPPER_LOGFILE="${LOG_DIR}/wrapper.log"
 
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
@@ -82,6 +84,18 @@ probe_mlx(){ probe_url "http://${MLX_HOST}:${MLX_PORT}/v1/models"; }
 probe_trtllm(){ probe_url "http://${TRTLLM_HOST}:${TRTLLM_PORT}/v1/models"; }
 probe_comfyui(){ probe_url "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats"; }
 probe_agent(){ probe_url "http://127.0.0.1:${AGENT_PORT}/health"; }
+probe_wrapper(){ probe_url "http://127.0.0.1:9002/v1/health"; }
+
+start_wrapper(){
+  mkdir -p "$(dirname "$WRAPPER_LOGFILE")"
+  local py="${AGENT_DIR}/.venv/bin/python"
+  [[ -x "$py" ]] || { err "agent venv missing. Run ./scripts/install_agent.sh"; return 4; }
+  stop_wrapper || true
+  (cd "$REPO_ROOT" && nohup "$py" -m uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002 >>"$WRAPPER_LOGFILE" 2>&1 & echo $! >"$WRAPPER_PIDFILE")
+  wait_ready probe_wrapper "wrapper" 15
+}
+
+stop_wrapper(){ stop_process "$WRAPPER_PIDFILE" "wrapper" || true; rm_pid "$WRAPPER_PIDFILE"; }
 
 wait_ready(){
   local fn="$1" name="$2" tries="${3:-45}"
@@ -194,8 +208,10 @@ start_mlx(){
   [[ -n "$pid" ]] || { err "mlx failed to start"; return 3; }
   log "mlx launched with pid $pid"
   wait_ready probe_mlx "mlx" 120
+  start_wrapper
 }
 stop_mlx(){
+  stop_wrapper || true
   local launcher="${AGENT_DIR}/backends/mlx_run.sh"
   [[ -x "$launcher" ]] && MLX_HOST="$MLX_HOST" MLX_PORT="$MLX_PORT" "$launcher" stop >>"$MLX_LOGFILE" 2>&1 || log "[WARN] mlx launcher missing; skipping launcher stop"
   stop_process "$MLX_PIDFILE" "mlx" || true
@@ -229,8 +245,10 @@ start_trtllm(){
   [[ -n "$cpid" ]] || { err "trtllm failed to start"; return 3; }
   log "trtllm launched with pid ${cpid:-unknown}"
   wait_ready probe_trtllm "trtllm" 120
+  start_wrapper
 }
 stop_trtllm(){
+  stop_wrapper || true
   local launcher="${AGENT_DIR}/backends/trtllm_run.sh"
   [[ -x "$launcher" ]] && TRTLLM_PORT="$TRTLLM_PORT" "$launcher" stop >>"$TRTLLM_LOGFILE" 2>&1 || log "[WARN] trtllm launcher missing; skipping launcher stop"
   stop_process "$TRTLLM_PIDFILE" "trtllm" || true
@@ -279,6 +297,7 @@ status(){
   show_status_line mlx "$MLX_PIDFILE" probe_mlx
   show_status_line trtllm "$TRTLLM_PIDFILE" probe_trtllm
   show_status_line comfyui "$COMFYUI_PIDFILE" probe_comfyui
+  show_status_line wrapper "$WRAPPER_PIDFILE" probe_wrapper
   show_status_line agent "$AGENT_PIDFILE" probe_agent
   if active=$(active_llm 2>/dev/null); then echo "Active LLM backend: $active"; else echo "Active LLM backend: none"; fi
 }
@@ -297,6 +316,7 @@ Commands:
   start-mlx | stop-mlx
   start-trtllm | stop-trtllm
   start-comfyui | stop-comfyui
+  start-wrapper | stop-wrapper
 
 Notes:
   - Only one LLM backend can be active at a time: ollama, mlx, trtllm.
@@ -315,7 +335,7 @@ case "$cmd" in
   status) status ;;
   start) start_agent ;;
   start-fg) start_agent_fg ;;
-  stop) stop_agent; stop_mlx; stop_trtllm; stop_comfyui ;;
+  stop) stop_agent; stop_mlx; stop_trtllm; stop_comfyui; stop_wrapper ;;
   start-backend)
     case "${1:-}" in
       ollama)
@@ -335,7 +355,7 @@ case "$cmd" in
     esac
     ;;
   stop-backend) case "${1:-}" in ollama) log "ollama is externally managed; nothing to stop" ;; mlx) stop_mlx ;; trtllm) stop_trtllm ;; comfyui) stop_comfyui ;; *) err "Unknown backend: ${1:-}"; exit 2;; esac ;;
-  start-ollama) check_ollama_available || true ;;
+  start-ollama) stop_wrapper || true; check_ollama_available || true ;;
   stop-ollama) log "ollama is externally managed; nothing to stop" ;;
   start-mlx) start_mlx "${1:-}" ;;
   stop-mlx) stop_mlx ;;
@@ -343,6 +363,8 @@ case "$cmd" in
   stop-trtllm) stop_trtllm ;;
   start-comfyui) start_comfyui ;;
   stop-comfyui) stop_comfyui ;;
+  start-wrapper) start_wrapper ;;
+  stop-wrapper) stop_wrapper ;;
   start-vllm|stop-vllm|sync-and-start-vllm)
     err "vLLM lifecycle commands were archived. See archive/vllm/README.md"
     exit 3
