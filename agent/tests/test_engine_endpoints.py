@@ -124,7 +124,7 @@ def test_engine_start_custom_uses_model_id_without_resolution(monkeypatch):
             return _Resp(404, {})
 
         async def post(self, url, json=None):
-            if url.endswith('/v1/models/start') and json == {"model": "llama3.1-8b-custom"}:
+            if url.endswith('/v1/models/start') and json == {"model_id": "llama3.1-8b-custom"}:
                 return _Resp(200, {"ok": True})
             return _Resp(500, {})
 
