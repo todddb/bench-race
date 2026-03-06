@@ -1774,7 +1774,7 @@ async def start_engine(request: EngineStartRequest):
                 raise HTTPException(status_code=500, detail="Wrapper failed to start")
 
             async with httpx.AsyncClient(timeout=10.0) as client:
-                model_start_resp = await client.post(model_start_url, json={"model": resolved})
+                model_start_resp = await client.post(model_start_url, json={"model_id": resolved})
             if model_start_resp.status_code != 200:
                 raise HTTPException(status_code=500, detail="Wrapper model load failed")
 
