@@ -6,13 +6,14 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import uvicorn
 import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .adapters import MLXAdapter, TRTAdapter
 from .logging_config import configure_logging
@@ -97,6 +98,19 @@ adapters = {
 }
 
 active_state: Dict[str, Any] = {"backend": None, "model": None}
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
 
 
 def _public_backend_name(backend: str | None) -> str | None:
@@ -250,17 +264,87 @@ async def stop_model(payload: Dict[str, Any]) -> JSONResponse:
 async def infer(payload: Dict[str, Any]) -> JSONResponse:
     model_id = payload.get("model") or payload.get("model_id")
     backend = payload.get("backend") or active_state.get("backend")
-    if not backend:
-        return JSONResponse(status_code=400, content={"error": "No backend specified and no active backend. Start a model first."})
-    if backend not in adapters:
-        return JSONResponse(status_code=400, content={"error": f"Unsupported backend: {backend}"})
-    logger.info("inference_request", extra={"endpoint": "/v1/infer", "model_id": active_state.get("model") or model_id, "backend": backend})
     try:
-        response = await adapters[backend].infer(model_id or "", payload)
-        return JSONResponse(normalize_infer_response(model_id or "", _public_backend_name(backend) or backend, response))
+        normalized = await infer_internal(model_id=model_id or "", payload=payload, backend=backend, endpoint="/v1/infer")
+        return JSONResponse(normalized)
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
         logger.exception("inference_failed", extra={"endpoint": "/v1/infer", "model_id": model_id, "backend": backend, "error": str(exc)})
         return JSONResponse(status_code=500, content={"error": "inference_failed", "detail": str(exc)})
+
+
+async def infer_internal(model_id: str, payload: Dict[str, Any], backend: Optional[str], endpoint: str) -> Dict[str, Any]:
+    resolved_backend = backend
+    if resolved_backend == "trtllm":
+        resolved_backend = "trt"
+    if not resolved_backend:
+        raise HTTPException(status_code=400, detail="No backend specified and no active backend. Start a model first.")
+    if resolved_backend not in adapters:
+        raise HTTPException(status_code=400, detail=f"Unsupported backend: {resolved_backend}")
+
+    logger.info("inference_request", extra={"endpoint": endpoint, "model_id": active_state.get("model") or model_id, "backend": resolved_backend})
+    response = await adapters[resolved_backend].infer(model_id or "", payload)
+    return normalize_infer_response(model_id or "", _public_backend_name(resolved_backend) or resolved_backend, response)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(payload: ChatCompletionRequest) -> Dict[str, Any]:
+    if payload.stream:
+        raise HTTPException(status_code=501, detail="Streaming not implemented")
+
+    prompt_parts: List[str] = []
+    for msg in payload.messages:
+        if msg.role == "system":
+            prompt_parts.append(f"System: {msg.content}")
+        elif msg.role == "user":
+            prompt_parts.append(f"User: {msg.content}")
+        elif msg.role == "assistant":
+            prompt_parts.append(f"Assistant: {msg.content}")
+
+    prompt = "\n".join(prompt_parts) + "\nAssistant:"
+    infer_payload: Dict[str, Any] = {
+        "model": payload.model,
+        "prompt": prompt,
+    }
+    if payload.max_tokens is not None:
+        infer_payload["max_tokens"] = payload.max_tokens
+    if payload.temperature is not None:
+        infer_payload["temperature"] = payload.temperature
+
+    normalized = await infer_internal(
+        model_id=payload.model,
+        payload=infer_payload,
+        backend=active_state.get("backend"),
+        endpoint="/v1/chat/completions",
+    )
+
+    choices = normalized.get("choices") or []
+    first_choice = choices[0] if choices else {}
+    text_output = first_choice.get("text") or first_choice.get("message", {}).get("content") or ""
+    finish_reason = first_choice.get("finish_reason") or "stop"
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": payload.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": text_output,
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        },
+    }
 
 
 @app.post("/v1/infer/stream")
