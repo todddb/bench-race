@@ -108,6 +108,11 @@ def stop_wrapper() -> None:
         except OSError:
             pass
 
+    try:
+        subprocess.run(["pkill", "-f", "uvicorn agent.backends.wrapper.app"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     _WRAPPER_PROCESS = None
     _clear_pid_file()
 
