@@ -14,14 +14,21 @@ def _machine_target(machine: Dict[str, Any], backend: str) -> str:
         return "ollama"
     if backend in {"mlx", "trtllm"}:
         return backend
-    machine_text = " ".join(
-        str(machine.get(k, "")) for k in ("platform", "gpu_vendor", "vendor", "label", "machine_id")
-    ).lower()
-    if any(token in machine_text for token in ("mac", "apple", "darwin")):
+    gpu_type = str(
+        machine.get("gpu_type")
+        or (machine.get("gpu") or {}).get("type")
+        or ""
+    ).strip().lower()
+    if gpu_type == "apple":
         return "mlx"
-    if any(token in machine_text for token in ("nvidia", "rtx", "cuda")):
+    if gpu_type == "nvidia":
         return "trtllm"
-    return "trtllm"
+    machine_id = machine.get("machine_id", "unknown")
+    raise ValueError(
+        f"Cannot determine target for machine '{machine_id}': "
+        f"gpu type '{gpu_type}' is not 'nvidia' or 'apple'. "
+        f"Set gpu.type in machines.yaml explicitly."
+    )
 
 
 def _base_to_ws_uri(agent_base_url: str) -> str:
@@ -36,15 +43,16 @@ def _base_to_ws_uri(agent_base_url: str) -> str:
 
 
 def build_backend_switch_message(machine: Dict[str, Any], backend: str, request_id: str) -> Dict[str, Any]:
-    return {
-        "type": "backend_switch",
-        "payload": {
-            "backend": backend,
-            "target": _machine_target(machine, backend),
-            "request_id": request_id,
-            "timestamp": int(time.time()),
-        },
+    target = _machine_target(machine, backend)
+    payload: Dict[str, Any] = {
+        "backend": backend,
+        "target": target,
+        "request_id": request_id,
+        "timestamp": int(time.time()),
     }
+    if backend == "custom":
+        payload["engine_type"] = target
+    return {"type": "backend_switch", "payload": payload}
 
 
 async def _send_to_agent(machine: Dict[str, Any], message: Dict[str, Any]) -> Optional[str]:

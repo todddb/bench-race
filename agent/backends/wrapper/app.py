@@ -241,7 +241,9 @@ async def stop_model(payload: Dict[str, Any]) -> JSONResponse:
 @app.post("/v1/infer")
 async def infer(payload: Dict[str, Any]) -> JSONResponse:
     model_id = payload.get("model") or payload.get("model_id")
-    backend = payload.get("backend") or route_model_to_backend(model_id, cfg)
+    backend = payload.get("backend") or active_state.get("backend")
+    if not backend:
+        return JSONResponse(status_code=400, content={"error": "No backend specified and no active backend. Start a model first."})
     if backend not in adapters:
         return JSONResponse(status_code=400, content={"error": f"Unsupported backend: {backend}"})
     logger.info("inference_request", extra={"endpoint": "/v1/infer", "model_id": active_state.get("model") or model_id, "backend": backend})
@@ -256,7 +258,9 @@ async def infer(payload: Dict[str, Any]) -> JSONResponse:
 @app.post("/v1/infer/stream")
 async def infer_stream(payload: Dict[str, Any], request: Request) -> StreamingResponse:
     model_id = payload.get("model") or payload.get("model_id")
-    backend = payload.get("backend") or route_model_to_backend(model_id, cfg)
+    backend = payload.get("backend") or active_state.get("backend")
+    if not backend:
+        raise HTTPException(status_code=400, detail="No backend specified and no active backend. Start a model first.")
     if backend not in adapters:
         raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
 
@@ -309,13 +313,12 @@ async def ollama_generate(payload: Dict[str, Any], request: Request) -> Streamin
     model_id = payload.get("model", "")
     prompt = payload.get("prompt", "")
     stream = payload.get("stream", True)
-    backend = route_model_to_backend(model_id, cfg)
+    backend = active_state.get("backend")
+    if not backend:
+        return JSONResponse(status_code=503, content={"error": "No managed engine running. Start a model first."})
 
     if backend not in adapters:
         return JSONResponse(status_code=400, content={"error": f"Unsupported backend: {backend}"})
-
-    if not active_state.get("backend"):
-        return JSONResponse(status_code=503, content={"error": "No managed engine running. Start a model first."})
 
     infer_payload = {
         "prompt": prompt,

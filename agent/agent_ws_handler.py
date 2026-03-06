@@ -68,8 +68,10 @@ async def handle_backend_switch(payload: Dict[str, Any], send: SendPayload) -> N
     await _send_status(send, request_id, "offline", "Going offline to switch backend")
 
     if backend == "custom":
-        platform_tag = _detect_platform_tag()
-        engine_type = "mlx" if platform_tag == "mac" else "trtllm"
+        engine_type = str(payload.get("engine_type") or payload.get("target") or "").strip().lower()
+        if engine_type not in {"mlx", "trtllm"}:
+            await _send_status(send, request_id, "error", f"Missing or invalid engine_type for custom backend: '{engine_type}'. Central must provide engine_type.")
+            return
         await _send_status(send, request_id, "starting", f"Starting custom backend ({engine_type})")
         rc = await _run_script_and_stream(send, request_id, "starting", f"./scripts/agent start-backend {engine_type} {model}" if model else f"./scripts/agent start-backend {engine_type}")
         if rc != 0:

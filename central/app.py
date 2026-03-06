@@ -2270,9 +2270,15 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
     arch = str(
         machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
-        or detect_vendor(machine)
         or ""
     ).strip().lower()
+    if arch not in {"apple", "nvidia"}:
+        machine_id = machine.get("machine_id", "unknown")
+        raise ValueError(
+            f"Cannot resolve model for machine '{machine_id}': "
+            f"gpu type '{arch}' is not 'nvidia' or 'apple'. "
+            f"Set gpu.type in machines.yaml explicitly."
+        )
 
     def _find_entry(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         for entry in entries:
@@ -2318,14 +2324,18 @@ def _derive_engine_type(machine: Dict[str, Any]) -> str:
     gpu_type = str(
         machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
-        or detect_vendor(machine)
         or ""
     ).strip().lower()
     if gpu_type == "nvidia":
         return "trtllm"
     if gpu_type == "apple":
         return "mlx"
-    return "trtllm"
+    machine_id = machine.get("machine_id", "unknown")
+    raise ValueError(
+        f"Cannot derive engine_type for machine '{machine_id}': "
+        f"gpu type '{gpu_type}' is not 'nvidia' or 'apple'. "
+        f"Set gpu.type in machines.yaml explicitly."
+    )
 
 
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
@@ -2342,7 +2352,6 @@ def _machine_llm_hardware(machine: Dict[str, Any]) -> str:
         machine.get("llmHardware")
         or machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
-        or detect_vendor(machine)
         or ""
     ).strip().lower()
 
