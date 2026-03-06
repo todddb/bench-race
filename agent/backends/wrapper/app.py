@@ -42,14 +42,10 @@ def load_config() -> Dict[str, Any]:
         cfg = json.load(f)
 
     repo_defaults = _load_repo_backend_defaults()
-    mlx_host = (repo_defaults.get("mlx") or {}).get("host", "127.0.0.1")
-    mlx_port = (repo_defaults.get("mlx") or {}).get("port", 8321)
     trt_port = (repo_defaults.get("trtllm") or {}).get("port", 8000)
 
-    cfg["backends"]["mlx"]["base_url"] = cfg["backends"]["mlx"].get("base_url") or f"http://{mlx_host}:{mlx_port}"
     cfg["backends"]["trt"]["base_url"] = cfg["backends"]["trt"].get("base_url") or f"http://127.0.0.1:{trt_port}"
 
-    cfg["backends"]["mlx"]["base_url"] = os.getenv("WRAPPER_MLX_BASE_URL", cfg["backends"]["mlx"]["base_url"])
     cfg["backends"]["trt"]["base_url"] = os.getenv("WRAPPER_TRT_BASE_URL", cfg["backends"]["trt"]["base_url"])
     return cfg
 
@@ -92,7 +88,7 @@ def normalize_infer_response(model_id: str, backend: str, response: Dict[str, An
 cfg = load_config()
 service_manager = ServiceManager()
 adapters = {
-    "mlx": MLXAdapter(base_url=cfg["backends"]["mlx"]["base_url"]),
+    "mlx": MLXAdapter(),
     "trt": TRTAdapter(
         base_url=cfg["backends"]["trt"]["base_url"],
         run_script=cfg["backends"]["trt"].get("run_script", "agent/backends/trtllm_run.sh"),
@@ -240,6 +236,9 @@ async def stop_model(payload: Dict[str, Any]) -> JSONResponse:
     logger.info("model_stop_requested", extra={"endpoint": "/v1/models/stop", "backend": backend, "model_id": active_state.get("model")})
     try:
         lifecycle = service_manager.stop_backend(backend)
+        adapter = adapters.get(backend)
+        if adapter is not None and hasattr(adapter, "stop_model"):
+            await adapter.stop_model()
         if active_state.get("backend") == backend:
             active_state.update({"backend": None, "model": None})
         return JSONResponse({"ok": lifecycle.get("ok", False), "backend": backend, "lifecycle": lifecycle})
