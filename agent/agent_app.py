@@ -1387,6 +1387,18 @@ class EngineStopRequest(BaseModel):
     engine: Optional[str] = None
 
 
+class APIJobRequest(BaseModel):
+    test_type: str = "llm_generate"
+    model: Optional[str] = None
+    prompt: str
+    max_tokens: int = 256
+    temperature: float = 0.2
+    num_ctx: int = 4096
+    repeat: int = 1
+    stream: bool = True
+    engine: Optional[str] = None
+
+
 _ENGINE_TASKS: Dict[str, asyncio.Task] = {}
 _ENGINE_LAST_START_TS: Dict[str, float] = {}
 _ENGINE_TRANSIENT_WINDOW_S = 45
@@ -2741,22 +2753,63 @@ async def comfy_sync_status():
 
 
 @app.post("/api/job", response_model=JobStartResponse)
-async def start_job(req: LLMRequest):
+async def start_job(req: APIJobRequest):
     """Start an LLM inference job."""
     active_backend_name = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "ollama"
     active_backend = backend_manager.get_active_backend()
     api_backend = "custom" if active_backend_name in {"mlx", "trtllm"} else active_backend_name
+    runtime_model: Optional[str] = None
 
     if active_backend.backend_type == BackendType.MANAGED and not agent_state.running:
         raise HTTPException(status_code=400, detail="Engine not started")
 
-    if not registry_entry_matches_backend(req.model, api_backend):
-        raise HTTPException(status_code=400, detail=f"Model {req.model} not valid for backend {api_backend}")
+    if api_backend == "ollama":
+        if not req.model:
+            raise HTTPException(status_code=400, detail="model required for ollama")
+        runtime_model = req.model
+    elif api_backend == "custom":
+        wrapper_running = is_wrapper_running()
+        wrapper_health = None
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                health_resp = await client.get("http://127.0.0.1:9002/v1/health")
+            if health_resp.status_code == 200:
+                wrapper_health = health_resp.json()
+        except Exception:
+            wrapper_health = None
+
+        custom_state = backend_manager.custom_backend_state(wrapper_running, wrapper_health)
+        if custom_state != "ready":
+            raise HTTPException(status_code=400, detail="custom backend not ready")
+
+        runtime_model = (agent_state.current_model or "").strip() or None
+        if runtime_model is None:
+            raise HTTPException(status_code=500, detail="custom backend misconfigured")
+    else:
+        runtime_model = req.model
+
+    if not runtime_model:
+        raise HTTPException(status_code=400, detail="model is required")
+
+    if not registry_entry_matches_backend(runtime_model, api_backend):
+        raise HTTPException(status_code=400, detail=f"Model {runtime_model} not valid for backend {api_backend}")
+
+    llm_req = LLMRequest(
+        test_type="llm_generate",
+        model=runtime_model,
+        prompt=req.prompt,
+        max_tokens=req.max_tokens,
+        temperature=req.temperature,
+        num_ctx=req.num_ctx,
+        repeat=req.repeat,
+        stream=req.stream,
+        engine=req.engine,
+    )
 
     job_id = str(uuid.uuid4())
-    slog.info("job_backend_selected", job_id=job_id, backend=api_backend, runtime_backend=active_backend_name, model=req.model)
+    slog.info("job_backend_selected", job_id=job_id, backend=api_backend, runtime_backend=active_backend_name, model=runtime_model)
 
-    task = asyncio.create_task(_job_runner_llm(job_id, req))
+    task = asyncio.create_task(_job_runner_llm(job_id, llm_req))
     RUNNING_JOBS[job_id] = task
 
     def _on_done(t: asyncio.Task):
@@ -2853,12 +2906,6 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
 
         if api_backend == "ollama":
             inference_base = CFG.get("ollama", {}).get("base_url") or CFG.get("ollama_base_url") or "http://127.0.0.1:11434"
-        elif api_backend == "custom":
-            inference_base = os.environ.get("WRAPPER_BASE_URL", "http://127.0.0.1:9002")
-        else:
-            inference_base = None
-
-        if inference_base:
             result = await stream_ollama_generate(
                 job_id=job_id,
                 model=model,
@@ -2870,6 +2917,51 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 on_token=on_token,
             )
             result["engine"] = api_backend
+        elif api_backend == "custom":
+            wrapper_base = os.environ.get("WRAPPER_BASE_URL", "http://127.0.0.1:9002").rstrip("/")
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": req.max_tokens,
+                "stream": True,
+                "temperature": float(req.temperature),
+            }
+
+            gen_tokens = 0
+            t0 = time.perf_counter()
+            t_first = None
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=None, write=60.0, pool=60.0)) as client:
+                async with client.stream("POST", f"{wrapper_base}/v1/chat/completions", json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[6:].strip()
+                        if data == "[DONE]":
+                            break
+                        chunk = json.loads(data)
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        token = delta.get("content")
+                        if not token:
+                            continue
+                        now = time.perf_counter()
+                        if t_first is None:
+                            t_first = now
+                        gen_tokens += len(str(token).split())
+                        await on_token(str(token), now)
+
+            tend = time.perf_counter()
+            result = {
+                "ttft_ms": ((t_first - t0) * 1000.0) if t_first else None,
+                "gen_tokens": gen_tokens,
+                "gen_tokens_per_s": (gen_tokens / (tend - t_first)) if (t_first and tend > t_first) else None,
+                "total_ms": (tend - t0) * 1000.0,
+                "model": model,
+                "engine": api_backend,
+            }
         else:
             token_count = 0
             async for token in backend.generate(model=model, messages=[{"role": "user", "content": prompt}], stream=True):
