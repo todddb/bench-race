@@ -1,7 +1,6 @@
 const socket = io();
 const paneMap = new Map();
 const statusCache = new Map();
-const syncState = new Map();
 const liveOutput = new Map();
 const liveMetrics = new Map();
 const runtimeMetrics = new Map();
@@ -1187,25 +1186,6 @@ const openSparklineModal = (machineId, type) => {
   openOverlay("sparkline");
 };
 
-function updateSyncButton(machine) {
-  const btn = document.getElementById(`sync-${machine.machine_id}`);
-  if (!btn) return;
-  const currentBackend = getSelectedBackend();
-  if (MODE === "compute" || currentBackend === "ollama") {
-    btn.classList.add("hidden");
-    return;
-  }
-  const syncing = syncState.get(machine.machine_id)?.active;
-  const modelAvailable = machine.has_selected_model !== false;
-  if (!modelAvailable) {
-    btn.classList.remove("hidden");
-    btn.disabled = Boolean(syncing) || backendSwitch?.inProgress;
-    btn.title = `Selected model is unavailable for ${machine.backend || "current"} backend`;
-  } else {
-    btn.classList.add("hidden");
-  }
-}
-
 function applyStatusResponse(data) {
   const previousCache = new Map(statusCache);
   statusCache.clear();
@@ -1226,7 +1206,6 @@ function applyStatusResponse(data) {
       runtimeMetrics.set(merged.machine_id, merged.runtime_metrics);
     }
     updateRuntimeMetrics(merged.machine_id, merged.runtime_metrics);
-    updateSyncButton(merged);
   });
   updatePreflightBanner();
 }
@@ -1256,16 +1235,6 @@ function refreshStatus() {
   return fetchStatus();
 }
 
-function refreshAllModelAvailability() {
-  fetch("/api/models/config")
-    .then((r) => r.json())
-    .then(() => {
-      // trigger status refresh
-      refreshStatus();
-    })
-    .catch(console.error);
-}
-
 function getPreflightStatus() {
   const blocked = [];
   const ready = [];
@@ -1275,13 +1244,6 @@ function getPreflightStatus() {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "excluded" });
     } else if (!machine.reachable) {
       blocked.push({ machine_id: machineId, label: machine.label, reason: "agent offline" });
-    } else if (MODE !== "compute" && machine.selected_model && !machine.has_selected_model) {
-      if (backendSwitch?.inProgress) return;
-      blocked.push({
-        machine_id: machineId,
-        label: machine.label,
-        reason: `missing model ${machine.selected_model}`,
-      });
     } else {
       ready.push({ machine_id: machineId, label: machine.label });
     }
@@ -1305,83 +1267,6 @@ function updatePreflightBanner() {
     banner.textContent = `${blocked.length} machine(s) blocked: ${reasons}`;
     banner.classList.toggle("error", ready.length === 0);
   }
-}
-
-function updateSyncUI(machineId, payload) {
-  const progress = document.getElementById(`sync-progress-${machineId}`);
-  const fill = document.getElementById(`sync-progress-fill-${machineId}`);
-  const text = document.getElementById(`sync-progress-text-${machineId}`);
-  const log = document.getElementById(`sync-progress-log-${machineId}`);
-  if (!progress || !fill || !text || !log) return;
-
-  progress.classList.remove("hidden");
-  const state = syncState.get(machineId) || { logs: [], active: true };
-  state.active = true;
-  if (payload?.percent != null) {
-    progress.querySelector(".progress-bar")?.classList.remove("indeterminate");
-    fill.style.width = `${payload.percent}%`;
-  } else {
-    progress.querySelector(".progress-bar")?.classList.add("indeterminate");
-    fill.style.width = "40%";
-  }
-
-  const message = payload?.message || payload?.phase || "Syncing";
-  const model = payload?.model ? ` ${payload.model}` : "";
-  text.textContent = `${message}${model}`;
-
-  if (payload?.message) {
-    state.logs.unshift(`${payload.message}${model}`);
-    state.logs = state.logs.slice(0, 3);
-    log.innerHTML = state.logs.map((entry) => `<li>${entry}</li>`).join("");
-  }
-  syncState.set(machineId, state);
-}
-
-function completeSyncUI(machineId, message, isError = false) {
-  const progress = document.getElementById(`sync-progress-${machineId}`);
-  const fill = document.getElementById(`sync-progress-fill-${machineId}`);
-  const text = document.getElementById(`sync-progress-text-${machineId}`);
-  const log = document.getElementById(`sync-progress-log-${machineId}`);
-  if (!progress || !fill || !text || !log) return;
-
-  progress.classList.remove("hidden");
-  progress.querySelector(".progress-bar")?.classList.remove("indeterminate");
-  fill.style.width = "100%";
-  text.textContent = message || (isError ? "Sync failed" : "Up to date");
-  const state = syncState.get(machineId) || { logs: [], active: false };
-  state.active = false;
-  syncState.set(machineId, state);
-  if (isError) {
-    log.innerHTML = `<li>${message || "Sync failed"}</li>`;
-  }
-}
-
-function initSyncButtons(machines) {
-  machines.forEach((machine) => {
-    const btn = document.getElementById(`sync-${machine.machine_id}`);
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      updateSyncUI(machine.machine_id, { message: "Starting sync..." });
-      try {
-        const selectedModel = document.getElementById("model")?.value || "";
-        const syncUrl = `/api/machines/${machine.machine_id}/sync?model=${encodeURIComponent(selectedModel)}`;
-        const response = await fetch(syncUrl, { method: "POST" });
-        const data = await response.json();
-        if (!response.ok || data.error) {
-          throw new Error(data.error || "Sync request failed");
-        }
-        if (!data.sync_id) {
-          completeSyncUI(machine.machine_id, data.message || "Up to date");
-          await fetchStatus();
-        }
-      } catch (error) {
-        completeSyncUI(machine.machine_id, error.message, true);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  });
 }
 
 // ---- Model validation (Test button in settings) ----
@@ -1986,7 +1871,6 @@ socket.on("connect", async () => {
         memSvg.addEventListener("click", () => openSparklineModal(machine.machine_id, "mem"));
       }
     });
-    initSyncButtons(machines);
     await loadModelsManifest();
     await fetchStatus();
     await loadBaselineRun();
@@ -2092,20 +1976,6 @@ socket.on("agent_event", (evt) => {
     });
     markRunMachineDone(evt.machine_id);
     fetchRecentRuns();
-  }
-
-  if (evt.type === "sync_started") {
-    updateSyncUI(evt.machine_id, { message: "Sync started" });
-  }
-  if (evt.type === "sync_progress") {
-    updateSyncUI(evt.machine_id, evt.payload || {});
-  }
-  if (evt.type === "sync_done") {
-    completeSyncUI(evt.machine_id, evt.payload?.message || "Up to date");
-    fetchStatus();
-  }
-  if (evt.type === "sync_error") {
-    completeSyncUI(evt.machine_id, evt.payload?.message || "Sync failed", true);
   }
 
   if (evt.type === "runtime_metrics_update") {
@@ -3064,7 +2934,6 @@ const applyBackend = async (backend) => {
     backendSwitch.inProgress = false;
     updateBackendStatus("ready", "Ready");
     await refreshModelsForBackend(backend);
-    await refreshAllModelAvailability();
     await refreshBackendStatus();
   } catch (err) {
     backendSwitch.inProgress = false;
@@ -3107,7 +2976,6 @@ function maybeCompleteBackendSwitch() {
     if (backendSwitch.pollTimer) { clearTimeout(backendSwitch.pollTimer); backendSwitch.pollTimer = null; }
     updateBackendStatus("ready", "Ready");
     machineIds.forEach((id) => setAgentDimmed(id, false));
-    refreshAllModelAvailability();
   }
 }
 // Run view banner actions
