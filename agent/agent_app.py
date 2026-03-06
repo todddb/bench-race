@@ -75,7 +75,7 @@ from agent.reset_helpers import (
 )
 from agent.backends.backend_manager import BackendManager
 from agent.backends.base import BackendType
-from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend
+from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend  # noqa: F401 — retained for tests
 from agent.wrapper_lifecycle import (
     is_wrapper_running,
     start_wrapper,
@@ -1367,6 +1367,7 @@ class BackendSelectRequest(BaseModel):
 class BackendSwitchRequest(BaseModel):
     backend: str  # "custom" or "ollama"
     model: Optional[str] = None
+    engine_type: Optional[str] = None  # "mlx" or "trtllm" — required for custom
 
 
 class BackendStatusResponse(BaseModel):
@@ -1575,12 +1576,13 @@ async def switch_backend(req: BackendSwitchRequest):
         raise HTTPException(status_code=400, detail="model is required")
 
     if backend == "custom":
-        if not registry_entry_matches_backend(model, "custom"):
-            raise HTTPException(status_code=400, detail=f"Model {model} not valid for backend custom")
-        resolved = resolve_model_for_machine(model, "custom")
-        if not resolved:
-            raise HTTPException(status_code=400, detail=f"Model resolution failed for model_id={model}, backend=custom")
-        result = await start_engine(EngineStartRequest(backend="custom", model=model))
+        engine_type = (req.engine_type or "").strip().lower()
+        if engine_type not in {"mlx", "trtllm"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing or invalid engine_type for custom backend. Central must provide engine_type ('mlx' or 'trtllm')."
+            )
+        result = await start_engine(EngineStartRequest(backend="custom", model=model, engine_type=engine_type))
         runtime_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
         if runtime_backend not in {"mlx", "trtllm"}:
             raise HTTPException(status_code=500, detail="Custom backend switch did not activate a managed runtime backend")
@@ -1724,15 +1726,6 @@ async def start_engine(request: EngineStartRequest):
         except Exception as e:
             log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, runtime_model, str(e))
             raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
-
-    # When Central provides engine_type, it has already validated the model.
-    # Only run local validation when engine_type is not provided (legacy path).
-    if not (request.engine_type or "").strip():
-        if not registry_entry_matches_backend(runtime_model, backend):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model {runtime_model} not valid for backend {backend}",
-            )
 
     resolved = runtime_model
 
@@ -2817,9 +2810,6 @@ async def start_job(req: APIJobRequest):
 
     if not runtime_model:
         raise HTTPException(status_code=400, detail="model is required")
-
-    if not registry_entry_matches_backend(runtime_model, api_backend):
-        raise HTTPException(status_code=400, detail=f"Model {runtime_model} not valid for backend {api_backend}")
 
     llm_req = LLMRequest(
         test_type="llm_generate",
