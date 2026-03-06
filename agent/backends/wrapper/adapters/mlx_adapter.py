@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List
-
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -12,97 +9,93 @@ logger = logging.getLogger(__name__)
 class MLXAdapter:
     backend_name = "mlx"
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self) -> None:
+        self._mlx_lm = None
+        self.model = None
+        self.tokenizer = None
+        self.active_model_id: str | None = None
+
+    def _ensure_mlx(self) -> None:
+        if self._mlx_lm is not None:
+            return
         try:
-            self.base_url = base_url.rstrip("/")
+            import mlx_lm  # type: ignore[import-untyped]
         except Exception as exc:
             logger.exception("mlx_engine_load_failed", extra={"backend": self.backend_name, "error": str(exc)})
             raise RuntimeError(f"MLX load failed: {exc}") from exc
+        self._mlx_lm = mlx_lm
 
     async def list_models(self) -> List[Dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{self.base_url}/models")
-            resp.raise_for_status()
-            models = resp.json().get("models", [])
-            for model in models:
-                model.setdefault("backend", self.backend_name)
-            return models
+        if not self.active_model_id:
+            return []
+        return [{"id": self.active_model_id, "backend": self.backend_name}]
 
     async def health(self) -> Dict[str, Any]:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{self.base_url}/health")
-            resp.raise_for_status()
-            data = resp.json()
-            data.setdefault("engine", self.backend_name)
-            return data
+        return {
+            "ok": self.model is not None,
+            "engine": self.backend_name,
+            "model": self.active_model_id,
+        }
 
     async def start_model(self, model_id: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(f"{self.base_url}/start", json={"model_id": model_id, "args": args or {}})
-                resp.raise_for_status()
-                return resp.json()
+            self._ensure_mlx()
+            self.model, self.tokenizer = self._mlx_lm.load(model_id)
+            self.active_model_id = model_id
+            return {"ok": True, "engine": self.backend_name, "model": model_id}
         except Exception as exc:
             logger.exception("mlx_engine_load_failed", extra={"backend": self.backend_name, "model_id": model_id, "error": str(exc)})
             raise RuntimeError(f"MLX load failed: {exc}") from exc
 
     async def switch_model(self, model_id: str) -> Dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(f"{self.base_url}/model/switch", json={"model_id": model_id})
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as exc:
-            logger.exception("mlx_engine_switch_failed", extra={"backend": self.backend_name, "model_id": model_id, "error": str(exc)})
-            raise RuntimeError(f"MLX switch failed: {exc}") from exc
+        return await self.start_model(model_id)
+
+    async def stop_model(self) -> Dict[str, Any]:
+        self.model = None
+        self.tokenizer = None
+        self.active_model_id = None
+        return {"ok": True, "engine": self.backend_name}
 
     async def infer(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("No MLX model loaded")
+
         body = {
             "prompt": payload.get("prompt") or payload.get("inputs") or "",
             "max_tokens": int(payload.get("max_tokens", 256)),
             "temperature": float(payload.get("temperature", 0.7)),
-            "stream": False,
         }
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(f"{self.base_url}/infer", json=body)
-            resp.raise_for_status()
-            return resp.json()
+        text = self._mlx_lm.generate(
+            self.model,
+            self.tokenizer,
+            prompt=body["prompt"],
+            max_tokens=body["max_tokens"],
+            temp=body["temperature"],
+        )
+        tokens = len(self.tokenizer.encode(text))
+        return {"text": text, "tokens": tokens, "engine": self.backend_name, "model": self.active_model_id}
 
     async def infer_stream(self, model_id: str, payload: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("No MLX model loaded")
+
         prompt = payload.get("prompt") or payload.get("inputs") or ""
-        req = {
-            "prompt": prompt,
-            "max_tokens": int(payload.get("max_tokens", 256)),
-            "temperature": float(payload.get("temperature", 0.7)),
-            "stream": True,
-        }
-        async with httpx.AsyncClient(timeout=None) as client:
-            try:
-                async with client.stream("POST", f"{self.base_url}/infer", json=req) as resp:
-                    resp.raise_for_status()
-                    ctype = resp.headers.get("content-type", "")
-                    if "text/event-stream" in ctype:
-                        async for line in resp.aiter_lines():
-                            if line:
-                                yield line.encode("utf-8")
-                        return
-                    chunks = []
-                    async for chunk in resp.aiter_bytes():
-                        if chunk:
-                            chunks.append(chunk)
-                    if chunks:
-                        merged = b"".join(chunks).decode("utf-8", errors="ignore")
-                        try:
-                            data = json.loads(merged)
-                            text = data.get("text") or ""
-                        except json.JSONDecodeError:
-                            text = merged
-                        for idx in range(0, len(text), 32):
-                            yield text[idx: idx + 32].encode("utf-8")
-                        return
-            except Exception:
-                resp = await client.post(f"{self.base_url}/infer", json={**req, "stream": False}, timeout=300)
-                resp.raise_for_status()
-                text = resp.json().get("text", "")
-                for idx in range(0, len(text), 32):
-                    yield text[idx: idx + 32].encode("utf-8")
+        max_tokens = int(payload.get("max_tokens", 256))
+        temperature = float(payload.get("temperature", 0.7))
+        full_text = ""
+        for token_obj in self._mlx_lm.stream_generate(
+            self.model,
+            self.tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temp=temperature,
+        ):
+            token_text = getattr(token_obj, "text", str(token_obj))
+            if token_text.startswith(full_text):
+                chunk = token_text[len(full_text):]
+                full_text = token_text
+            else:
+                chunk = token_text
+                full_text += token_text
+            if chunk:
+                yield chunk.encode("utf-8")
