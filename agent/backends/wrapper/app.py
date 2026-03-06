@@ -55,6 +55,8 @@ def load_config() -> Dict[str, Any]:
 
 
 def route_model_to_backend(model_id: str | None, cfg: Dict[str, Any]) -> str:
+    """Deprecated: Retained only for inference endpoints during transition.
+    All model start/switch requests now require an explicit backend from Central."""
     if not model_id:
         return cfg.get("default_backend", "mlx")
     for mapping in cfg.get("mappings", []):
@@ -167,7 +169,15 @@ async def start_model(payload: Dict[str, Any]) -> JSONResponse:
     if not model_id:
         return JSONResponse(status_code=400, content={"error": "model_id is required"})
 
-    backend = route_model_to_backend(model_id, cfg)
+    # Central/Agent must provide explicit backend — no heuristic routing
+    explicit_backend = (payload.get("backend") or "").strip().lower()
+    _backend_map = {"mlx": "mlx", "trtllm": "trt"}
+    if explicit_backend not in _backend_map:
+        return JSONResponse(status_code=400, content={
+            "error": f"Explicit backend required ('mlx' or 'trtllm'), got: '{explicit_backend}'"
+        })
+    backend = _backend_map[explicit_backend]
+
     logger.info("model_start_requested", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": backend})
 
     try:
@@ -192,7 +202,13 @@ async def switch_model(payload: Dict[str, Any]) -> JSONResponse:
     if not model_id:
         return JSONResponse(status_code=400, content={"error": "model_id is required"})
 
-    backend = route_model_to_backend(model_id, cfg)
+    explicit_backend = (payload.get("backend") or "").strip().lower()
+    _backend_map = {"mlx": "mlx", "trtllm": "trt"}
+    if explicit_backend not in _backend_map:
+        return JSONResponse(status_code=400, content={
+            "error": f"Explicit backend required ('mlx' or 'trtllm'), got: '{explicit_backend}'"
+        })
+    backend = _backend_map[explicit_backend]
     try:
         pre = service_manager.switch_backend(backend, model_id)
         if not pre.get("ok", False):

@@ -1381,6 +1381,7 @@ class EngineStartRequest(BaseModel):
     backend: str
     model: Optional[str] = None
     model_id: Optional[str] = None
+    engine_type: Optional[str] = None  # "mlx" or "trtllm" — sent by Central
 
 
 class EngineStopRequest(BaseModel):
@@ -1724,25 +1725,32 @@ async def start_engine(request: EngineStartRequest):
             log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, runtime_model, str(e))
             raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
-    if not registry_entry_matches_backend(runtime_model, backend):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model {runtime_model} not valid for backend {backend}",
-        )
+    # When Central provides engine_type, it has already validated the model.
+    # Only run local validation when engine_type is not provided (legacy path).
+    if not (request.engine_type or "").strip():
+        if not registry_entry_matches_backend(runtime_model, backend):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {runtime_model} not valid for backend {backend}",
+            )
 
     resolved = runtime_model
 
-    log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, runtime_model, resolved)
+    log.info("ENGINE_START request backend=%s engine_type=%s model_id=%s resolved=%s", backend, request.engine_type, runtime_model, resolved)
 
     engine_type = "ollama"
     if backend == "custom":
-        arch = os.environ.get("BENCH_AGENT_PLATFORM", "").strip().lower()
-        if arch in {"nvidia", "linux"}:
-            engine_type = "trtllm"
-        elif arch in {"apple", "mac", "darwin"}:
-            engine_type = "mlx"
-        else:
-            engine_type = "mlx" if platform.system().lower() == "darwin" else "trtllm"
+        # Central is authoritative for engine_type; require it explicitly
+        explicit_engine_type = (request.engine_type or "").strip().lower()
+        if explicit_engine_type not in {"mlx", "trtllm"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing or invalid engine_type for custom backend. Central must provide engine_type ('mlx' or 'trtllm')."
+            )
+        engine_type = explicit_engine_type
+        # Use model_id from Central if provided
+        if request.model_id:
+            resolved = request.model_id
 
     try:
         if backend == "custom":
@@ -1774,7 +1782,10 @@ async def start_engine(request: EngineStartRequest):
                 raise HTTPException(status_code=500, detail="Wrapper failed to start")
 
             async with httpx.AsyncClient(timeout=10.0) as client:
-                model_start_resp = await client.post(model_start_url, json={"model_id": resolved})
+                model_start_resp = await client.post(model_start_url, json={
+                    "model_id": resolved,
+                    "backend": engine_type,
+                })
             if model_start_resp.status_code != 200:
                 raise HTTPException(status_code=500, detail="Wrapper model load failed")
 

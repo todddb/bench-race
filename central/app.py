@@ -2313,6 +2313,21 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
     raise ValueError(f"Unknown backend {backend}")
 
 
+def _derive_engine_type(machine: Dict[str, Any]) -> str:
+    """Derive engine_type from machine GPU type.  Central is the sole authority."""
+    gpu_type = str(
+        machine.get("gpu_type")
+        or (machine.get("gpu") or {}).get("type")
+        or detect_vendor(machine)
+        or ""
+    ).strip().lower()
+    if gpu_type == "nvidia":
+        return "trtllm"
+    if gpu_type == "apple":
+        return "mlx"
+    return "trtllm"
+
+
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
     """Resolve registry model_id into backend engine + runtime identifier for a machine."""
     backend = (backend or "").strip().lower()
@@ -2397,15 +2412,21 @@ def api_backend_switch():
 
                 requests.post(f"{base_url}/api/engine/stop", timeout=30)
 
+                engine_type = _derive_engine_type(machine) if resolved_backend == "custom" else None
+                agent_payload = {"backend": resolved_backend, "model": resolved_runtime_model}
+                if engine_type:
+                    agent_payload["engine_type"] = engine_type
+                    agent_payload["model_id"] = resolved_runtime_model
                 resp = requests.post(
                     f"{base_url}/api/engine/start",
-                    json={"backend": resolved_backend, "model": resolved_runtime_model},
+                    json=agent_payload,
                     timeout=300,
                 )
                 log.info(
-                    "Backend switch request sent to agent machine=%s backend=%s model=%s",
+                    "Backend switch request sent to agent machine=%s backend=%s engine_type=%s model=%s",
                     machine_id,
                     resolved_backend,
+                    engine_type,
                     resolved_runtime_model,
                 )
 
@@ -2569,10 +2590,16 @@ def api_agent_switch_backend(machine_id: str):
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
 
+    engine_type = _derive_engine_type(machine) if agent_backend == "custom" else None
+    agent_payload = {"backend": agent_backend, "model": resolved_model}
+    if engine_type:
+        agent_payload["engine_type"] = engine_type
+        agent_payload["model_id"] = resolved_model
+    log.info("api_agent_switch_backend machine=%s backend=%s engine_type=%s model=%s", machine_id, agent_backend, engine_type, resolved_model)
     try:
         response = requests.post(
             f"{agent_base_url}/api/engine/start",
-            json={"backend": agent_backend, "model": resolved_model},
+            json=agent_payload,
             timeout=600,
         )
         return jsonify(response.json()), response.status_code
@@ -2611,10 +2638,15 @@ def api_agent_load_model(machine_id: str):
     if not agent_base_url:
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
 
+    engine_type = _derive_engine_type(machine) if agent_backend == "custom" else None
+    agent_payload = {"backend": agent_backend, "model": resolved_model}
+    if engine_type:
+        agent_payload["engine_type"] = engine_type
+        agent_payload["model_id"] = resolved_model
     try:
         response = requests.post(
             f"{agent_base_url}/api/engine/start",
-            json={"backend": agent_backend, "model": resolved_model},
+            json=agent_payload,
             timeout=600,
         )
         return jsonify(response.json()), response.status_code
@@ -2655,6 +2687,11 @@ def api_engine_start(machine_id: str):
                 return jsonify({"error": str(exc), "ok": False}), 400
             payload["backend"] = agent_backend
             payload["model"] = resolved_model
+            if agent_backend == "custom":
+                engine_type = _derive_engine_type(machine)
+                payload["engine_type"] = engine_type
+                payload["model_id"] = resolved_model
+                log.info("api_engine_start machine=%s engine_type=%s model_id=%s", machine_id, engine_type, resolved_model)
             if "engine" in payload:
                 payload["engine"] = agent_backend
 
