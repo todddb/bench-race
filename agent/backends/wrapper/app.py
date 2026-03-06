@@ -124,30 +124,29 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 @app.get("/v1/health")
 async def health() -> Dict[str, Any]:
     logger.debug("health_check", extra={"endpoint": "/v1/health"})
-    if active_state["backend"]:
-        backend = active_state["backend"]
-        public_backend = _public_backend_name(backend)
-        try:
-            data = await adapters[backend].health()
-            return {
-                "status": "ok" if active_state["backend"] and active_state["model"] else "down",
-                "engine": public_backend,
-                "model": active_state.get("model") or data.get("model"),
-                "mem": data.get("mem", {}),
-            }
-        except Exception as exc:
-            logger.exception("health_check_failed", extra={"endpoint": "/v1/health", "backend": backend, "error": str(exc)})
-            return {"status": "degraded", "engine": public_backend, "model": active_state.get("model"), "mem": {}, "error": str(exc)}
+    backend = active_state.get("backend")
+    model = active_state.get("model")
 
-    statuses: Dict[str, Any] = {}
-    for name, adapter in adapters.items():
-        public_name = _public_backend_name(name) or name
-        try:
-            statuses[public_name] = await adapter.health()
-        except Exception as exc:
-            logger.exception("backend_health_failed", extra={"endpoint": "/v1/health", "backend": name, "error": str(exc)})
-            statuses[public_name] = {"status": "down", "error": str(exc)}
-    return {"status": "ok", "engine": None, "model": None, "mem": {}, "backends": statuses}
+    if not backend:
+        return {"status": "down", "engine": None, "model": None, "mem": {}}
+
+    adapter = adapters.get(backend)
+    public_backend = _public_backend_name(backend)
+    if adapter is None:
+        logger.error("health_check_unknown_backend", extra={"endpoint": "/v1/health", "backend": backend})
+        return {"status": "down", "engine": public_backend, "model": model, "mem": {}}
+
+    try:
+        data = await adapter.health()
+        return {
+            "status": "ok" if model else "down",
+            "engine": public_backend,
+            "model": model,
+            "mem": data.get("mem", {}) if isinstance(data, dict) else {},
+        }
+    except Exception as exc:
+        logger.exception("health_check_failed", extra={"endpoint": "/v1/health", "backend": backend, "error": str(exc)})
+        return {"status": "down", "engine": public_backend, "model": model, "mem": {}}
 
 
 @app.get("/v1/models")
