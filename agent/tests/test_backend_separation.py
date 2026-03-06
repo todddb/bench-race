@@ -142,6 +142,9 @@ def test_stop_engine_external_does_not_run_script(monkeypatch):
         def get_active_backend_name(self):
             return "ollama"
 
+        def get_active_backend(self):
+            return _Backend()
+
         def create_backend(self, _name):
             return _Backend()
 

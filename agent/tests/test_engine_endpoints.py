@@ -101,14 +101,44 @@ def test_engine_start_custom_uses_model_id_without_resolution(monkeypatch):
     monkeypatch.setattr(mod, "_run_agent_script", fake_run_agent_script)
     monkeypatch.setattr(mod, "start_wrapper", lambda: 1234)
 
+    class _Resp:
+        def __init__(self, status_code=200, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            if url.endswith('/v1/health'):
+                return _Resp(200, {"status": "ok", "engine": "mlx", "model": "llama3.1-8b-custom"})
+            if url.endswith('/v1/models'):
+                return _Resp(200, {"models": ["llama3.1-8b-custom"]})
+            return _Resp(404, {})
+
+        async def post(self, url, json=None):
+            if url.endswith('/v1/load') and json == {"model": "llama3.1-8b-custom"}:
+                return _Resp(200, {"ok": True})
+            return _Resp(500, {})
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda timeout=2.0: _Client())
+
     response = asyncio.run(mod.start_engine({"backend": "custom", "model": "llama3.1-8b-custom"}))
 
     assert response["status"] == "started"
     assert response["engine"] == "custom"
     assert response["engine_type"] in {"mlx", "trtllm"}
     assert response["accepted"] is True
-    assert any(call[0] == "start-backend" and call[-1] == "llama3.1-8b-custom" for call in calls)
+    assert calls == []
     mod._ACTIVE_BACKEND = None
+    mod.backend_manager.clear_active_backend()
 
 
 def test_backend_status_selected_backend_only(monkeypatch):

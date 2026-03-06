@@ -1718,12 +1718,79 @@ async def start_engine(payload: dict):
 
     try:
         if backend == "custom":
-            await _run_agent_script("start-backend", engine_type, resolved)
+            agent_state.running = False
+            agent_state.current_model = None
+
+            await asyncio.to_thread(start_wrapper)
+
+            health_url = "http://127.0.0.1:9002/v1/health"
+            models_url = "http://127.0.0.1:9002/v1/models"
+            load_url = "http://127.0.0.1:9002/v1/load"
+
+            wrapper_ready = False
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                try:
+                    async with httpx.AsyncClient(timeout=2.0) as client:
+                        health_resp = await client.get(health_url)
+                    if health_resp.status_code == 200:
+                        payload = health_resp.json()
+                        if payload.get("status") == "ok":
+                            wrapper_ready = True
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+            if not wrapper_ready:
+                raise HTTPException(status_code=500, detail="Wrapper failed to start")
+
+            agent_state.running = True
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                load_resp = await client.post(load_url, json={"model": resolved})
+            if load_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail="Wrapper model load failed")
+
+            verified = False
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline:
+                try:
+                    async with httpx.AsyncClient(timeout=2.0) as client:
+                        health_resp = await client.get(health_url)
+                        models_resp = await client.get(models_url)
+
+                    if health_resp.status_code == 200 and models_resp.status_code == 200:
+                        health_payload = health_resp.json()
+                        models_payload = models_resp.json()
+
+                        health_engine = health_payload.get("engine")
+                        health_model = health_payload.get("model")
+                        listed_models = models_payload.get("models") or []
+
+                        model_ids = []
+                        for item in listed_models:
+                            if isinstance(item, str):
+                                model_ids.append(item)
+                            elif isinstance(item, dict):
+                                mid = item.get("id")
+                                if mid is not None:
+                                    model_ids.append(mid)
+
+                        if health_engine is not None and health_model == resolved and resolved in model_ids:
+                            verified = True
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+            if not verified:
+                raise HTTPException(status_code=500, detail="Wrapper did not report loaded model")
+
             custom_backend = backend_manager.create_backend(engine_type)
             backend_manager.set_active_backend(custom_backend, engine_type)
             _ACTIVE_BACKEND = engine_type
             agent_state.current_model = resolved
-            agent_state.running = True
             _ENGINE_LAST_START_TS[engine_type] = time.time()
             result = {"status": "started", "engine": backend, "engine_type": engine_type, "accepted": True}
         else:
@@ -1733,7 +1800,6 @@ async def start_engine(payload: dict):
         if result.get("status") not in {"started", "ok"}:
             raise RuntimeError(result.get("error") or "backend did not report started")
 
-        await asyncio.to_thread(start_wrapper)
         return result
     except HTTPException:
         raise
@@ -1863,7 +1929,18 @@ async def backend_status(request: Request):
     selected_model = (request.query_params.get("model") or "").strip()
     has_selected_model = False
 
-    if active_backend:
+    if active_backend in {"mlx", "trtllm"}:
+        wrapper_running = is_wrapper_running()
+        wrapper_health = None
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                health_resp = await client.get("http://127.0.0.1:9002/v1/health")
+            if health_resp.status_code == 200:
+                wrapper_health = health_resp.json()
+        except Exception:
+            wrapper_health = None
+        state = backend_manager.custom_backend_state(wrapper_running, wrapper_health)
+    elif active_backend:
         active_status = statuses.get(active_backend) or {}
         healthy = bool(active_status.get("healthy"))
         last_start = _ENGINE_LAST_START_TS.get(active_backend, 0)
@@ -1873,7 +1950,25 @@ async def backend_status(request: Request):
         elif not healthy:
             state = "offline"
 
-    if selected_model:
+    if active_backend in {"mlx", "trtllm"}:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                models_resp = await client.get("http://127.0.0.1:9002/v1/models")
+            if models_resp.status_code == 200:
+                model_items = models_resp.json().get("models") or []
+                model_ids = []
+                for item in model_items:
+                    if isinstance(item, str):
+                        model_ids.append(item)
+                    elif isinstance(item, dict):
+                        model_id = item.get("id")
+                        if model_id is not None:
+                            model_ids.append(model_id)
+                selected_model = next((m for m in model_ids if m), "")
+                has_selected_model = bool(selected_model)
+        except Exception:
+            has_selected_model = False
+    elif selected_model:
         try:
             backend_models = await backend_manager.get_active_backend().list_models()
             has_selected_model = selected_model in backend_models

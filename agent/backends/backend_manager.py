@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict
 
 from agent.backends.base import BackendType, BaseBackend
 from agent.backends.mlx_wrapper import MLXBackendWrapper
@@ -60,3 +60,12 @@ class BackendManager:
 
     def get_active_backend_name(self) -> str | None:
         return self._active_name
+
+    @staticmethod
+    def custom_backend_state(wrapper_running: bool, wrapper_health: Dict[str, Any] | None) -> str:
+        health = wrapper_health or {}
+        engine = health.get("engine")
+        model = health.get("model")
+        if wrapper_running and engine is not None and model is not None:
+            return "ready"
+        return "offline"
