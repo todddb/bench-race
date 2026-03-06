@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
-import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceManager:
@@ -23,13 +25,16 @@ class ServiceManager:
             text=True,
             env={**os.environ, **(env or {})},
         )
-        return {
+        result = {
             "ok": proc.returncode == 0,
             "rc": proc.returncode,
             "stdout": proc.stdout.strip(),
             "stderr": proc.stderr.strip(),
             "command": command,
         }
+        if not result["ok"]:
+            logger.error("backend_command_failed", extra={"error": result["stderr"] or result["stdout"], "command": command})
+        return result
 
     @staticmethod
     def trt_engine_id(model_id: str) -> str:
@@ -37,14 +42,25 @@ class ServiceManager:
 
     def start_backend(self, backend: str, model_id: Optional[str] = None) -> Dict[str, Any]:
         if backend == "mlx":
-            return self._run("./scripts/agent start-mlx")
+            try:
+                return self._run("./scripts/agent start-mlx")
+            except Exception as exc:
+                logger.exception("mlx_engine_load_failed", extra={"backend": "mlx", "model_id": model_id, "error": str(exc)})
+                raise RuntimeError(f"MLX load failed: {exc}") from exc
         if backend == "trt":
             if not model_id:
                 return {"ok": False, "rc": 2, "stdout": "", "stderr": "model_id required for trt"}
-            return self._run(
-                f"./agent/backends/trtllm_run.sh restart",
-                env={"TRTLLM_MODEL": self.trt_engine_id(model_id)},
-            )
+            engine_id = self.trt_engine_id(model_id)
+            engine_dir = self.repo_root / "agent" / "models" / "trtllm" / engine_id
+            if not engine_dir.is_dir():
+                msg = f"Model directory not found: {engine_dir}"
+                logger.error("trt_engine_load_failed", extra={"backend": "trt", "model_id": model_id, "error": msg})
+                return {"ok": False, "rc": 2, "stdout": "", "stderr": msg}
+            try:
+                return self._run(f"./agent/backends/trtllm_run.sh start {engine_id}")
+            except Exception as exc:
+                logger.exception("trt_engine_load_failed", extra={"backend": "trt", "model_id": model_id, "error": str(exc)})
+                raise RuntimeError(f"TRT load failed: {exc}") from exc
         return {"ok": False, "rc": 2, "stdout": "", "stderr": f"unknown backend: {backend}"}
 
     def stop_backend(self, backend: str) -> Dict[str, Any]:
