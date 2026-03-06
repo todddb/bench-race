@@ -1753,7 +1753,7 @@ async def start_engine(request: EngineStartRequest):
 
             health_url = "http://127.0.0.1:9002/v1/health"
             models_url = "http://127.0.0.1:9002/v1/models"
-            load_url = "http://127.0.0.1:9002/v1/load"
+            model_start_url = "http://127.0.0.1:9002/v1/models/start"
 
             wrapper_ready = False
             deadline = time.monotonic() + 30.0
@@ -1773,12 +1773,12 @@ async def start_engine(request: EngineStartRequest):
             if not wrapper_ready:
                 raise HTTPException(status_code=500, detail="Wrapper failed to start")
 
-            agent_state.running = True
-
             async with httpx.AsyncClient(timeout=10.0) as client:
-                load_resp = await client.post(load_url, json={"model": resolved})
-            if load_resp.status_code != 200:
+                model_start_resp = await client.post(model_start_url, json={"model": resolved})
+            if model_start_resp.status_code != 200:
                 raise HTTPException(status_code=500, detail="Wrapper model load failed")
+
+            _ENGINE_LAST_START_TS[engine_type] = time.time()
 
             verified = False
             deadline = time.monotonic() + 60.0
@@ -1815,11 +1815,11 @@ async def start_engine(request: EngineStartRequest):
             if not verified:
                 raise HTTPException(status_code=500, detail="Wrapper did not report loaded model")
 
+            agent_state.running = True
             custom_backend = backend_manager.create_backend(engine_type)
             backend_manager.set_active_backend(custom_backend, engine_type)
             _ACTIVE_BACKEND = engine_type
             agent_state.current_model = resolved
-            _ENGINE_LAST_START_TS[engine_type] = time.time()
             result = {"status": "started", "engine": backend, "engine_type": engine_type, "accepted": True}
         else:
             result = await start_backend_engine("ollama", runtime_model)
