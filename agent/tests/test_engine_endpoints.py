@@ -20,7 +20,7 @@ def test_engine_start_rejects_unsupported_backend():
     mod = importlib.import_module("agent.agent_app")
 
     try:
-        asyncio.run(mod.start_engine({"backend": "mlx", "model": "anything"}))
+        asyncio.run(mod.start_engine(mod.EngineStartRequest(backend="mlx", model="anything")))
         assert False, "Expected HTTPException"
     except mod.HTTPException as exc:
         assert exc.status_code == 400
@@ -79,11 +79,11 @@ def test_engine_start_missing_required_fields():
     mod = importlib.import_module("agent.agent_app")
 
     try:
-        asyncio.run(mod.start_engine({"backend": "custom"}))
+        asyncio.run(mod.start_engine(mod.EngineStartRequest(backend="custom")))
         assert False, "Expected HTTPException"
     except mod.HTTPException as exc:
         assert exc.status_code == 400
-        assert exc.detail == "Missing required field: model"
+        assert exc.detail == "Missing required field: model_id for custom backend"
 
 
 def test_engine_start_custom_uses_model_id_without_resolution(monkeypatch):
@@ -124,13 +124,13 @@ def test_engine_start_custom_uses_model_id_without_resolution(monkeypatch):
             return _Resp(404, {})
 
         async def post(self, url, json=None):
-            if url.endswith('/v1/load') and json == {"model": "llama3.1-8b-custom"}:
+            if url.endswith('/v1/models/start') and json == {"model": "llama3.1-8b-custom"}:
                 return _Resp(200, {"ok": True})
             return _Resp(500, {})
 
     monkeypatch.setattr(mod.httpx, "AsyncClient", lambda timeout=2.0: _Client())
 
-    response = asyncio.run(mod.start_engine({"backend": "custom", "model": "llama3.1-8b-custom"}))
+    response = asyncio.run(mod.start_engine(mod.EngineStartRequest(backend="custom", model="llama3.1-8b-custom")))
 
     assert response["status"] == "started"
     assert response["engine"] == "custom"
@@ -257,7 +257,7 @@ def test_backend_switch_custom_requires_wrapper_healthy(monkeypatch):
     mod = importlib.import_module("agent.agent_app")
 
     async def fake_start_engine(payload):
-        assert payload["backend"] == "custom"
+        assert payload.backend == "custom"
         return {"status": "started", "engine": "mlx", "accepted": True}
 
     monkeypatch.setattr(mod, "start_engine", fake_start_engine)
@@ -279,7 +279,7 @@ def test_backend_switch_ollama_stops_wrapper(monkeypatch):
     calls = []
 
     async def fake_start_engine(payload):
-        assert payload["backend"] == "ollama"
+        assert payload.backend == "ollama"
         return {"status": "ok"}
 
     async def fake_run_agent_script(command, *args):
@@ -316,7 +316,7 @@ def test_engine_start_ollama_stops_wrapper_and_custom_backends(monkeypatch):
     monkeypatch.setattr(mod, "_run_agent_script", fake_run_agent_script)
     monkeypatch.setattr(mod, "start_backend_engine", fake_start_backend_engine)
 
-    resp = asyncio.run(mod.start_engine({"backend": "ollama", "model": "llama3"}))
+    resp = asyncio.run(mod.start_engine(mod.EngineStartRequest(backend="ollama", model="llama3")))
     assert resp["status"] == "ok"
     assert calls == [
         ("stop-wrapper",),
