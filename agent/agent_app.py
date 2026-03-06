@@ -1378,9 +1378,9 @@ class BackendStatusResponse(BaseModel):
 
 
 class EngineStartRequest(BaseModel):
-    engine: Optional[str] = None
-    backend: Optional[str] = None
+    backend: str
     model: Optional[str] = None
+    model_id: Optional[str] = None
 
 
 class EngineStopRequest(BaseModel):
@@ -1579,7 +1579,7 @@ async def switch_backend(req: BackendSwitchRequest):
         resolved = resolve_model_for_machine(model, "custom")
         if not resolved:
             raise HTTPException(status_code=400, detail=f"Model resolution failed for model_id={model}, backend=custom")
-        result = await start_engine({"backend": "custom", "model": model})
+        result = await start_engine(EngineStartRequest(backend="custom", model=model))
         runtime_backend = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
         if runtime_backend not in {"mlx", "trtllm"}:
             raise HTTPException(status_code=500, detail="Custom backend switch did not activate a managed runtime backend")
@@ -1591,7 +1591,7 @@ async def switch_backend(req: BackendSwitchRequest):
     await _run_agent_script("stop-backend", "mlx")
     await _run_agent_script("stop-backend", "trtllm")
     await _run_agent_script("stop-backend", "ollama", model)
-    result = await start_engine({"backend": "ollama", "model": model})
+    result = await start_engine(EngineStartRequest(backend="ollama", model=model))
     return {"ok": True, "backend": "ollama", "model": model, "wrapper_running": False, "result": result}
 
 
@@ -1676,19 +1676,35 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
 
 
 @app.post("/api/engine/start")
-async def start_engine(payload: dict):
+async def start_engine(request: EngineStartRequest):
     global _ACTIVE_BACKEND
 
-    model_id = payload.get("model")
-    backend = payload.get("backend")
-
-    if not model_id:
-        raise HTTPException(status_code=400, detail="Missing required field: model")
-    if not backend:
+    if not request.backend:
         raise HTTPException(status_code=400, detail="Missing required field: backend")
 
-    backend = str(backend).strip().lower()
-    model_id = str(model_id).strip()
+    runtime_model = None
+
+    if request.backend == "custom":
+        # For custom, prefer model_id
+        runtime_model = request.model_id or request.model
+
+        if not runtime_model:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: model_id for custom backend"
+            )
+    else:
+        # For ollama and others
+        runtime_model = request.model
+
+        if not runtime_model:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: model"
+            )
+
+    backend = str(request.backend).strip().lower()
+    runtime_model = str(runtime_model).strip()
 
     allowed_backends = {"ollama", "custom"}
     if backend not in allowed_backends:
@@ -1699,24 +1715,24 @@ async def start_engine(payload: dict):
             await _run_agent_script("stop-wrapper")
             await _run_agent_script("stop-backend", "mlx")
             await _run_agent_script("stop-backend", "trtllm")
-            await _run_agent_script("stop-backend", "ollama", model_id)
-            result = await start_backend_engine("ollama", model_id)
+            await _run_agent_script("stop-backend", "ollama", runtime_model)
+            result = await start_backend_engine("ollama", runtime_model)
             return result
         except HTTPException:
             raise
         except Exception as e:
-            log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, model_id, str(e))
+            log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, runtime_model, str(e))
             raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
-    if not registry_entry_matches_backend(model_id, backend):
+    if not registry_entry_matches_backend(runtime_model, backend):
         raise HTTPException(
             status_code=400,
-            detail=f"Model {model_id} not valid for backend {backend}",
+            detail=f"Model {runtime_model} not valid for backend {backend}",
         )
 
-    resolved = model_id
+    resolved = runtime_model
 
-    log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, model_id, resolved)
+    log.info("ENGINE_START request backend=%s model_id=%s resolved=%s", backend, runtime_model, resolved)
 
     engine_type = "ollama"
     if backend == "custom":
@@ -1806,7 +1822,7 @@ async def start_engine(payload: dict):
             _ENGINE_LAST_START_TS[engine_type] = time.time()
             result = {"status": "started", "engine": backend, "engine_type": engine_type, "accepted": True}
         else:
-            result = await start_backend_engine("ollama", model_id)
+            result = await start_backend_engine("ollama", runtime_model)
             result["engine"] = "ollama"
 
         if result.get("status") not in {"started", "ok"}:
@@ -1816,7 +1832,7 @@ async def start_engine(payload: dict):
     except HTTPException:
         raise
     except Exception as e:
-        log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, model_id, str(e))
+        log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, runtime_model, str(e))
         raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
 
