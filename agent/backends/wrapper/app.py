@@ -128,7 +128,7 @@ async def health() -> Dict[str, Any]:
     model = active_state.get("model")
 
     if not backend:
-        return {"status": "down", "engine": None, "model": None, "mem": {}}
+        return {"status": "ok", "engine": None, "model": None, "mem": {}}
 
     adapter = adapters.get(backend)
     public_backend = _public_backend_name(backend)
