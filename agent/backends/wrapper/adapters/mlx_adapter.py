@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncGenerator, Dict, List
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class MLXAdapter:
     backend_name = "mlx"
 
     def __init__(self, base_url: str) -> None:
-        self.base_url = base_url.rstrip("/")
+        try:
+            self.base_url = base_url.rstrip("/")
+        except Exception as exc:
+            logger.exception("mlx_engine_load_failed", extra={"backend": self.backend_name, "error": str(exc)})
+            raise RuntimeError(f"MLX load failed: {exc}") from exc
 
     async def list_models(self) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -30,16 +37,24 @@ class MLXAdapter:
             return data
 
     async def start_model(self, model_id: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{self.base_url}/start", json={"model_id": model_id, "args": args or {}})
-            resp.raise_for_status()
-            return resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(f"{self.base_url}/start", json={"model_id": model_id, "args": args or {}})
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            logger.exception("mlx_engine_load_failed", extra={"backend": self.backend_name, "model_id": model_id, "error": str(exc)})
+            raise RuntimeError(f"MLX load failed: {exc}") from exc
 
     async def switch_model(self, model_id: str) -> Dict[str, Any]:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{self.base_url}/model/switch", json={"model_id": model_id})
-            resp.raise_for_status()
-            return resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(f"{self.base_url}/model/switch", json={"model_id": model_id})
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            logger.exception("mlx_engine_switch_failed", extra={"backend": self.backend_name, "model_id": model_id, "error": str(exc)})
+            raise RuntimeError(f"MLX switch failed: {exc}") from exc
 
     async def infer(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = {
@@ -83,11 +98,11 @@ class MLXAdapter:
                         except json.JSONDecodeError:
                             text = merged
                         for idx in range(0, len(text), 32):
-                            yield text[idx : idx + 32].encode("utf-8")
+                            yield text[idx: idx + 32].encode("utf-8")
                         return
             except Exception:
                 resp = await client.post(f"{self.base_url}/infer", json={**req, "stream": False}, timeout=300)
                 resp.raise_for_status()
                 text = resp.json().get("text", "")
                 for idx in range(0, len(text), 32):
-                    yield text[idx : idx + 32].encode("utf-8")
+                    yield text[idx: idx + 32].encode("utf-8")

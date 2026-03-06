@@ -10,7 +10,7 @@ This service provides a stable API for bench-race clients and routes requests to
 ```bash
 python -m agent.backends.wrapper
 # or
-uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002
+uvicorn agent.backends.wrapper.app:app --host 0.0.0.0 --port 9002
 ```
 
 Optional env overrides:
@@ -41,7 +41,7 @@ TRT engine IDs are normalized by replacing `/` with `__`.
 
 ```bash
 start-wrapper)
-    nohup uvicorn agent.backends.wrapper.app:app --host 127.0.0.1 --port 9002 >> "$LOG_DIR/wrapper.log" 2>&1 &
+    nohup uvicorn agent.backends.wrapper.app:app --host 0.0.0.0 --port 9002 >> "$LOG_DIR/wrapper.log" 2>&1 &
     echo $! > "$RUN_DIR/wrapper.pid"
     ;;
 stop-wrapper)
@@ -61,3 +61,19 @@ curl -s -X POST http://127.0.0.1:9002/v1/models/stop -H 'Content-Type: applicati
 ```bash
 agent/backends/wrapper/tests/smoke_tests.sh
 ```
+
+
+## Foreground debug mode
+
+Run in the foreground with deterministic JSON logs:
+
+```bash
+uvicorn agent.backends.wrapper.app:app --host 0.0.0.0 --port 9002 --log-level debug
+```
+
+Failure behavior for `/v1/models/start`:
+
+- returns HTTP `500` with JSON error
+- process remains alive
+- `/v1/health` continues responding
+- stacktrace is emitted in structured JSON logs on stdout
