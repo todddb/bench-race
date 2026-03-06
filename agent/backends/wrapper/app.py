@@ -102,6 +102,12 @@ adapters = {
 
 active_state: Dict[str, Any] = {"backend": None, "model": None}
 
+
+def _public_backend_name(backend: str | None) -> str | None:
+    if backend == "trt":
+        return "trtllm"
+    return backend
+
 logger.info("wrapper_starting", extra={"port": WRAPPER_PORT})
 app = FastAPI(title="bench-race unified LLM wrapper", version="0.1.0")
 app.add_middleware(
@@ -124,25 +130,27 @@ async def health() -> Dict[str, Any]:
     logger.debug("health_check", extra={"endpoint": "/v1/health"})
     if active_state["backend"]:
         backend = active_state["backend"]
+        public_backend = _public_backend_name(backend)
         try:
             data = await adapters[backend].health()
             return {
-                "status": data.get("status", "ok"),
-                "engine": backend,
+                "status": "ok" if active_state["backend"] and active_state["model"] else "down",
+                "engine": public_backend,
                 "model": active_state.get("model") or data.get("model"),
                 "mem": data.get("mem", {}),
             }
         except Exception as exc:
             logger.exception("health_check_failed", extra={"endpoint": "/v1/health", "backend": backend, "error": str(exc)})
-            return {"status": "degraded", "engine": backend, "model": active_state.get("model"), "mem": {}, "error": str(exc)}
+            return {"status": "degraded", "engine": public_backend, "model": active_state.get("model"), "mem": {}, "error": str(exc)}
 
     statuses: Dict[str, Any] = {}
     for name, adapter in adapters.items():
+        public_name = _public_backend_name(name) or name
         try:
-            statuses[name] = await adapter.health()
+            statuses[public_name] = await adapter.health()
         except Exception as exc:
             logger.exception("backend_health_failed", extra={"endpoint": "/v1/health", "backend": name, "error": str(exc)})
-            statuses[name] = {"status": "down", "error": str(exc)}
+            statuses[public_name] = {"status": "down", "error": str(exc)}
     return {"status": "ok", "engine": None, "model": None, "mem": {}, "backends": statuses}
 
 
@@ -153,9 +161,9 @@ async def list_models() -> Dict[str, Any]:
         try:
             for m in await adapter.list_models():
                 if isinstance(m, str):
-                    models.append({"id": m, "backend": name})
+                    models.append({"id": m, "backend": _public_backend_name(name) or name})
                 else:
-                    m.setdefault("backend", name)
+                    m.setdefault("backend", _public_backend_name(name) or name)
                     models.append(m)
         except Exception as exc:
             logger.exception("list_models_backend_failed", extra={"backend": name, "error": str(exc), "endpoint": "/v1/models"})
@@ -178,7 +186,7 @@ async def start_model(payload: Dict[str, Any]) -> JSONResponse:
         })
     backend = _backend_map[explicit_backend]
 
-    logger.info("model_start_requested", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": backend})
+    logger.info("model_start_requested", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": explicit_backend})
 
     try:
         pre = service_manager.start_backend(backend, model_id=model_id)
@@ -189,10 +197,10 @@ async def start_model(payload: Dict[str, Any]) -> JSONResponse:
         active_state.update({"backend": backend, "model": model_id})
 
         logger.info("model_start_success", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": backend})
-        return JSONResponse({"ok": True, "backend": backend, "model_id": model_id, "lifecycle": pre, "result": result})
+        return JSONResponse({"ok": True, "backend": explicit_backend, "model_id": model_id, "lifecycle": pre, "result": result})
 
     except Exception as exc:
-        logger.exception("model_start_failed", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": backend, "error": str(exc)})
+        logger.exception("model_start_failed", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": explicit_backend, "error": str(exc)})
         return JSONResponse(status_code=500, content={"error": "model_start_failed", "detail": str(exc)})
 
 
@@ -215,15 +223,17 @@ async def switch_model(payload: Dict[str, Any]) -> JSONResponse:
             raise RuntimeError(pre.get("stderr") or pre.get("stdout") or "backend switch failed")
         result = await adapters[backend].switch_model(model_id)
         active_state.update({"backend": backend, "model": model_id})
-        return JSONResponse({"ok": True, "backend": backend, "model_id": model_id, "lifecycle": pre, "result": result})
+        return JSONResponse({"ok": True, "backend": explicit_backend, "model_id": model_id, "lifecycle": pre, "result": result})
     except Exception as exc:
-        logger.exception("model_switch_failed", extra={"endpoint": "/v1/models/switch", "model_id": model_id, "backend": backend, "error": str(exc)})
+        logger.exception("model_switch_failed", extra={"endpoint": "/v1/models/switch", "model_id": model_id, "backend": explicit_backend, "error": str(exc)})
         return JSONResponse(status_code=500, content={"error": "model_switch_failed", "detail": str(exc)})
 
 
 @app.post("/v1/models/stop")
 async def stop_model(payload: Dict[str, Any]) -> JSONResponse:
     backend = payload.get("backend") or active_state.get("backend")
+    if backend == "trtllm":
+        backend = "trt"
     if not backend:
         return JSONResponse(status_code=400, content={"error": "backend not provided and no active backend"})
 
@@ -249,7 +259,7 @@ async def infer(payload: Dict[str, Any]) -> JSONResponse:
     logger.info("inference_request", extra={"endpoint": "/v1/infer", "model_id": active_state.get("model") or model_id, "backend": backend})
     try:
         response = await adapters[backend].infer(model_id or "", payload)
-        return JSONResponse(normalize_infer_response(model_id or "", backend, response))
+        return JSONResponse(normalize_infer_response(model_id or "", _public_backend_name(backend) or backend, response))
     except Exception as exc:
         logger.exception("inference_failed", extra={"endpoint": "/v1/infer", "model_id": model_id, "backend": backend, "error": str(exc)})
         return JSONResponse(status_code=500, content={"error": "inference_failed", "detail": str(exc)})
@@ -301,7 +311,7 @@ async def ollama_tags() -> Dict[str, Any]:
         try:
             for m in await adapter.list_models():
                 mid = m["id"] if isinstance(m, dict) else str(m)
-                models.append(_ollama_model_entry(mid, name))
+                models.append(_ollama_model_entry(mid, _public_backend_name(name) or name))
         except Exception as exc:
             logger.exception("ollama_tags_backend_failed", extra={"endpoint": "/api/tags", "backend": name, "error": str(exc)})
             continue

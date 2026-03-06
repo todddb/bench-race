@@ -1591,6 +1591,7 @@ async def switch_backend(req: BackendSwitchRequest):
         return {"ok": True, "backend": "custom", "runtime_backend": runtime_backend, "model": resolved, "wrapper_running": True}
 
     await _run_agent_script("stop-wrapper")
+    await asyncio.to_thread(subprocess.run, ["pkill", "-f", "uvicorn agent.backends.wrapper.app"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     await _run_agent_script("stop-backend", "mlx")
     await _run_agent_script("stop-backend", "trtllm")
     await _run_agent_script("stop-backend", "ollama", model)
@@ -1716,6 +1717,7 @@ async def start_engine(request: EngineStartRequest):
     if backend == "ollama":
         try:
             await _run_agent_script("stop-wrapper")
+            await asyncio.to_thread(subprocess.run, ["pkill", "-f", "uvicorn agent.backends.wrapper.app"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             await _run_agent_script("stop-backend", "mlx")
             await _run_agent_script("stop-backend", "trtllm")
             await _run_agent_script("stop-backend", "ollama", runtime_model)

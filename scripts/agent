@@ -112,7 +112,11 @@ start_wrapper(){
   wait_ready probe_wrapper "wrapper" 15
 }
 
-stop_wrapper(){ stop_process "$WRAPPER_PIDFILE" "wrapper" || true; rm_pid "$WRAPPER_PIDFILE"; }
+stop_wrapper(){
+  stop_process "$WRAPPER_PIDFILE" "wrapper" || true
+  pkill -f "uvicorn agent.backends.wrapper.app" 2>/dev/null || true
+  rm_pid "$WRAPPER_PIDFILE"
+}
 
 wait_ready(){
   local fn="$1" name="$2" tries="${3:-45}"
