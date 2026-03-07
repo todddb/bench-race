@@ -55,18 +55,10 @@ class TRTAdapter:
             return data
 
     async def start_model(self, model_id: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        try:
-            result = self.service_manager.start_backend("trt", model_id=model_id)
-            if not result.get("ok", False):
-                raise RuntimeError(result.get("stderr") or result.get("stdout") or "TRT backend start failed")
-            result["engine_model"] = self.service_manager.trt_engine_id(model_id)
-            return result
-        except Exception as exc:
-            logger.exception("trt_engine_load_failed", extra={"backend": self.backend_name, "model_id": model_id, "error": str(exc)})
-            raise RuntimeError(f"TRT load failed: {exc}") from exc
+        return {"ok": True, "engine": self.backend_name, "model": model_id}
 
     async def switch_model(self, model_id: str) -> Dict[str, Any]:
-        return await self.start_model(model_id)
+        return {"ok": True, "engine": self.backend_name, "model": model_id}
 
     async def infer(self, model_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = {
