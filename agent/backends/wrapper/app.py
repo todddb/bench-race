@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import httpx
 import uvicorn
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -188,21 +189,34 @@ async def start_model(payload: Dict[str, Any]) -> JSONResponse:
 
     # Central/Agent must provide explicit backend — no heuristic routing
     explicit_backend = (payload.get("backend") or "").strip().lower()
-    _backend_map = {"mlx": "mlx", "trtllm": "trt"}
+    _backend_map = {"mlx": "mlx", "trtllm": "trt", "ollama": "ollama"}
     if explicit_backend not in _backend_map:
         return JSONResponse(status_code=400, content={
-            "error": f"Explicit backend required ('mlx' or 'trtllm'), got: '{explicit_backend}'"
+            "error": f"Explicit backend required ('ollama', 'mlx' or 'trtllm'), got: '{explicit_backend}'"
         })
     backend = _backend_map[explicit_backend]
 
     logger.info("model_start_requested", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": explicit_backend})
 
     try:
-        pre = service_manager.start_backend(backend, model_id=model_id)
+        current_backend = active_state.get("backend")
+        if current_backend and current_backend != backend:
+            stopped = await service_manager.ensure_backend_stopped(current_backend)
+            if not stopped.get("ok", False):
+                raise RuntimeError(stopped.get("stderr") or stopped.get("stdout") or "failed to stop inactive backend")
+            prev_adapter = adapters.get(current_backend)
+            if prev_adapter is not None and hasattr(prev_adapter, "stop_model"):
+                await prev_adapter.stop_model()
+
+        pre = await service_manager.ensure_backend_running(backend, model_id=model_id)
         if not pre.get("ok", False):
             raise RuntimeError(pre.get("stderr") or pre.get("stdout") or "backend lifecycle start failed")
 
-        result = await adapters[backend].start_model(model_id, payload.get("args") or {})
+        adapter = adapters.get(backend)
+        result: Dict[str, Any] = {"ok": True, "backend": backend, "model": model_id}
+        if adapter is not None:
+            result = await adapter.start_model(model_id, payload.get("args") or {})
+
         active_state.update({"backend": backend, "model": model_id})
 
         logger.info("model_start_success", extra={"endpoint": "/v1/models/start", "model_id": model_id, "backend": backend})
@@ -220,17 +234,29 @@ async def switch_model(payload: Dict[str, Any]) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "model_id is required"})
 
     explicit_backend = (payload.get("backend") or "").strip().lower()
-    _backend_map = {"mlx": "mlx", "trtllm": "trt"}
+    _backend_map = {"mlx": "mlx", "trtllm": "trt", "ollama": "ollama"}
     if explicit_backend not in _backend_map:
         return JSONResponse(status_code=400, content={
-            "error": f"Explicit backend required ('mlx' or 'trtllm'), got: '{explicit_backend}'"
+            "error": f"Explicit backend required ('ollama', 'mlx' or 'trtllm'), got: '{explicit_backend}'"
         })
     backend = _backend_map[explicit_backend]
     try:
-        pre = service_manager.switch_backend(backend, model_id)
+        current_backend = active_state.get("backend")
+        if current_backend and current_backend != backend:
+            stopped = await service_manager.ensure_backend_stopped(current_backend)
+            if not stopped.get("ok", False):
+                raise RuntimeError(stopped.get("stderr") or stopped.get("stdout") or "failed to stop inactive backend")
+            prev_adapter = adapters.get(current_backend)
+            if prev_adapter is not None and hasattr(prev_adapter, "stop_model"):
+                await prev_adapter.stop_model()
+
+        pre = await service_manager.ensure_backend_running(backend, model_id)
         if not pre.get("ok", False):
             raise RuntimeError(pre.get("stderr") or pre.get("stdout") or "backend switch failed")
-        result = await adapters[backend].switch_model(model_id)
+        adapter = adapters.get(backend)
+        result: Dict[str, Any] = {"ok": True, "backend": backend, "model": model_id}
+        if adapter is not None:
+            result = await adapter.switch_model(model_id)
         active_state.update({"backend": backend, "model": model_id})
         return JSONResponse({"ok": True, "backend": explicit_backend, "model_id": model_id, "lifecycle": pre, "result": result})
     except Exception as exc:
@@ -248,7 +274,7 @@ async def stop_model(payload: Dict[str, Any]) -> JSONResponse:
 
     logger.info("model_stop_requested", extra={"endpoint": "/v1/models/stop", "backend": backend, "model_id": active_state.get("model")})
     try:
-        lifecycle = service_manager.stop_backend(backend)
+        lifecycle = await service_manager.ensure_backend_stopped(backend)
         adapter = adapters.get(backend)
         if adapter is not None and hasattr(adapter, "stop_model"):
             await adapter.stop_model()
@@ -280,10 +306,35 @@ async def infer_internal(model_id: str, payload: Dict[str, Any], backend: Option
         resolved_backend = "trt"
     if not resolved_backend:
         raise HTTPException(status_code=400, detail="No backend specified and no active backend. Start a model first.")
+
+    logger.info("inference_request", extra={"endpoint": endpoint, "model_id": active_state.get("model") or model_id, "backend": resolved_backend})
+
+    if resolved_backend == "ollama":
+        ollama_model = model_id or active_state.get("model")
+        if not ollama_model:
+            raise HTTPException(status_code=400, detail="model is required for ollama inference")
+        ollama_payload = {
+            "model": ollama_model,
+            "prompt": payload.get("prompt") or payload.get("inputs") or "",
+            "stream": False,
+            "options": {
+                "temperature": float(payload.get("temperature", 0.7)),
+                "num_predict": int(payload.get("max_tokens", 256)),
+            },
+        }
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(f"{service_manager.ollama_base_url}/api/generate", json=ollama_payload)
+            resp.raise_for_status()
+            data = resp.json()
+        response = {
+            "text": data.get("response", ""),
+            "tokens": int(data.get("eval_count") or 0),
+        }
+        return normalize_infer_response(ollama_model, "ollama", response)
+
     if resolved_backend not in adapters:
         raise HTTPException(status_code=400, detail=f"Unsupported backend: {resolved_backend}")
 
-    logger.info("inference_request", extra={"endpoint": endpoint, "model_id": active_state.get("model") or model_id, "backend": resolved_backend})
     response = await adapters[resolved_backend].infer(model_id or "", payload)
     return normalize_infer_response(model_id or "", _public_backend_name(resolved_backend) or resolved_backend, response)
 
