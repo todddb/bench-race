@@ -24,19 +24,34 @@ start() {
   local model="${1:-}"
 
   if [[ ! -x "${PY}" ]]; then
-    echo "mlx not installed. Run ./scripts/install_macos_mlx.sh" >&2
+    echo "ERROR: MLX venv Python not found at ${PY}" >&2
     return 4
   fi
 
-  # Verify mlx_lm is installed
-  if ! "${PY}" -c "import mlx_lm" >/dev/null 2>&1; then
-    echo "ERROR: mlx_lm not installed in MLX venv. Run ./scripts/install_agent.sh" >&2
+  # Verify mlx and mlx_lm are installed
+  if ! "${PY}" -c "import mlx_lm, mlx" >/dev/null 2>&1; then
+    echo "ERROR: mlx or mlx_lm not installed in MLX venv. Run ./scripts/install_agent.sh" >&2
     return 5
   fi
 
   (
     cd "${REPO_ROOT}"
-    nohup "${PY}" -m uvicorn agent.backends.mlx.server:app --host "${MLX_HOST}" --port "${MLX_PORT}" >>"${REPO_ROOT}/agent/log/mlx.log" 2>&1 &
+
+    # Clear Python-related environment contamination
+    unset PYTHONHOME
+    unset PYTHONPATH
+
+    # Force PATH so venv binaries resolve first
+    export PATH="$(dirname "${PY}"):/usr/bin:/bin:/usr/sbin:/sbin"
+
+    # Log interpreter being used
+    echo "MLX SERVER PYTHON: ${PY}" >>"${REPO_ROOT}/agent/log/mlx.log"
+
+    nohup "${PY}" -m uvicorn agent.backends.mlx.server:app \
+      --host "${MLX_HOST}" \
+      --port "${MLX_PORT}" \
+      >>"${REPO_ROOT}/agent/log/mlx.log" 2>&1 &
+
     echo $! >"${MLX_PIDFILE}"
   )
 
