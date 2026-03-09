@@ -386,7 +386,25 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                 async for chunk in adapters[backend].infer_stream(model_id, infer_payload):
                     if await request.is_disconnected():
                         break
-                    token_text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                    raw = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                    if raw.startswith("data: "):
+                        # TRT native SSE frame — extract token text
+                        payload_str = raw[6:].strip()
+                        if payload_str == "[DONE]":
+                            break
+                        try:
+                            parsed = json.loads(payload_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choice = (parsed.get("choices") or [{}])[0]
+                        token_text = choice.get("delta", {}).get("content", "")
+                        finish = choice.get("finish_reason")
+                        if not token_text and finish:
+                            continue
+                    else:
+                        # Raw token text (MLX synthetic streaming)
+                        token_text = raw
+
                     frame = {
                         "id": completion_id,
                         "object": "chat.completion.chunk",
