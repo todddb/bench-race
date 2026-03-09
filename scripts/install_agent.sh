@@ -749,6 +749,40 @@ install_or_update_comfyui() {
     log_success "ComfyUI installed at $COMFY_DIR"
 }
 
+install_or_update_mlx() {
+    log_step "Installing/updating MLX backend..."
+
+    local MLX_DIR="${AGENT_DIR}/backends/mlx"
+    local MLX_VENV="${MLX_DIR}/.venv"
+
+    # Create venv if missing
+    if [[ ! -d "$MLX_VENV" ]]; then
+        log_info "Creating MLX virtual environment..."
+        if [[ "$OS_TYPE" == "macos" && -x /opt/homebrew/bin/python3.12 ]]; then
+            /opt/homebrew/bin/python3.12 -m venv "$MLX_VENV"
+        else
+            python3 -m venv "$MLX_VENV"
+        fi
+    else
+        log_info "MLX venv already exists"
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[DRY-RUN] Would install mlx dependencies"
+        return 0
+    fi
+
+    local VENV_PY="${MLX_VENV}/bin/python"
+
+    log_info "Upgrading pip in MLX venv..."
+    "$VENV_PY" -m pip install --upgrade pip
+
+    log_info "Installing MLX dependencies..."
+    "$VENV_PY" -m pip install --upgrade mlx mlx-lm fastapi uvicorn
+
+    log_success "MLX backend ready"
+}
+
 install_comfyui_linux() {
     log_info "Installing ComfyUI for Linux with GPU detection..."
 
@@ -1576,6 +1610,7 @@ main() {
     # Install components
     install_or_update_ollama || log_warning "Ollama installation had issues"
     install_or_update_comfyui || log_warning "ComfyUI installation had issues"
+    install_or_update_mlx || log_warning "MLX installation had issues"
     log_info "vLLM installer is archived. See archive/vllm/."
     # TensorRT-LLM is opt-in and only runs when explicitly enabled.
     if [[ "${INSTALL_TRTLLM:-false}" == "true" ]]; then

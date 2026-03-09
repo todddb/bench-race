@@ -28,6 +28,12 @@ start() {
     return 4
   fi
 
+  # Verify mlx_lm is installed
+  if ! "${PY}" -c "import mlx_lm" >/dev/null 2>&1; then
+    echo "ERROR: mlx_lm not installed in MLX venv. Run ./scripts/install_agent.sh" >&2
+    return 5
+  fi
+
   (
     cd "${REPO_ROOT}"
     nohup "${PY}" -m uvicorn agent.backends.mlx.server:app --host "${MLX_HOST}" --port "${MLX_PORT}" >>"${REPO_ROOT}/agent/log/mlx.log" 2>&1 &
