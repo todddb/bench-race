@@ -24,10 +24,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 MLX_MODELS_DIR = os.getenv("MLX_MODELS_DIR")
+
+MLX_MODELS_ROOT = Path(__file__).resolve().parents[2] / "models" / "mlx"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -140,7 +142,12 @@ def _load_model(model_id: str) -> float:
     _ensure_mlx()
     t0 = time.perf_counter()
     log.info("Loading model %s …", model_id)
-    model, tokenizer = _mlx_lm.load(model_id)
+    model_path = MLX_MODELS_ROOT / model_id
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Local MLX model not found at {model_path}"
+        )
+    model, tokenizer = _mlx_lm.load(str(model_path))
     elapsed = time.perf_counter() - t0
     _state.model = model
     _state.tokenizer = tokenizer
@@ -371,7 +378,10 @@ async def list_models_v1():
 
 @app.post("/start")
 async def start_model(req: StartRequest):
-    load_time = _load_model(req.model_id)
+    try:
+        load_time = _load_model(req.model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     _state.pid = os.getpid()
     return {"started": True, "pid": _state.pid, "load_time": round(load_time, 3)}
 
