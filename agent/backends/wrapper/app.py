@@ -396,10 +396,16 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                             parsed = json.loads(payload_str)
                         except json.JSONDecodeError:
                             continue
-                        choice = (parsed.get("choices") or [{}])[0]
-                        token_text = choice.get("delta", {}).get("content", "")
-                        finish = choice.get("finish_reason")
-                        if not token_text and finish:
+                        choice = parsed.get("choices", [{}])[0]
+                        token_text = ""
+                        # Chat-style streaming format
+                        if "delta" in choice:
+                            token_text = choice["delta"].get("content", "") or ""
+                        # Text-completion streaming format
+                        elif "text" in choice:
+                            token_text = choice.get("text", "") or ""
+                        # Skip frames that contain no token content
+                        if not token_text:
                             continue
                     else:
                         # Raw token text (MLX synthetic streaming)
