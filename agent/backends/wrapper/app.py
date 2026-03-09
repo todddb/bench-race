@@ -339,21 +339,19 @@ async def infer_internal(model_id: str, payload: Dict[str, Any], backend: Option
     return normalize_infer_response(model_id or "", _public_backend_name(resolved_backend) or resolved_backend, response)
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(payload: ChatCompletionRequest) -> Dict[str, Any]:
-    if payload.stream:
-        raise HTTPException(status_code=501, detail="Streaming not implemented")
-
+def _build_chat_prompt(messages: List[ChatMessage]) -> str:
     prompt_parts: List[str] = []
-    for msg in payload.messages:
+    for msg in messages:
         if msg.role == "system":
             prompt_parts.append(f"System: {msg.content}")
         elif msg.role == "user":
             prompt_parts.append(f"User: {msg.content}")
         elif msg.role == "assistant":
             prompt_parts.append(f"Assistant: {msg.content}")
+    return "\n".join(prompt_parts) + "\nAssistant:"
 
-    prompt = "\n".join(prompt_parts) + "\nAssistant:"
+
+def _build_chat_infer_payload(payload: ChatCompletionRequest, prompt: str) -> Dict[str, Any]:
     infer_payload: Dict[str, Any] = {
         "model": payload.model,
         "prompt": prompt,
@@ -362,7 +360,76 @@ async def chat_completions(payload: ChatCompletionRequest) -> Dict[str, Any]:
         infer_payload["max_tokens"] = payload.max_tokens
     if payload.temperature is not None:
         infer_payload["temperature"] = payload.temperature
+    return infer_payload
 
+
+@app.post("/v1/chat/completions")
+async def chat_completions(payload: ChatCompletionRequest, request: Request):
+    prompt = _build_chat_prompt(payload.messages)
+    infer_payload = _build_chat_infer_payload(payload, prompt)
+
+    if payload.stream:
+        backend = active_state.get("backend")
+        if backend == "trtllm":
+            backend = "trt"
+        if not backend:
+            raise HTTPException(status_code=400, detail="No backend specified and no active backend. Start a model first.")
+        if backend not in adapters:
+            raise HTTPException(status_code=400, detail=f"Unsupported backend: {backend}")
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        model_id = payload.model
+
+        async def sse_generator() -> AsyncGenerator[str, None]:
+            try:
+                async for chunk in adapters[backend].infer_stream(model_id, infer_payload):
+                    if await request.is_disconnected():
+                        break
+                    token_text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                    frame = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_id,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": token_text},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(frame)}\n\n"
+            except Exception as exc:
+                logger.exception("chat_completions_stream_failed", extra={
+                    "endpoint": "/v1/chat/completions",
+                    "model_id": model_id,
+                    "backend": backend,
+                    "error": str(exc),
+                })
+                return
+
+            # Final chunk with finish_reason
+            final_frame = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(final_frame)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse_generator(), media_type="text/event-stream")
+
+    # Non-streaming path
     normalized = await infer_internal(
         model_id=payload.model,
         payload=infer_payload,
