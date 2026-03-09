@@ -168,7 +168,6 @@ def _generate_sync(prompt: str, max_tokens: int, temperature: float) -> Dict[str
         _state.tokenizer,
         prompt=prompt,
         max_tokens=max_tokens,
-        temp=temperature,
     )
     t_end = time.perf_counter()
     total_ms = (t_end - t0) * 1000.0
