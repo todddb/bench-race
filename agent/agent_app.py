@@ -1405,6 +1405,15 @@ _ENGINE_TASKS: Dict[str, asyncio.Task] = {}
 _ENGINE_LAST_START_TS: Dict[str, float] = {}
 _ENGINE_TRANSIENT_WINDOW_S = 45
 
+# Backend-specific startup timeouts (seconds).
+# TRT-LLM cold start is ~20-45s; MLX needs ~25s; Ollama is external/fast.
+BACKEND_START_TIMEOUTS: Dict[str, int] = {
+    "ollama": 5,
+    "mlx": 25,
+    "trtllm": 60,
+}
+_DEFAULT_BACKEND_START_TIMEOUT = 30
+
 
 def _track_engine_task(engine: str, task: asyncio.Task) -> None:
     _ENGINE_TASKS[engine] = task
@@ -1752,14 +1761,19 @@ async def start_engine(request: EngineStartRequest):
             agent_state.running = False
             agent_state.current_model = None
 
+            startup_timeout = BACKEND_START_TIMEOUTS.get(engine_type, _DEFAULT_BACKEND_START_TIMEOUT)
+            log.info("ENGINE_START using timeout=%ds for %s", startup_timeout, engine_type)
+
             await asyncio.to_thread(start_wrapper)
 
             health_url = "http://127.0.0.1:9002/v1/health"
             models_url = "http://127.0.0.1:9002/v1/models"
             model_start_url = "http://127.0.0.1:9002/v1/models/start"
 
+            # --- Phase 1: wait for wrapper health ---
             wrapper_ready = False
             deadline = time.monotonic() + 30.0
+            last_progress_log = 0.0
             while time.monotonic() < deadline:
                 try:
                     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -1771,24 +1785,43 @@ async def start_engine(request: EngineStartRequest):
                             break
                 except Exception:
                     pass
+                now = time.monotonic()
+                if now - last_progress_log >= 5.0:
+                    log.info("ENGINE_START waiting for wrapper health... %ds remaining", int(deadline - now))
+                    last_progress_log = now
                 await asyncio.sleep(0.5)
 
             if not wrapper_ready:
                 raise HTTPException(status_code=500, detail="Wrapper failed to start")
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            log.info("ENGINE_START wrapper healthy, starting model %s via %s", resolved, engine_type)
+
+            # --- Phase 2: POST model start (use backend-specific timeout) ---
+            # The wrapper blocks while the backend starts (e.g. trtllm_run.sh
+            # waits for docker health), so the HTTP timeout must cover the full
+            # cold-start window.
+            model_start_timeout = max(startup_timeout + 30, 90)
+            async with httpx.AsyncClient(timeout=model_start_timeout) as client:
                 model_start_resp = await client.post(model_start_url, json={
                     "model_id": resolved,
                     "backend": engine_type,
                 })
             if model_start_resp.status_code != 200:
-                raise HTTPException(status_code=500, detail="Wrapper model load failed")
+                detail = "Wrapper model load failed"
+                try:
+                    detail = model_start_resp.json().get("detail", detail)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=500, detail=detail)
 
             _ENGINE_LAST_START_TS[engine_type] = time.time()
 
+            # --- Phase 3: verify model is loaded and matches request ---
             verified = False
-            deadline = time.monotonic() + 60.0
-            while time.monotonic() < deadline:
+            verify_deadline = time.monotonic() + startup_timeout
+            start_ts = time.monotonic()
+            last_progress_log = 0.0
+            while time.monotonic() < verify_deadline:
                 try:
                     async with httpx.AsyncClient(timeout=2.0) as client:
                         health_resp = await client.get(health_url)
@@ -1812,14 +1845,38 @@ async def start_engine(request: EngineStartRequest):
                                     model_ids.append(mid)
 
                         if health_engine is not None and health_model == resolved and resolved in model_ids:
+                            # Validate engine type matches what was requested
+                            if health_engine != engine_type:
+                                log.warning(
+                                    "ENGINE_START model match but engine mismatch: "
+                                    "expected=%s got=%s — restarting cleanly",
+                                    engine_type, health_engine,
+                                )
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail=f"Engine type mismatch: expected {engine_type}, got {health_engine}",
+                                )
+                            elapsed = time.monotonic() - start_ts
+                            log.info("%s health confirmed after %.1fs", engine_type, elapsed)
                             verified = True
                             break
+                except HTTPException:
+                    raise
                 except Exception:
                     pass
-                await asyncio.sleep(0.5)
+
+                now = time.monotonic()
+                if now - last_progress_log >= 5.0:
+                    log.info(
+                        "ENGINE_START waiting for %s health... %ds remaining",
+                        engine_type, int(verify_deadline - now),
+                    )
+                    last_progress_log = now
+                await asyncio.sleep(1.0)
 
             if not verified:
-                raise HTTPException(status_code=500, detail="Wrapper did not report loaded model")
+                log.error("%s failed to become healthy within %ds", engine_type, startup_timeout)
+                raise HTTPException(status_code=500, detail=f"{engine_type} did not become healthy within {startup_timeout}s")
 
             agent_state.running = True
             custom_backend = backend_manager.create_backend(engine_type)
@@ -1862,7 +1919,7 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
 
     if not engine:
         engines = ["ollama", "mlx", "trtllm"]
-        errors: Dict[str, str] = {}
+        warnings: Dict[str, str] = {}
         for target in engines:
             target_backend = backend_manager.create_backend(target)
             if target_backend.backend_type == BackendType.EXTERNAL:
@@ -1871,11 +1928,13 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
 
             result = await _run_agent_script("stop-backend", target)
             if not result.get("ok"):
-                errors[target] = result.get("stderr", result.get("error", "Unknown error"))
+                # Treat stop failures as warnings, not errors.
+                # The backend may already be stopped — this is idempotent.
+                msg = result.get("stderr", result.get("error", ""))
+                log.warning("stop-backend %s returned non-zero (idempotent): %s", target, msg)
+                warnings[target] = msg
 
-        if not errors:
-            return {"ok": True}
-        return JSONResponse(status_code=500, content={"status": "error", "engine": "all", "accepted": True, "errors": errors})
+        return {"status": "ok", "message": "already stopped" if warnings else "stopped"}
 
     if engine == "comfyui":
         existing = _ENGINE_TASKS.get(engine)
@@ -1895,14 +1954,19 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
         }
 
     result = await _run_agent_script("stop-backend", engine)
+    if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
+        backend_manager.clear_active_backend()
+        _ACTIVE_BACKEND = None
+    agent_state.current_model = None
+    agent_state.running = False
+
     if result.get("ok"):
-        if (backend_manager.get_active_backend_name() or _ACTIVE_BACKEND) == engine:
-            backend_manager.clear_active_backend()
-            _ACTIVE_BACKEND = None
-        agent_state.current_model = None
-        agent_state.running = False
-        return {"ok": True}
-    return JSONResponse(status_code=500, content={"status": "error", "engine": engine, "accepted": True, "error": result.get("stderr", result.get("error", "Unknown error"))})
+        return {"status": "ok", "message": "stopped"}
+    # Non-zero exit is not necessarily an error (e.g. nothing was running).
+    # Return success with a warning instead of 500.
+    msg = result.get("stderr", result.get("error", ""))
+    log.warning("stop-backend %s returned non-zero (idempotent): %s", engine, msg)
+    return {"status": "ok", "message": "already stopped"}
 
 
 @app.post("/api/backend/stop")
