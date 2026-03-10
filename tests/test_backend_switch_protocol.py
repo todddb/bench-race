@@ -31,11 +31,12 @@ def test_build_backend_switch_message_targeting():
     proto = importlib.import_module("central.agent_protocol")
     rid = str(uuid.uuid4())
 
-    msg_mac = proto.build_backend_switch_message({"label": "Mac Studio"}, "custom", rid)
+    # gpu.type from machines.yaml determines the target engine
+    msg_mac = proto.build_backend_switch_message({"label": "Mac Studio", "gpu": {"type": "apple"}}, "custom", rid)
     assert msg_mac["type"] == "backend_switch"
     assert msg_mac["payload"]["target"] == "mlx"
 
-    msg_nv = proto.build_backend_switch_message({"label": "NVIDIA RTX"}, "custom", rid)
+    msg_nv = proto.build_backend_switch_message({"label": "NVIDIA RTX", "gpu": {"type": "nvidia"}}, "custom", rid)
     assert msg_nv["payload"]["target"] == "trtllm"
 
 
@@ -43,7 +44,7 @@ def test_api_backend_switch_dispatch(monkeypatch):
     app_mod = _load_central_app_with_test_machines()
     app_mod.app.config["TESTING"] = True
 
-    monkeypatch.setattr(app_mod, "MACHINES", [{"machine_id": "a1", "agent_base_url": "http://agent"}])
+    monkeypatch.setattr(app_mod, "MACHINES", [{"machine_id": "a1", "agent_base_url": "http://agent", "gpu": {"type": "nvidia"}}])
     monkeypatch.setattr(app_mod, "resolve_runtime_model", lambda machine, backend, model_id: "llama3:8b")
     monkeypatch.setattr(app_mod, "load_models_registry", lambda: {"ollama": [{"id": "m1"}], "custom": [{"id": "m1"}]})
 
@@ -53,13 +54,16 @@ def test_api_backend_switch_dispatch(monkeypatch):
 
     monkeypatch.setattr(app_mod.requests, "post", lambda *args, **kwargs: _Resp())
 
+    # Track which backend was requested so the status mock returns matching state
+    _current_backend = {"value": "ollama"}
+
     class _GetResp:
         ok = True
         status_code = 200
         content = b"{}"
 
-        def json(self):
-            return {"backend": "ollama", "state": "ready"}
+        def json(self_inner):
+            return {"backend": _current_backend["value"], "state": "ready"}
 
     monkeypatch.setattr(app_mod.requests, "get", lambda *args, **kwargs: _GetResp())
 
@@ -69,6 +73,7 @@ def test_api_backend_switch_dispatch(monkeypatch):
         data = resp.get_json()
         assert data["status"] == "ok"
 
+        _current_backend["value"] = "custom"
         custom_resp = client.post("/api/backend/switch", json={"backend": "custom", "model_id": "m1"})
         assert custom_resp.status_code == 200
         custom_data = custom_resp.get_json()

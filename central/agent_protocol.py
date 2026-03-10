@@ -43,6 +43,12 @@ def _base_to_ws_uri(agent_base_url: str) -> str:
 
 
 def build_backend_switch_message(machine: Dict[str, Any], backend: str, request_id: str) -> Dict[str, Any]:
+    """Build a backend switch message for an agent.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for determining engine_type from
+    machines.yaml gpu.type.  Agents must not infer engine_type.
+    """
     target = _machine_target(machine, backend)
     payload: Dict[str, Any] = {
         "backend": backend,

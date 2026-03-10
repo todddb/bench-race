@@ -2183,6 +2183,12 @@ def api_reset_agent(machine_id: str):
 
 
 def get_models_for_backend(backend: str, architecture: str | None = None) -> List[Dict[str, Any]]:
+    """Return registry entries for a given backend.
+
+    models.json is authoritative for backend+architecture mapping.
+    Namespace isolation: 'ollama' returns only registry["ollama"],
+    'custom'/'mlx'/'trtllm' return only registry["custom"].
+    """
     del architecture  # legacy query param is ignored in v3 registry
     registry = load_models_registry()
     selected_backend = (backend or "").strip().lower()
@@ -2260,13 +2266,32 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) -> str:
-    """Resolve a UI model id into the concrete runtime identifier used by an agent."""
+    """Resolve an abstract registry model id into the concrete runtime string for an agent.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for model resolution.
+    Agents must never resolve abstract IDs or map architectures.
+    Agents execute only the fully resolved model string provided.
+
+    models.json is authoritative for backend+architecture mapping.
+    The "id" and "display_name" fields are Central-only abstractions.
+    These values must never be transmitted to agents.
+
+    Resolution uses the backend namespace from models.json and the agent's
+    gpu.type from machines.yaml to select the correct execution string.
+    When backend == "custom", only registry["custom"] is searched.
+    When backend == "ollama", only registry["ollama"] is searched.
+    Namespaces are never mixed.
+    """
     selected_id = (model_id or "").strip()
     backend = (backend or "").strip().lower()
     if not selected_id:
         raise ValueError("model_id is required")
 
+    # models.json is authoritative for backend+architecture mapping.
     registry = load_models_registry()
+
+    # Agent architecture comes exclusively from machines.yaml gpu.type.
     arch = str(
         machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
@@ -2280,32 +2305,24 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
             f"Set gpu.type in machines.yaml explicitly."
         )
 
-    def _find_entry(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _find_entry_by_id(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Match strictly by abstract registry 'id' — never by display_name.
+
+        display_name is a UI-only label and must never participate in
+        resolution logic or be transmitted to agents.
+        """
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             entry_id = str(entry.get("id") or "").strip()
-            entry_display = str(entry.get("display_name") or "").strip()
-            if selected_id in {entry_id, entry_display}:
+            if entry_id == selected_id:
                 return entry
         raise ValueError(f"Unknown {backend} model id: {selected_id}")
 
     if backend in {"custom", "ollama"}:
+        # Namespace isolation: only search the matching backend list.
         backend_models = registry.get(backend, [])
-        model_entry = _find_entry(backend_models)
-        if arch not in model_entry:
-            raise ValueError(f"Model '{selected_id}' missing architecture key '{arch}'")
-        resolved_model = str(model_entry.get(arch) or "").strip()
-        if not resolved_model:
-            raise ValueError(f"Model '{selected_id}' has empty architecture value for '{arch}'")
-        return resolved_model
-
-    if backend in {"mlx", "trtllm"}:
-        custom_models = registry.get("custom", [])
-        try:
-            model_entry = _find_entry(custom_models)
-        except ValueError:
-            return selected_id
+        model_entry = _find_entry_by_id(backend_models)
         if arch not in model_entry:
             raise ValueError(f"Model '{selected_id}' missing architecture key '{arch}'")
         resolved_model = str(model_entry.get(arch) or "").strip()
@@ -2320,7 +2337,12 @@ def resolve_runtime_model(machine: Dict[str, Any], backend: str, model_id: str) 
 
 
 def _derive_engine_type(machine: Dict[str, Any]) -> str:
-    """Derive engine_type from machine GPU type.  Central is the sole authority."""
+    """Derive engine_type from machine GPU type using machines.yaml.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for engine_type resolution.
+    Agents must not infer engine_type from local hardware detection.
+    """
     gpu_type = str(
         machine.get("gpu_type")
         or (machine.get("gpu") or {}).get("type")
@@ -2339,7 +2361,14 @@ def _derive_engine_type(machine: Dict[str, Any]) -> str:
 
 
 def _resolve_model_for_machine(machine: Dict[str, Any], backend: str, model_id: str) -> Tuple[str, str]:
-    """Resolve registry model_id into backend engine + runtime identifier for a machine."""
+    """Resolve registry model_id into backend + fully resolved runtime string for a machine.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for model resolution.
+    The returned model string is the *only* model identifier that should be
+    sent to agents.  Abstract registry IDs and display_names must never
+    appear in agent payloads.
+    """
     backend = (backend or "").strip().lower()
     resolved_model = resolve_runtime_model(machine, backend, model_id)
     if backend in {"ollama", "custom"}:
@@ -3470,8 +3499,21 @@ def api_start_llm():
             continue
 
         try:
+            # IMPORTANT ARCHITECTURAL RULE:
+            # Central is the sole authority for model resolution.
+            # Determine the active backend for this machine, then resolve
+            # the abstract model ID into the concrete runtime string.
+            # Only the resolved string is sent to the agent.
             try:
-                resolved_model = resolve_runtime_model(m, "ollama", model)
+                cap_resp = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
+                cap_resp.raise_for_status()
+                cap = cap_resp.json()
+                machine_backend = (cap.get("active_backend") or "ollama").lower()
+            except Exception:
+                machine_backend = "ollama"
+            resolution_backend = "custom" if machine_backend in {"custom", "mlx", "trtllm"} else machine_backend
+            try:
+                resolved_model = resolve_runtime_model(m, resolution_backend, model)
             except (StopIteration, ValueError):
                 resolved_model = model
             model_fit = _machine_model_fit(m, resolved_model, num_ctx)

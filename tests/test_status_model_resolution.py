@@ -49,7 +49,7 @@ def test_api_status_validates_ollama_registry_id_against_resolved_tag(monkeypatc
             {
                 "machine_id": "m1",
                 "label": "Mac Agent",
-                "vendor": "apple",
+                "gpu": {"type": "apple"},
                 "agent_base_url": "http://agent",
                 "excluded": False,
             }
@@ -91,7 +91,7 @@ def test_api_status_keeps_non_ollama_model_validation_as_selected(monkeypatch):
             "machine_id": "m1",
             "label": "Custom Agent",
             "agent_base_url": "http://agent",
-            "vendor": "apple",
+            "gpu": {"type": "apple"},
             "excluded": False,
         }],
     )

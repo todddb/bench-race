@@ -73,6 +73,8 @@ def test_load_model_resolves_runtime_name_not_registry_id(monkeypatch):
 
 
 def test_backend_switch_and_load_model_share_resolution_logic(monkeypatch):
+    """Backend switch resolves models via _resolve_model_for_machine.
+    load_model skips for custom backend (only applies to ollama)."""
     app_mod = _load_central_app_with_test_machines()
     app_mod.app.config["TESTING"] = True
 
@@ -86,7 +88,7 @@ def test_backend_switch_and_load_model_share_resolution_logic(monkeypatch):
 
     def fake_resolve(machine_arg, backend_arg, model_id_arg):
         resolve_calls.append((machine_arg.get("machine_id"), backend_arg, model_id_arg))
-        return "trtllm", "meta-llama/Llama-3.1-8B-Instruct"
+        return "custom", "meta-llama/Llama-3.1-8B-Instruct"
 
     monkeypatch.setattr(app_mod, "_resolve_model_for_machine", fake_resolve)
 
@@ -103,8 +105,12 @@ def test_backend_switch_and_load_model_share_resolution_logic(monkeypatch):
         switch_resp = client.post("/api/backend/switch", json={"backend": "custom", "model_id": "llama3.1-8b-custom"})
         assert switch_resp.status_code == 200
 
+        # load_model skips for custom backend — only applies to ollama
         load_resp = client.post("/api/agent/m1/load_model", json={"model_id": "llama3.1-8b-custom"})
         assert load_resp.status_code == 200
+        load_data = load_resp.get_json()
+        assert load_data.get("skipped") is True
 
-    assert len(resolve_calls) >= 2
+    # Only the switch call should resolve
+    assert len(resolve_calls) >= 1
     assert ("m1", "custom", "llama3.1-8b-custom") in resolve_calls
