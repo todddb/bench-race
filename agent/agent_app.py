@@ -75,7 +75,12 @@ from agent.reset_helpers import (
 )
 from agent.backends.backend_manager import BackendManager
 from agent.backends.base import BackendType
-from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend  # noqa: F401 — retained for tests
+# IMPORTANT ARCHITECTURAL RULE:
+# Central is the sole authority for model resolution.
+# Agents must never resolve abstract IDs or map architectures.
+# Agents execute only the fully resolved model string provided by Central.
+# These imports are retained only for backward-compatible test monkeypatching.
+from agent.model_registry import resolve_model_for_machine, registry_entry_matches_backend  # noqa: F401 — DEPRECATED: retained for tests only
 from agent.wrapper_lifecycle import (
     is_wrapper_running,
     start_wrapper,
@@ -1690,6 +1695,15 @@ async def start_backend_engine(backend: str, model: str) -> Dict[str, Any]:
 
 @app.post("/api/engine/start")
 async def start_engine(request: EngineStartRequest):
+    """Start a backend engine with a fully resolved model string from Central.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for model resolution.
+    The model_id / model received here is already resolved by Central
+    into the concrete execution string for this agent's architecture.
+    This handler must NOT look up the registry, infer architecture,
+    map quantizations, rewrite model names, or attempt fallback resolution.
+    """
     global _ACTIVE_BACKEND
 
     if not request.backend:
@@ -1698,7 +1712,7 @@ async def start_engine(request: EngineStartRequest):
     runtime_model = None
 
     if request.backend == "custom":
-        # For custom, prefer model_id
+        # Central provides the fully resolved model string via model_id.
         runtime_model = request.model_id or request.model
 
         if not runtime_model:
@@ -2840,7 +2854,15 @@ async def comfy_sync_status():
 
 @app.post("/api/job", response_model=JobStartResponse)
 async def start_job(req: APIJobRequest):
-    """Start an LLM inference job."""
+    """Start an LLM inference job.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    Central is the sole authority for model resolution.
+    The model string received here is already fully resolved by Central.
+    This handler must NOT inspect the registry, map architectures,
+    rewrite model IDs, or attempt fallback resolution.
+    It simply executes the model string as provided.
+    """
     active_backend_name = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "ollama"
     active_backend = backend_manager.get_active_backend()
     api_backend = "custom" if active_backend_name in {"mlx", "trtllm"} else active_backend_name
@@ -2968,7 +2990,13 @@ async def _run_mock_stream(job_id: str, model: str, prompt: str, max_tokens: int
 
 
 async def _job_runner_llm(job_id: str, req: LLMRequest):
-    """Background runner for llm_generate jobs via unified backend wrapper."""
+    """Background runner for llm_generate jobs via unified backend wrapper.
+
+    IMPORTANT ARCHITECTURAL RULE:
+    The model string (req.model) is already fully resolved by Central.
+    This runner must NOT resolve, map, or reinterpret the model string.
+    It passes the string directly to the backend for execution.
+    """
     model = req.model
     prompt = req.prompt
 

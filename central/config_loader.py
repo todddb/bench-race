@@ -36,6 +36,10 @@ def _load_yaml_file(path: Path) -> Dict[str, Any]:
 def load_models_registry(path: Path | None = None) -> Dict[str, Any]:
     """Load canonical model registry from ``config/registry/models.json``.
 
+    models.json is authoritative for backend+architecture mapping.
+    The "id" and "display_name" fields are Central-only abstractions.
+    These values must never be transmitted to agents.
+
     Returns an empty registry when config is missing or malformed.
     """
     target = path or MODELS_REGISTRY_PATH

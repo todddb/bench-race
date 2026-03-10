@@ -1,3 +1,12 @@
+# IMPORTANT ARCHITECTURAL RULE:
+# Central is the sole authority for model resolution.
+# Agents must never resolve abstract IDs or map architectures.
+# Agents execute only the fully resolved model string provided by Central.
+#
+# This module retains registry-loading helpers for validation and tests only.
+# No agent runtime code should call resolve_model_for_machine() or
+# get_machine_architecture() for model resolution purposes.  Central
+# resolves all models and sends agents the concrete execution string.
 from __future__ import annotations
 
 import json
@@ -52,7 +61,6 @@ def _normalize_json_registry(payload: Any) -> Dict[str, Dict[str, Any]]:
     if not isinstance(payload, dict):
         return registry
 
-    # Canonical central registry format: {"custom": [...], "ollama": [...]}.
     ollama = payload.get("ollama")
     if isinstance(ollama, list):
         for entry in ollama:
@@ -67,7 +75,6 @@ def _normalize_json_registry(payload: Any) -> Dict[str, Dict[str, Any]]:
                 "nvidia": str(entry.get("nvidia") or "").strip(),
             }
 
-    # Canonical central registry format: {"custom": [{"id": ..., "apple": ..., "nvidia": ...}]}
     custom = payload.get("custom")
     if isinstance(custom, list):
         for entry in custom:
@@ -81,24 +88,6 @@ def _normalize_json_registry(payload: Any) -> Dict[str, Dict[str, Any]]:
                 "apple": str(entry.get("apple") or "").strip(),
                 "nvidia": str(entry.get("nvidia") or "").strip(),
             }
-
-    # Legacy manifest format: {"models": [{"id": ..., "custom": {"MLX":..., "TensorRT-LLM":...}}]}
-    models = payload.get("models")
-    if isinstance(models, list):
-        for entry in models:
-            if not isinstance(entry, dict):
-                continue
-            model_id = str(entry.get("id") or "").strip()
-            custom_cfg = entry.get("custom")
-            if not model_id or not isinstance(custom_cfg, dict):
-                continue
-            mlx = custom_cfg.get("MLX") if isinstance(custom_cfg.get("MLX"), dict) else {}
-            trt = custom_cfg.get("TensorRT-LLM") if isinstance(custom_cfg.get("TensorRT-LLM"), dict) else {}
-            registry.setdefault(model_id, {})
-            registry[model_id].setdefault("custom", {
-                "apple": str((mlx or {}).get("engine_model_name") or "").strip(),
-                "nvidia": str((trt or {}).get("engine_model_name") or "").strip(),
-            })
 
     return registry
 
@@ -156,6 +145,12 @@ def resolve_standard_id_from_runtime(runtime_id: str) -> Optional[str]:
 
 
 def get_machine_architecture() -> str:
+    """Return the local machine architecture label ('apple' or 'nvidia').
+
+    NOTE: This is used only for local hardware detection (e.g. test
+    validation).  Model resolution must be performed by Central using
+    machines.yaml, NOT by agents inspecting their own hardware.
+    """
     env = (os.getenv("BENCH_AGENT_PLATFORM") or "").strip().lower()
     if env in {"apple", "mac", "darwin"}:
         return "apple"
@@ -164,13 +159,23 @@ def get_machine_architecture() -> str:
     return "apple" if platform.system().lower() == "darwin" else "nvidia"
 
 
+# ---------------------------------------------------------------------------
+# DEPRECATED — Agent must NOT use these for runtime model resolution.
+# Central is the sole authority.  These are retained only so that existing
+# tests that monkeypatch them continue to import without error.
+# ---------------------------------------------------------------------------
+
 def resolve_model_for_machine(model_id: str, backend: str):
+    """DEPRECATED: Agent must not resolve models.  Central resolves all models.
+
+    Retained for backward-compatible test imports only.
+    """
     entry = get_registry_entry(model_id)
 
     if not entry:
         return None
 
-    arch = get_machine_architecture()  # returns "apple" or "nvidia"
+    arch = get_machine_architecture()
 
     if backend == "ollama":
         return (entry.get("ollama") or {}).get(arch)
@@ -182,13 +187,9 @@ def resolve_model_for_machine(model_id: str, backend: str):
 
 
 def registry_entry_matches_backend(model_id: str, backend: str) -> bool:
-    """
-    Validation semantics:
+    """DEPRECATED: Agent must not resolve models.  Central resolves all models.
 
-    - For MANAGED backends:
-        model_id must equal standardized registry "id".
-    - For EXTERNAL backends:
-        model_id must match runtime field ("apple" or "nvidia") for this machine.
+    Retained for backward-compatible test imports only.
     """
 
     backend = (backend or "").strip().lower()
