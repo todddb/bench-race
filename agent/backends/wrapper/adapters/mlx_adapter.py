@@ -146,8 +146,9 @@ class MLXAdapter:
                                 yield line.encode("utf-8")
                         return
 
-                    # Server returned a non-streaming JSON response — chunk it
-                    # into SSE-style frames so callers get incremental output.
+                    # Server returned a non-streaming JSON response — yield raw
+                    # token bytes so the wrapper handles SSE framing (matches
+                    # TRT adapter behaviour).
                     raw: list[bytes] = []
                     async for chunk in resp.aiter_bytes():
                         if chunk:
@@ -159,38 +160,8 @@ class MLXAdapter:
                             text = data.get("text", "")
                         except json.JSONDecodeError:
                             text = txt
-                        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-                        resolved = model_id or self.active_model_id or ""
                         for i in range(0, len(text), 32):
-                            chunk_text = text[i:i + 32]
-                            sse_data = json.dumps({
-                                "id": completion_id,
-                                "object": "chat.completion.chunk",
-                                "model": resolved,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": chunk_text},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            })
-                            yield f"data: {sse_data}\n\n".encode("utf-8")
-                        # Final chunk with finish_reason
-                        done_data = json.dumps({
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "model": resolved,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "stop",
-                                }
-                            ],
-                        })
-                        yield f"data: {done_data}\n\n".encode("utf-8")
-                        yield b"data: [DONE]\n\n"
+                            yield text[i:i + 32].encode("utf-8")
                         return
         except httpx.ConnectError:
             logger.error("mlx_server_unreachable", extra={"backend": self.backend_name, "url": MLX_BASE_URL})
