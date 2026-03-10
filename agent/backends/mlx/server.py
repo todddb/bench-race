@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 MLX_MODELS_DIR = os.getenv("MLX_MODELS_DIR")
@@ -406,10 +407,37 @@ async def switch_model(req: SwitchRequest):
 
 @app.post("/infer")
 async def infer(req: InferRequest):
-    result = await asyncio.to_thread(
-        _generate_sync, req.prompt, req.max_tokens, req.temperature
-    )
-    return result
+    if not req.stream:
+        result = await asyncio.to_thread(
+            _generate_sync, req.prompt, req.max_tokens, req.temperature
+        )
+        return result
+
+    # Streaming mode: yield tokens incrementally via stream_generate
+    if _state.model is None:
+        raise HTTPException(status_code=400, detail="No model loaded. POST /start first.")
+
+    _ensure_mlx()
+
+    def token_stream():
+        full_text = ""
+        for token_obj in _mlx_lm.stream_generate(
+            _state.model,
+            _state.tokenizer,
+            prompt=req.prompt,
+            max_tokens=req.max_tokens,
+            temp=req.temperature,
+        ):
+            if hasattr(token_obj, "text"):
+                new_text = token_obj.text[len(full_text):]
+                full_text = token_obj.text
+            else:
+                new_text = str(token_obj)
+                full_text += new_text
+            if new_text:
+                yield new_text
+
+    return StreamingResponse(token_stream(), media_type="text/event-stream")
 
 
 @app.websocket("/stream")
