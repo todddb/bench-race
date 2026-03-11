@@ -1732,14 +1732,9 @@ async def start_engine(request: EngineStartRequest):
                 detail="Missing required field: model_id for custom backend"
             )
     elif backend in ("ollama", "mlx", "trtllm"):
-        # LLM backends require a model at engine start time
+        # Model is optional at engine startup.
+        # Central may start backend first and select model later via /api/job.
         runtime_model = request.model
-
-        if not runtime_model:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model required for backend {backend}"
-            )
 
     # comfyui does not require a model at engine start time
 
