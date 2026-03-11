@@ -1387,10 +1387,16 @@ class BackendStatusResponse(BaseModel):
 
 
 class EngineStartRequest(BaseModel):
-    backend: str
+    backend: Optional[str] = None
+    engine: Optional[str] = None  # legacy field name used by older Central paths
     model: Optional[str] = None
     model_id: Optional[str] = None
     engine_type: Optional[str] = None  # "mlx" or "trtllm" — sent by Central
+
+    @property
+    def resolved_backend(self) -> Optional[str]:
+        # Prefer explicit backend, fall back to legacy engine field
+        return self.backend or self.engine
 
 
 class EngineStopRequest(BaseModel):
@@ -1709,12 +1715,14 @@ async def start_engine(request: EngineStartRequest):
     """
     global _ACTIVE_BACKEND
 
-    if not request.backend:
+    backend = request.resolved_backend
+
+    if not backend:
         raise HTTPException(status_code=400, detail="Missing required field: backend")
 
     runtime_model = None
 
-    if request.backend == "custom":
+    if backend == "custom":
         # Central provides the fully resolved model string via model_id.
         runtime_model = request.model_id or request.model
 
@@ -1723,19 +1731,19 @@ async def start_engine(request: EngineStartRequest):
                 status_code=400,
                 detail="Missing required field: model_id for custom backend"
             )
-    elif request.backend in ("ollama", "mlx", "trtllm"):
+    elif backend in ("ollama", "mlx", "trtllm"):
         # LLM backends require a model at engine start time
         runtime_model = request.model
 
         if not runtime_model:
             raise HTTPException(
                 status_code=400,
-                detail=f"Model required for backend {request.backend}"
+                detail=f"Model required for backend {backend}"
             )
 
     # comfyui does not require a model at engine start time
 
-    backend = str(request.backend).strip().lower()
+    backend = str(backend).strip().lower()
     if runtime_model is not None:
         runtime_model = str(runtime_model).strip()
 
