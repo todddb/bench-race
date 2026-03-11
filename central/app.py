@@ -2747,29 +2747,41 @@ def api_engine_start(machine_id: str):
 
     try:
         from flask import request as flask_request
-        payload = flask_request.get_json(silent=True) or {}
-        backend = str(payload.get("backend") or payload.get("engine") or "").strip().lower()
-        model_id = str(payload.get("model") or payload.get("model_id") or "").strip()
+        incoming = flask_request.get_json(silent=True) or {}
+        backend = str(incoming.get("backend") or incoming.get("engine") or "").strip().lower()
+        model_id = str(incoming.get("model") or incoming.get("model_id") or "").strip()
 
         if backend in {"mlx", "trtllm"}:
             backend = "custom"
 
-        if backend in {"custom", "ollama"} and model_id:
+        # Build correct payload schema expected by agent /api/engine/start
+        if backend == "comfyui":
+            payload = {"backend": "comfyui"}
+        elif backend in {"custom", "ollama"}:
+            if not model_id:
+                log.error(
+                    "ENGINE_START_MISSING_MODEL machine=%s backend=%s: model or model_id required",
+                    machine_id, backend,
+                )
+                return jsonify({"error": "model or model_id required for LLM backend", "ok": False}), 400
             try:
                 agent_backend, resolved_model = _resolve_model_for_machine(machine, backend, model_id)
             except ValueError as exc:
                 return jsonify({"error": str(exc), "ok": False}), 400
-            payload["backend"] = agent_backend
-            payload["model"] = resolved_model
+            payload = {"backend": agent_backend, "model": resolved_model}
             if agent_backend == "custom":
                 engine_type = _derive_engine_type(machine)
                 payload["engine_type"] = engine_type
                 payload["model_id"] = resolved_model
                 log.info("api_engine_start machine=%s engine_type=%s model_id=%s", machine_id, engine_type, resolved_model)
-            if "engine" in payload:
-                payload["engine"] = agent_backend
+        else:
+            return jsonify({"error": f"Unknown or missing backend: {backend!r}", "ok": False}), 400
 
         _start_url = f"{agent_base_url}/api/engine/start"
+        log.info(
+            "ENGINE_START_PAYLOAD machine=%s payload=%s",
+            machine_id, payload,
+        )
         log.info(
             "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
             machine_id, _start_url, payload.get("backend"), payload.get("engine_type"),
