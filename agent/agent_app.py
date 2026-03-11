@@ -1766,7 +1766,7 @@ async def start_engine(request: EngineStartRequest):
             start_result = await _start_comfyui()
             if not start_result.get("started"):
                 raise HTTPException(status_code=500, detail=start_result.get("error", "ComfyUI failed to start"))
-            health_result = await _check_comfyui_health()
+            health_result = await _check_comfyui_health(timeout_s=120)
             if not health_result.get("healthy"):
                 raise HTTPException(status_code=500, detail="ComfyUI did not become healthy in time")
             _ACTIVE_BACKEND = "comfyui"
@@ -2394,6 +2394,8 @@ async def _check_comfyui_health(timeout_s: float = None) -> dict:
     """
     if timeout_s is None:
         timeout_s = COMFYUI_START_TIMEOUT_S
+
+    slog.info("COMFY_WAIT_TIMEOUT", timeout=timeout_s)
 
     base_url = _comfy_base_url()
     health_url = f"{base_url}/system_stats"
