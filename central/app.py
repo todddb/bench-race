@@ -2448,17 +2448,33 @@ def api_backend_switch():
                 if not base_url:
                     raise ValueError("Missing agent_base_url")
 
-                requests.post(f"{base_url}/api/engine/stop", timeout=30)
+                _stop_url = f"{base_url}/api/engine/stop"
+                log.info("ENGINE_CALL_OUT machine=%s url=%s payload=%s", machine_id, _stop_url, {})
+                try:
+                    _stop_resp = requests.post(_stop_url, timeout=30)
+                    log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, _stop_resp.status_code, _stop_resp.text[:1000])
+                except Exception:
+                    log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
 
                 engine_type = _derive_engine_type(machine) if resolved_backend == "custom" else None
                 agent_payload = {"backend": resolved_backend, "model": resolved_runtime_model}
                 if engine_type:
                     agent_payload["engine_type"] = engine_type
                     agent_payload["model_id"] = resolved_runtime_model
+                _start_url = f"{base_url}/api/engine/start"
+                log.info(
+                    "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
+                    machine_id, _start_url, resolved_backend, engine_type, resolved_runtime_model,
+                    agent_payload.get("model_id"), agent_payload,
+                )
                 resp = requests.post(
-                    f"{base_url}/api/engine/start",
+                    _start_url,
                     json=agent_payload,
                     timeout=300,
+                )
+                log.info(
+                    "ENGINE_CALL_RESPONSE machine=%s status=%s body=%s",
+                    machine_id, resp.status_code, resp.text[:1000],
                 )
                 log.info(
                     "Backend switch request sent to agent machine=%s backend=%s engine_type=%s model=%s",
@@ -2634,18 +2650,28 @@ def api_agent_switch_backend(machine_id: str):
         agent_payload["engine_type"] = engine_type
         agent_payload["model_id"] = resolved_model
     log.info("api_agent_switch_backend machine=%s backend=%s engine_type=%s model=%s", machine_id, agent_backend, engine_type, resolved_model)
+    _start_url = f"{agent_base_url}/api/engine/start"
+    log.info(
+        "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
+        machine_id, _start_url, agent_backend, engine_type, resolved_model,
+        agent_payload.get("model_id"), agent_payload,
+    )
     try:
         response = requests.post(
-            f"{agent_base_url}/api/engine/start",
+            _start_url,
             json=agent_payload,
             timeout=600,
         )
+        log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, response.status_code, response.text[:1000])
         return jsonify(response.json()), response.status_code
     except requests.exceptions.ConnectionError:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Agent unreachable", "ok": False}), 502
     except requests.exceptions.Timeout:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Backend selection timed out", "ok": False}), 504
     except Exception as e:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": str(e), "ok": False}), 500
 
 
@@ -2681,18 +2707,28 @@ def api_agent_load_model(machine_id: str):
     if engine_type:
         agent_payload["engine_type"] = engine_type
         agent_payload["model_id"] = resolved_model
+    _start_url = f"{agent_base_url}/api/engine/start"
+    log.info(
+        "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
+        machine_id, _start_url, agent_backend, engine_type, resolved_model,
+        agent_payload.get("model_id"), agent_payload,
+    )
     try:
         response = requests.post(
-            f"{agent_base_url}/api/engine/start",
+            _start_url,
             json=agent_payload,
             timeout=600,
         )
+        log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, response.status_code, response.text[:1000])
         return jsonify(response.json()), response.status_code
     except requests.exceptions.ConnectionError:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Agent unreachable", "ok": False}), 502
     except requests.exceptions.Timeout:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Model load timed out", "ok": False}), 504
     except Exception as e:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": str(e), "ok": False}), 500
 
 
@@ -2733,17 +2769,27 @@ def api_engine_start(machine_id: str):
             if "engine" in payload:
                 payload["engine"] = agent_backend
 
+        _start_url = f"{agent_base_url}/api/engine/start"
+        log.info(
+            "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
+            machine_id, _start_url, payload.get("backend"), payload.get("engine_type"),
+            payload.get("model"), payload.get("model_id"), payload,
+        )
         response = requests.post(
-            f"{agent_base_url}/api/engine/start",
+            _start_url,
             json=payload,
             timeout=600,
         )
+        log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, response.status_code, response.text[:1000])
         return jsonify(response.json()), response.status_code
     except requests.exceptions.ConnectionError:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Agent unreachable", "ok": False}), 502
     except requests.exceptions.Timeout:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Engine start timed out", "ok": False}), 504
     except Exception as e:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": str(e), "ok": False}), 500
 
 
@@ -2760,15 +2806,21 @@ def api_engine_stop(machine_id: str):
 
     try:
         from flask import request as flask_request
+        _stop_payload = flask_request.get_json(silent=True) or {}
+        _stop_url = f"{agent_base_url}/api/engine/stop"
+        log.info("ENGINE_CALL_OUT machine=%s url=%s payload=%s", machine_id, _stop_url, _stop_payload)
         response = requests.post(
-            f"{agent_base_url}/api/engine/stop",
-            json=flask_request.get_json(silent=True) or {},
+            _stop_url,
+            json=_stop_payload,
             timeout=60,
         )
+        log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, response.status_code, response.text[:1000])
         return jsonify(response.json()), response.status_code
     except requests.exceptions.ConnectionError:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": "Agent unreachable", "ok": False}), 502
     except Exception as e:
+        log.exception("ENGINE_CALL_EXCEPTION machine=%s", machine_id)
         return jsonify({"error": str(e), "ok": False}), 500
 
 
