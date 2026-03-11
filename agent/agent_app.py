@@ -2550,13 +2550,25 @@ async def capabilities():
         if vllm_reachable:
             vllm_models = await get_vllm_models(vllm_base)
 
+    from pathlib import Path
+
+    checkpoints_dir = Path("agent/third_party/comfyui/models/checkpoints")
+    if checkpoints_dir.exists():
+        sdxl_profiles = [
+            f.stem
+            for f in checkpoints_dir.glob("*.safetensors")
+            if f.is_file()
+        ]
+    else:
+        sdxl_profiles = []
+
     cap = Capabilities(
         machine_id=CFG.get("machine_id"),
         label=CFG.get("label"),
         tests=CFG.get("tests", ["llm_generate"]),
         llm_models=[],
         whisper_models=[],
-        sdxl_profiles=[],
+        sdxl_profiles=sdxl_profiles,
         accelerator_type=CFG.get("accelerator_type")
         or ("cuda" if HARDWARE_INFO.get("gpu_type") == "discrete" else "metal" if HARDWARE_INFO.get("gpu_type") else None),
         accelerator_memory_gb=CFG.get("accelerator_memory_gb")
