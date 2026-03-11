@@ -671,16 +671,37 @@ install_or_update_comfyui() {
 
     log_step "Installing/updating ComfyUI..."
 
-    # Clone ComfyUI if not present
+    # Integrity validation: check all conditions required for a valid ComfyUI install
+    local needs_clone=false
+
     if [[ ! -d "$COMFY_DIR" ]]; then
-        log_info "Cloning ComfyUI into $COMFY_DIR..."
-        run_command git clone https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
+        log_info "ComfyUI directory not found at $COMFY_DIR — will clone."
+        needs_clone=true
+    elif [[ ! -f "$COMFY_DIR/main.py" ]]; then
+        log_warning "ComfyUI directory exists but main.py is missing — re-cloning."
+        needs_clone=true
+    elif [[ ! -d "$COMFY_DIR/.git" ]]; then
+        log_warning "ComfyUI directory exists but is not a git repository — re-cloning."
+        needs_clone=true
     else
-        log_info "ComfyUI already exists at $COMFY_DIR"
+        local remote_url
+        remote_url=$(git -C "$COMFY_DIR" remote get-url origin 2>/dev/null || true)
+        if [[ "$remote_url" != *"comfyanonymous/ComfyUI"* ]]; then
+            log_warning "ComfyUI directory has unexpected git remote '$remote_url' — re-cloning."
+            needs_clone=true
+        fi
+    fi
+
+    if [[ "$needs_clone" == true ]]; then
+        log_info "Removing $COMFY_DIR and cloning ComfyUI..."
+        run_command rm -rf "$COMFY_DIR"
+        run_command git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git "$COMFY_DIR"
+    else
+        log_info "ComfyUI integrity checks passed at $COMFY_DIR"
         if [[ "$UPDATE_MODE" == true ]]; then
             log_info "Updating ComfyUI..."
             if [[ "$DRY_RUN" != true ]]; then
-                (cd "$COMFY_DIR" && git pull)
+                git -C "$COMFY_DIR" pull
             fi
         fi
     fi
