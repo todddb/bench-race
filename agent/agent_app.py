@@ -648,7 +648,10 @@ def _comfy_install_dir() -> Path:
     comfy = _comfy_config()
     path = comfy.get("install_dir") or os.getenv("COMFYUI_DIR", "")
     if path:
-        return Path(path)
+        p = Path(path)
+        if not p.is_absolute():
+            p = ROOT_DIR / p
+        return p
     return ROOT_DIR / "agent" / "third_party" / "comfyui"
 
 
@@ -2336,11 +2339,11 @@ async def _start_comfyui() -> dict:
                 pass
 
         # Start ComfyUI using existing logic
-        install_dir = _comfy_install_dir()
+        install_dir = _comfy_install_dir().resolve()
         python_path = install_dir / ".venv" / "bin" / "python"
         if not python_path.exists():
-            slog.warning("reset_start_comfyui", status="no_venv")
-            return {"started": False, "error": "ComfyUI venv not found"}
+            slog.warning("reset_start_comfyui", status="no_venv", python_path=str(python_path))
+            raise RuntimeError(f"ComfyUI python not found at {python_path}")
 
         env = os.environ.copy()
         host = comfy.get("host", "127.0.0.1")
