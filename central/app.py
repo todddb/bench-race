@@ -2911,7 +2911,7 @@ def api_status():
             active_backend = (cap.get("active_backend") or "ollama").lower()
             available_llm = _available_llm_models(cap, active_backend)
             resolution_backend = "custom" if active_backend in {"custom", "mlx", "trtllm"} else active_backend
-            if requested_model_id:
+            if requested_model_id and active_backend != "comfyui":
                 try:
                     _, resolved_selected_model = _resolve_model_for_machine(m, resolution_backend, requested_model_id)
                 except Exception as e:
