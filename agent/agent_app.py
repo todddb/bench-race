@@ -1720,20 +1720,23 @@ async def start_engine(request: EngineStartRequest):
                 status_code=400,
                 detail="Missing required field: model_id for custom backend"
             )
-    else:
-        # For ollama and others
+    elif request.backend in ("ollama", "mlx", "trtllm"):
+        # LLM backends require a model at engine start time
         runtime_model = request.model
 
         if not runtime_model:
             raise HTTPException(
                 status_code=400,
-                detail="Missing required field: model"
+                detail=f"Model required for backend {request.backend}"
             )
 
-    backend = str(request.backend).strip().lower()
-    runtime_model = str(runtime_model).strip()
+    # comfyui does not require a model at engine start time
 
-    allowed_backends = {"ollama", "custom"}
+    backend = str(request.backend).strip().lower()
+    if runtime_model is not None:
+        runtime_model = str(runtime_model).strip()
+
+    allowed_backends = {"ollama", "custom", "comfyui"}
     if backend not in allowed_backends:
         raise HTTPException(status_code=400, detail=f"Unsupported backend for /api/engine/start: {backend}")
 
@@ -1750,6 +1753,22 @@ async def start_engine(request: EngineStartRequest):
             raise
         except Exception as e:
             log.error("ENGINE_START failure backend=%s model_id=%s: %s", backend, runtime_model, str(e))
+            raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
+
+    if backend == "comfyui":
+        try:
+            start_result = await _start_comfyui()
+            if not start_result.get("started"):
+                raise HTTPException(status_code=500, detail=start_result.get("error", "ComfyUI failed to start"))
+            health_result = await _check_comfyui_health()
+            if not health_result.get("healthy"):
+                raise HTTPException(status_code=500, detail="ComfyUI did not become healthy in time")
+            _ACTIVE_BACKEND = "comfyui"
+            return {"status": "started", "engine": "comfyui", "accepted": True}
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error("ENGINE_START failure backend=comfyui: %s", str(e))
             raise HTTPException(status_code=500, detail=f"Engine start failed: {str(e)}")
 
     resolved = runtime_model
