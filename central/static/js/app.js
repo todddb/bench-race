@@ -715,6 +715,28 @@ function updateMachineStatus(machine) {
   updateResetButtonState(machine.machine_id, agentReachable);
 }
 
+function updateEngineBadge(machine) {
+  const badgeEl = document.getElementById(`engine-badge-${machine.machine_id}`);
+  if (!badgeEl) return;
+  const backend = (machine.backend || "").toLowerCase();
+  const engineType = (machine.engine_type || "").toLowerCase();
+  if (backend !== "custom" && backend !== "mlx" && backend !== "trtllm") {
+    badgeEl.className = "card-engine-badge hidden";
+    badgeEl.textContent = "";
+    return;
+  }
+  if (engineType === "mlx") {
+    badgeEl.className = "card-engine-badge mlx";
+    badgeEl.textContent = "MLX";
+  } else if (engineType === "trtllm") {
+    badgeEl.className = "card-engine-badge trt";
+    badgeEl.textContent = "TensorRT-LLM";
+  } else {
+    badgeEl.className = "card-engine-badge hidden";
+    badgeEl.textContent = "";
+  }
+}
+
 function updateModelFit(machine) {
   const fitEl = document.getElementById(`model-fit-${machine.machine_id}`);
   if (!fitEl) return;
@@ -1201,6 +1223,7 @@ function applyStatusResponse(data) {
     statusCache.set(merged.machine_id, merged);
     applyMachineExcludedState(merged.machine_id, merged.excluded);
     updateMachineStatus(merged);
+    updateEngineBadge(merged);
     updateModelFit(merged);
     if (merged.runtime_metrics) {
       runtimeMetrics.set(merged.machine_id, merged.runtime_metrics);
