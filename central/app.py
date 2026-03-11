@@ -2918,16 +2918,20 @@ def api_status():
                     app.logger.warning(f"Model resolution failed in api_status: {e}")
                     resolved_selected_model = None
             has_selected_model = bool(resolved_selected_model and model_satisfied(resolved_selected_model, available_llm))
+            is_comfyui_backend = active_backend == "comfyui"
+            effective_llm = [] if is_comfyui_backend else required["llm"]
+            effective_whisper = [] if is_comfyui_backend else required["whisper"]
+            effective_sdxl = required["sdxl_profiles"] if is_comfyui_backend else []
             missing_required_llm: List[str] = []
-            for model in required["llm"]:
+            for model in effective_llm:
                 resolved_required_model = _resolved_validation_model_for_machine(m, active_backend, model)
                 if not resolved_required_model or not model_satisfied(resolved_required_model, available_llm):
                     missing_required_llm.append(model)
             missing_required = {
                 "llm": missing_required_llm,
-                "whisper": [model for model in required["whisper"] if model not in (cap.get("whisper_models") or [])],
+                "whisper": [model for model in effective_whisper if model not in (cap.get("whisper_models") or [])],
                 "sdxl_profiles": [
-                    profile for profile in required["sdxl_profiles"] if profile not in (cap.get("sdxl_profiles") or [])
+                    profile for profile in effective_sdxl if profile not in (cap.get("sdxl_profiles") or [])
                 ],
             }
             memory_label = "RAM"
@@ -3003,9 +3007,17 @@ def api_status():
                     "runtime_metrics": RUNTIME_METRICS.get(m.get("machine_id")),
                 }
             )
+    seen_backends = {s.get("backend", "ollama") for s in statuses if s.get("reachable")}
+    has_comfyui = "comfyui" in seen_backends
+    has_llm_backend = bool(seen_backends - {"comfyui"})
+    response_required = {
+        "llm": required["llm"] if has_llm_backend else [],
+        "whisper": required["whisper"] if has_llm_backend else [],
+        "sdxl_profiles": required["sdxl_profiles"] if has_comfyui else [],
+    }
     response_dict = {
         "model": requested_model_id,
-        "required": required,
+        "required": response_required,
         "machines": statuses,
     }
     return jsonify(response_dict), 200
