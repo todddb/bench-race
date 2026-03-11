@@ -168,10 +168,27 @@ def test_api_engine_start_resolves_registry_model_before_agent_call(monkeypatch)
         [{"machine_id": "m1", "agent_base_url": "http://agent", "gpu": {"type": "apple"}}],
     )
 
+    monkeypatch.setattr(
+        app_mod,
+        "load_models_registry",
+        lambda: {
+            "ollama": [],
+            "custom": [
+                {
+                    "id": "llama3.1-8b-custom",
+                    "display_name": "Llama 3.1 8B Custom",
+                    "apple": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+                    "nvidia": "Llama-3.1-8B-Instruct-NVFP4-engine",
+                }
+            ],
+        },
+    )
+
     captured = {}
 
     class _Resp:
         status_code = 200
+        text = ""
 
         @staticmethod
         def json():
