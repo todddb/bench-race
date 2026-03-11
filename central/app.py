@@ -2937,6 +2937,12 @@ def api_status():
                 memory_label = "Unified"
             fit_model = resolved_selected_model or ""
             fit = _compute_fit(m, cap, fit_model, num_ctx)
+            engine_type: Optional[str] = None
+            if active_backend in {"mlx", "trtllm", "custom"}:
+                try:
+                    engine_type = _derive_engine_type(m)
+                except Exception:
+                    engine_type = None
             statuses.append(
                 {
                     "machine_id": cap.get("machine_id") or m.get("machine_id"),
@@ -2949,6 +2955,7 @@ def api_status():
                     "resolved_selected_model": resolved_selected_model,
                     "has_selected_model": has_selected_model,
                     "backend": active_backend,
+                    "engine_type": engine_type,
                     "available_models_for_current_backend": available_llm,
                     "available_llm_models": available_llm,
                     "missing_required": missing_required,
