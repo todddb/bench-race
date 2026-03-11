@@ -19,7 +19,8 @@ SECRETS_FILE="${HOME}/.bench-race-secrets"
 VENV_DIR="${SCRIPT_DIR}/.sync_venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 
-COMFY_DIR="${REPO_ROOT}/agent/models/comfy"
+#COMFY_DIR="${REPO_ROOT}/agent/models/comfy"
+COMFY_DIR="${REPO_ROOT}/agent/third_party/comfyui/models/checkpoints"
 MLX_DIR="${REPO_ROOT}/agent/models/mlx"
 TRT_DIR="${REPO_ROOT}/agent/models/trtllm"
 
