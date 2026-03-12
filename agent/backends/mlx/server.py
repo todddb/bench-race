@@ -435,12 +435,14 @@ async def infer(req: InferRequest):
                 new_text = str(token_obj)
                 full_text += new_text
             if new_text:
-                # Append newline so that the MLX adapter's aiter_lines() can
-                # split on individual tokens as they arrive, enabling true
-                # incremental streaming instead of buffering until stream end.
-                yield new_text + "\n"
+                yield f"data: {json.dumps({'text': new_text})}\n\n"
+        yield "data: [DONE]\n\n"
 
-    return StreamingResponse(token_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        token_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.websocket("/stream")

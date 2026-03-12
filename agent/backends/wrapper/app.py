@@ -435,6 +435,9 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     "backend": backend,
                     "error": str(exc),
                 })
+                # Always terminate the SSE stream so the agent's aiter_lines() loop
+                # exits cleanly instead of hanging forever with read=None.
+                yield b"data: [DONE]\n\n"
                 return
 
             # Final chunk with finish_reason
