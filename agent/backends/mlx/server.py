@@ -245,12 +245,12 @@ async def _stream_generate(
             prompt=prompt,
             max_tokens=max_tokens,
         ):
-            # mlx_lm.stream_generate yields objects with a .text attribute
-            # (the incrementally-decoded string so far) and optionally
-            # .token (the token id).
+            # mlx_lm.stream_generate yields GenerationResponse objects where
+            # .text is the per-step decoded delta from the detokenizer (not
+            # the full cumulative text).  Use it directly as the new text.
             if hasattr(token_obj, "text"):
-                new_text = token_obj.text[len(full_text):]
-                full_text = token_obj.text
+                new_text = token_obj.text
+                full_text += new_text
             else:
                 new_text = str(token_obj)
                 full_text += new_text
@@ -463,8 +463,8 @@ async def infer(req: InferRequest):
             max_tokens=req.max_tokens,
         ):
             if hasattr(token_obj, "text"):
-                new_text = token_obj.text[len(full_text):]
-                full_text = token_obj.text
+                new_text = token_obj.text
+                full_text += new_text
             else:
                 new_text = str(token_obj)
                 full_text += new_text
