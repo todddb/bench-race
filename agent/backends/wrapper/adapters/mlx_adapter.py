@@ -141,9 +141,15 @@ class MLXAdapter:
                     ctype = resp.headers.get("content-type", "")
 
                     if "text/event-stream" in ctype:
-                        async for line in resp.aiter_lines():
-                            if line:
-                                yield line.encode("utf-8")
+                        # MLX emits server-sent-events (SSE) as text/event-stream.
+                        # Do NOT attempt to re-parse or join lines using aiter_lines()
+                        # — MLX may emit chunks that don't align to newline boundaries
+                        # and aiter_lines() can drop or block those partial arrivals.
+                        # Forward raw bytes exactly as received so the outer wrapper
+                        # / client sees the original SSE frames intact.
+                        async for chunk in resp.aiter_bytes():
+                            if chunk:
+                                yield chunk
                         return
 
                     # Server returned a non-streaming JSON response — yield raw
