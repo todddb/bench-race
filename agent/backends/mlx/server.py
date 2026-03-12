@@ -157,6 +157,38 @@ def _load_model(model_id: str) -> float:
     return elapsed
 
 
+def stream_tokens_as_text(generator, tokenizer, emit_fn):
+    """Buffer token ids and emit decoded text deltas to prevent BPE fragmentation.
+
+    Many tokenizers (BPE/wordpiece) require context across multiple token ids to
+    correctly reconstruct whitespace and merged subwords.  Decoding each id in
+    isolation produces garbled fragments like "Here", "de", "ween", "crete".
+
+    This function accumulates all token ids seen so far, decodes the entire
+    buffer on each step, and emits only the *new suffix* (delta) relative to
+    the previously emitted text.  This guarantees that whitespace markers and
+    BPE merges are always preserved.
+
+    Args:
+        generator: iterable yielding integer token ids.
+        tokenizer: object with a ``decode(list_of_ids, skip_special_tokens)`` method.
+        emit_fn: callable that accepts a non-empty text delta string.
+    """
+    accumulated_ids: List[int] = []
+    previous_text = ""
+    for token in generator:
+        accumulated_ids.append(int(token))
+        full_text = tokenizer.decode(accumulated_ids, skip_special_tokens=True)
+        if full_text.startswith(previous_text):
+            delta = full_text[len(previous_text):]
+        else:
+            # Tokenizer normalised the text in an unexpected way; emit it all.
+            delta = full_text
+        if delta:
+            emit_fn(delta)
+            previous_text = full_text
+
+
 def _generate_sync(prompt: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
     """Run a non-streaming generation and return result dict."""
     _ensure_mlx()
