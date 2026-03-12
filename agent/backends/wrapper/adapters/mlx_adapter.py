@@ -135,21 +135,30 @@ class MLXAdapter:
             "stream": True,
         }
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0)
+            ) as client:
                 async with client.stream("POST", f"{MLX_BASE_URL}/infer", json=body) as resp:
                     resp.raise_for_status()
                     ctype = resp.headers.get("content-type", "")
 
                     if "text/event-stream" in ctype:
-                        # MLX emits server-sent-events (SSE) as text/event-stream.
-                        # Do NOT attempt to re-parse or join lines using aiter_lines()
-                        # — MLX may emit chunks that don't align to newline boundaries
-                        # and aiter_lines() can drop or block those partial arrivals.
-                        # Forward raw bytes exactly as received so the outer wrapper
-                        # / client sees the original SSE frames intact.
+                        # MLX emits SSE frames as "data: {...}\n\n".  Multiple frames
+                        # can arrive in a single aiter_bytes() chunk when TCP coalesces
+                        # them.  Buffer and split on the SSE frame boundary (\n\n) so
+                        # the outer sse_generator receives exactly one frame per yield,
+                        # preventing the wrapper from mangling multiple tokens into one.
+                        buf = b""
                         async for chunk in resp.aiter_bytes():
-                            if chunk:
-                                yield chunk
+                            if not chunk:
+                                continue
+                            buf += chunk
+                            while b"\n\n" in buf:
+                                frame, buf = buf.split(b"\n\n", 1)
+                                if frame.strip():
+                                    yield frame + b"\n\n"
+                        if buf.strip():
+                            yield buf
                         return
 
                     # Server returned a non-streaming JSON response — yield raw
