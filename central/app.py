@@ -71,6 +71,21 @@ from central.backend_switch import SwitchState, init_machine_states
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bench-central")
 
+
+def _log_agent_call(method: str, url: str, payload: Any = None, machine_id: Optional[str] = None) -> None:
+    """Emit a JSON log line for every outbound API call central makes to an agent."""
+    entry: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": "agent_call_out",
+        "method": method.upper(),
+        "url": url,
+    }
+    if machine_id:
+        entry["machine_id"] = machine_id
+    if payload is not None:
+        entry["payload"] = payload
+    log.info("AGENT_CALL_OUT %s", json.dumps(entry))
+
 # -----------------------------------------------------------------------------
 # Flask + SocketIO
 # Use threading mode to avoid eventlet/asyncio incompatibilities.
@@ -376,6 +391,7 @@ def _poll_active_image_jobs() -> None:
             continue
 
         try:
+            _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status", {"job_id": job_id}, machine_id)
             r = requests.get(
                 f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status",
                 params={"job_id": job_id},
@@ -1017,6 +1033,7 @@ def _fetch_and_save_image_by_id(run_id: str, machine_id: str, filename: str, ima
     # Fetch image from agent
     try:
         image_url = f"{agent_base_url}/api/image/result/{image_id}"
+        _log_agent_call("GET", image_url, machine_id=machine_id)
         response = requests.get(image_url, timeout=10)
         response.raise_for_status()
         image_bytes = response.content
@@ -1040,6 +1057,7 @@ def _fetch_and_save_image_by_id(run_id: str, machine_id: str, filename: str, ima
 
 def _machine_model_fit(machine: Dict[str, Any], model: str, num_ctx: int) -> Optional[Dict[str, Any]]:
     try:
+        _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/capabilities", machine_id=machine.get("machine_id"))
         r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
         r.raise_for_status()
         cap = r.json()
@@ -1570,6 +1588,7 @@ def _select_agent_for_sample(selected_model: Optional[str]) -> Optional[Dict[str
     candidates: List[Dict[str, Any]] = []
     for machine in MACHINES:
         try:
+            _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/capabilities", machine_id=machine.get("machine_id"))
             r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
@@ -1751,6 +1770,7 @@ def _missing_models_for_policy(models: List[str]) -> Dict[str, List[str]]:
     for m in MACHINES:
         label = m.get("label") or m.get("machine_id") or "unknown"
         try:
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=m.get("machine_id"))
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
@@ -2047,6 +2067,7 @@ def api_machines():
     for m in MACHINES:
         machine = dict(m)
         try:
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=m.get("machine_id"))
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
@@ -2128,6 +2149,7 @@ def api_reset_agent(machine_id: str):
     try:
         # Forward to agent's reset endpoint with longer timeout (OLLAMA_START_TIMEOUT_S + COMFYUI_START_TIMEOUT_S + overhead)
         # Default timeouts: 120s + 60s + 60s overhead = 240s (4 minutes)
+        _log_agent_call("POST", f"{agent_base_url}/api/reset", machine_id=machine_id)
         response = requests.post(
             f"{agent_base_url}/api/reset",
             timeout=240
@@ -2247,6 +2269,7 @@ def _proxy_backend_status(machine: Dict[str, Any]) -> Dict[str, Any]:
     if not agent_base_url:
         return {"phase": "error", "detail": "missing agent_base_url", "backend": None}
     try:
+        _log_agent_call("GET", f"{agent_base_url}/api/backend/status", machine_id=machine.get("machine_id"))
         response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
         payload = response.json()
         if not response.ok:
@@ -2449,7 +2472,7 @@ def api_backend_switch():
                     raise ValueError("Missing agent_base_url")
 
                 _stop_url = f"{base_url}/api/engine/stop"
-                log.info("ENGINE_CALL_OUT machine=%s url=%s payload=%s", machine_id, _stop_url, {})
+                _log_agent_call("POST", _stop_url, {}, machine_id=machine_id)
                 try:
                     _stop_resp = requests.post(_stop_url, timeout=30)
                     log.info("ENGINE_CALL_RESPONSE machine=%s status=%s body=%s", machine_id, _stop_resp.status_code, _stop_resp.text[:1000])
@@ -2462,11 +2485,7 @@ def api_backend_switch():
                     agent_payload["engine_type"] = engine_type
                     agent_payload["model_id"] = resolved_runtime_model
                 _start_url = f"{base_url}/api/engine/start"
-                log.info(
-                    "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
-                    machine_id, _start_url, resolved_backend, engine_type, resolved_runtime_model,
-                    agent_payload.get("model_id"), agent_payload,
-                )
+                _log_agent_call("POST", _start_url, agent_payload, machine_id=machine_id)
                 resp = requests.post(
                     _start_url,
                     json=agent_payload,
@@ -2611,6 +2630,7 @@ def api_agent_models(machine_id: str):
     backend_status = _proxy_backend_status(machine)
     backend = backend_status.get("backend") or "ollama"
     try:
+        _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/v1/models", machine_id=machine_id)
         resp = requests.get(f"{machine['agent_base_url'].rstrip('/')}/v1/models", timeout=5)
         resp.raise_for_status()
         data = resp.json()
@@ -2651,11 +2671,7 @@ def api_agent_switch_backend(machine_id: str):
         agent_payload["model_id"] = resolved_model
     log.info("api_agent_switch_backend machine=%s backend=%s engine_type=%s model=%s", machine_id, agent_backend, engine_type, resolved_model)
     _start_url = f"{agent_base_url}/api/engine/start"
-    log.info(
-        "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
-        machine_id, _start_url, agent_backend, engine_type, resolved_model,
-        agent_payload.get("model_id"), agent_payload,
-    )
+    _log_agent_call("POST", _start_url, agent_payload, machine_id=machine_id)
     try:
         response = requests.post(
             _start_url,
@@ -2708,11 +2724,7 @@ def api_agent_load_model(machine_id: str):
         agent_payload["engine_type"] = engine_type
         agent_payload["model_id"] = resolved_model
     _start_url = f"{agent_base_url}/api/engine/start"
-    log.info(
-        "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
-        machine_id, _start_url, agent_backend, engine_type, resolved_model,
-        agent_payload.get("model_id"), agent_payload,
-    )
+    _log_agent_call("POST", _start_url, agent_payload, machine_id=machine_id)
     try:
         response = requests.post(
             _start_url,
@@ -2778,15 +2790,8 @@ def api_engine_start(machine_id: str):
             return jsonify({"error": f"Unknown or missing backend: {backend!r}", "ok": False}), 400
 
         _start_url = f"{agent_base_url}/api/engine/start"
-        log.info(
-            "ENGINE_START_PAYLOAD machine=%s payload=%s",
-            machine_id, payload,
-        )
-        log.info(
-            "ENGINE_CALL_OUT machine=%s url=%s backend=%s engine_type=%s model=%s model_id=%s payload=%s",
-            machine_id, _start_url, payload.get("backend"), payload.get("engine_type"),
-            payload.get("model"), payload.get("model_id"), payload,
-        )
+        log.info("ENGINE_START_PAYLOAD machine=%s payload=%s", machine_id, payload)
+        _log_agent_call("POST", _start_url, payload, machine_id=machine_id)
         response = requests.post(
             _start_url,
             json=payload,
@@ -2820,7 +2825,7 @@ def api_engine_stop(machine_id: str):
         from flask import request as flask_request
         _stop_payload = flask_request.get_json(silent=True) or {}
         _stop_url = f"{agent_base_url}/api/engine/stop"
-        log.info("ENGINE_CALL_OUT machine=%s url=%s payload=%s", machine_id, _stop_url, _stop_payload)
+        _log_agent_call("POST", _stop_url, _stop_payload, machine_id=machine_id)
         response = requests.post(
             _stop_url,
             json=_stop_payload,
@@ -2848,6 +2853,7 @@ def api_agent_comfy_health(machine_id: str):
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
 
     try:
+        _log_agent_call("GET", f"{agent_base_url}/api/comfy/health", machine_id=machine_id)
         response = requests.get(
             f"{agent_base_url}/api/comfy/health",
             timeout=10,
@@ -2888,6 +2894,7 @@ def api_backend_stop(machine_id: str):
     try:
         from flask import request as flask_request
         backend = flask_request.args.get("backend", "")
+        _log_agent_call("POST", f"{agent_base_url}/api/backend/stop", {"backend": backend}, machine_id=machine_id)
         response = requests.post(
             f"{agent_base_url}/api/backend/stop?backend={backend}",
             timeout=30,
@@ -2911,6 +2918,7 @@ def api_backend_status(machine_id: str):
         return jsonify({"error": f"No agent_base_url for {machine_id}", "ok": False}), 500
 
     try:
+        _log_agent_call("GET", f"{agent_base_url}/api/backend/status", machine_id=machine_id)
         response = requests.get(f"{agent_base_url}/api/backend/status", timeout=5)
         return jsonify(response.json()), response.status_code
     except requests.exceptions.ConnectionError:
@@ -2924,6 +2932,7 @@ def api_capabilities():
     caps = []
     for m in MACHINES:
         try:
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=m.get("machine_id"))
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
@@ -2968,6 +2977,7 @@ def api_status():
         last_checked = time.time()
         resolved_selected_model = None
         try:
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=m.get("machine_id"))
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r.raise_for_status()
             cap = r.json()
@@ -3107,6 +3117,7 @@ def api_image_status():
     for m in MACHINES:
         last_checked = time.time()
         try:
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/api/comfy/health", machine_id=m.get("machine_id"))
             r = requests.get(f"{m['agent_base_url'].rstrip('/')}/api/comfy/health", timeout=3)
             r.raise_for_status()
             cap = r.json()
@@ -3381,6 +3392,7 @@ def api_sync_image_models(machine_id: str):
     if not machine:
         return jsonify({"error": f"Unknown machine_id: {machine_id}"}), 404
     try:
+        _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/api/comfy/health", machine_id=machine_id)
         r = requests.get(f"{machine['agent_base_url'].rstrip('/')}/api/comfy/health", timeout=3)
         r.raise_for_status()
         cap = r.json()
@@ -3389,6 +3401,7 @@ def api_sync_image_models(machine_id: str):
         missing = [ckpt for ckpt in required if ckpt not in available]
         if not missing:
             return jsonify({"message": "No missing checkpoints"})
+        _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync", {"checkpoints": missing}, machine_id=machine_id)
         sync_resp = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync",
             json={
@@ -3444,6 +3457,7 @@ def api_sync_image_checkpoints(machine_id: str):
         return jsonify({"error": "No valid checkpoints to sync"}), 400
 
     try:
+        _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints", {"item_count": len(items)}, machine_id=machine_id)
         sync_resp = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints",
             json={"items": items},
@@ -3497,6 +3511,7 @@ def api_sync_image_checkpoints_all():
         if not machine_id:
             continue
         try:
+            _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints", {"item_count": len(items)}, machine_id=machine_id)
             sync_resp = requests.post(
                 f"{machine['agent_base_url'].rstrip('/')}/api/comfy/sync_checkpoints",
                 json={"items": items},
@@ -3588,6 +3603,7 @@ def api_start_llm():
             # the abstract model ID into the concrete runtime string.
             # Only the resolved string is sent to the agent.
             try:
+                _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=m.get("machine_id"))
                 cap_resp = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
                 cap_resp.raise_for_status()
                 cap = cap_resp.json()
@@ -3600,18 +3616,20 @@ def api_start_llm():
             except (StopIteration, ValueError):
                 resolved_model = model
             model_fit = _machine_model_fit(m, resolved_model, num_ctx)
+            _job_payload = {
+                "test_type": "llm_generate",
+                "model": resolved_model,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "repeat": repeat,
+                "stream": True,
+            }
+            _log_agent_call("POST", f"{m['agent_base_url'].rstrip('/')}/api/job", _job_payload, machine_id=m.get("machine_id"))
             r = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/api/job",
-                json={
-                    "test_type": "llm_generate",
-                    "model": resolved_model,
-                    "prompt": prompt,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "num_ctx": num_ctx,
-                    "repeat": repeat,
-                    "stream": True,
-                },
+                json=_job_payload,
                 timeout=5,
             )
             r.raise_for_status()
@@ -3665,6 +3683,7 @@ def _dispatch_compute_job(
     repeat_index: int,
 ) -> None:
     try:
+        _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/api/compute", payload, machine_id=machine.get("machine_id"))
         r = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/api/compute",
             json=payload,
@@ -3888,6 +3907,7 @@ def api_start_image():
 
         try:
             dispatch_at_ms = time.time() * 1000.0
+            _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/api/comfy/health", machine_id=m.get("machine_id"))
             health = requests.get(
                 f"{m['agent_base_url'].rstrip('/')}/api/comfy/health",
                 timeout=3,
@@ -3909,20 +3929,22 @@ def api_start_image():
                 continue
 
             # Send filename to agent (ComfyUI expects exact filename)
+            _txt2img_payload = {
+                "run_id": run_id,
+                "prompt": prompt,
+                "checkpoint": checkpoint_filename,
+                "seed": seed,
+                "steps": steps,
+                "width": width,
+                "height": height,
+                "num_images": num_images,
+                "repeat": repeat,
+                "sampler": sampler,
+            }
+            _log_agent_call("POST", f"{m['agent_base_url'].rstrip('/')}/api/comfy/txt2img", _txt2img_payload, machine_id=m.get("machine_id"))
             resp = requests.post(
                 f"{m['agent_base_url'].rstrip('/')}/api/comfy/txt2img",
-                json={
-                    "run_id": run_id,
-                    "prompt": prompt,
-                    "checkpoint": checkpoint_filename,  # Pass filename to agent
-                    "seed": seed,
-                    "steps": steps,
-                    "width": width,
-                    "height": height,
-                    "num_images": num_images,
-                    "repeat": repeat,
-                    "sampler": sampler,
-                },
+                json=_txt2img_payload,
                 timeout=5,
             )
             resp.raise_for_status()
@@ -3991,6 +4013,7 @@ def api_image_job_status():
         return jsonify({"error": f"Machine not found: {machine_id}"}), 404
 
     try:
+        _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status", {"job_id": job_id}, machine_id=machine_id)
         r = requests.get(
             f"{machine['agent_base_url'].rstrip('/')}/api/image/job_status",
             params={"job_id": job_id},
@@ -4026,18 +4049,20 @@ def api_generate_sample_prompt():
     )
 
     try:
+        _sample_job_payload = {
+            "test_type": "llm_generate",
+            "model": model,
+            "prompt": sample_instruction,
+            "max_tokens": 512,
+            "temperature": 0.7,
+            "num_ctx": 4096,
+            "repeat": 1,
+            "stream": True,
+        }
+        _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/api/job", _sample_job_payload, machine_id=machine.get("machine_id"))
         r = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/api/job",
-            json={
-                "test_type": "llm_generate",
-                "model": model,
-                "prompt": sample_instruction,
-                "max_tokens": 512,
-                "temperature": 0.7,
-                "num_ctx": 4096,
-                "repeat": 1,
-                "stream": True,
-            },
+            json=_sample_job_payload,
             timeout=5,
         )
         r.raise_for_status()
@@ -4217,6 +4242,7 @@ def api_validate_models():
             for m in MACHINES:
                 mid = m.get("machine_id", "unknown")
                 try:
+                    _log_agent_call("GET", f"{m['agent_base_url'].rstrip('/')}/capabilities", machine_id=mid)
                     r = requests.get(f"{m['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
                     r.raise_for_status()
                     cap = r.json()
@@ -4243,6 +4269,7 @@ def api_agent_model_status(machine_id: str):
 
     required = _required_models()
     try:
+        _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/_internal/model_status", machine_id=machine_id)
         r = requests.get(
             f"{machine['agent_base_url'].rstrip('/')}/_internal/model_status",
             timeout=5,
@@ -4252,6 +4279,7 @@ def api_agent_model_status(machine_id: str):
     except Exception as e:
         # Fallback to capabilities check
         try:
+            _log_agent_call("GET", f"{machine['agent_base_url'].rstrip('/')}/capabilities", machine_id=machine_id)
             r2 = requests.get(f"{machine['agent_base_url'].rstrip('/')}/capabilities", timeout=2)
             r2.raise_for_status()
             cap = r2.json()
@@ -4297,6 +4325,7 @@ def api_agent_delete_model(machine_id: str):
         return jsonify({"error": "Model id or display_name required"}), 400
 
     try:
+        _log_agent_call("POST", f"{machine['agent_base_url'].rstrip('/')}/_internal/delete_model", {"id": model_id}, machine_id=machine_id)
         resp = requests.post(
             f"{machine['agent_base_url'].rstrip('/')}/_internal/delete_model",
             json={"id": model_id, "display_name": model_id},

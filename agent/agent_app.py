@@ -102,7 +102,11 @@ async def stream_vllm_generate(**_kwargs):
 # ---------------------------
 # Logging
 # ---------------------------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 log = logging.getLogger("bench-agent")  # Keep for backwards compatibility
 
 # Structured logger (will be initialized after config is loaded)
@@ -1590,6 +1594,11 @@ def _reset_idle_timer():
 
 @app.post("/api/backend/switch")
 async def switch_backend(req: BackendSwitchRequest):
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/backend/switch",
+        "payload": req.dict(),
+    }))
     backend = (req.backend or "").strip().lower()
     model = (req.model or "").strip()
 
@@ -1629,6 +1638,11 @@ async def select_backend(req: BackendSelectRequest):
     """
     global _BACKEND_KEEP_WARM
 
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/backend/select",
+        "payload": req.dict(),
+    }))
     backend = req.backend.lower()
     if backend not in ("ollama", "mlx", "trtllm", "vllm", "comfyui"):
         raise HTTPException(status_code=400, detail=f"Unknown backend: {backend}")
@@ -1714,6 +1728,12 @@ async def start_engine(request: EngineStartRequest):
     map quantizations, rewrite model names, or attempt fallback resolution.
     """
     global _ACTIVE_BACKEND
+
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/engine/start",
+        "payload": request.dict(),
+    }))
 
     backend = request.resolved_backend
 
@@ -1840,11 +1860,14 @@ async def start_engine(request: EngineStartRequest):
             # waits for docker health), so the HTTP timeout must cover the full
             # cold-start window.
             model_start_timeout = max(startup_timeout + 30, 90)
+            _wrapper_start_payload = {"model_id": resolved, "backend": engine_type}
+            log.info("CALL_TO_WRAPPER %s", json.dumps({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "endpoint": model_start_url,
+                "payload": _wrapper_start_payload,
+            }))
             async with httpx.AsyncClient(timeout=model_start_timeout) as client:
-                model_start_resp = await client.post(model_start_url, json={
-                    "model_id": resolved,
-                    "backend": engine_type,
-                })
+                model_start_resp = await client.post(model_start_url, json=_wrapper_start_payload)
             if model_start_resp.status_code != 200:
                 detail = "Wrapper model load failed"
                 try:
@@ -1944,6 +1967,11 @@ async def stop_engine(req: Optional[EngineStopRequest] = None):
     Stop one backend engine or all inference engines when engine is omitted.
     """
     global _ACTIVE_BACKEND
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/engine/stop",
+        "payload": req.dict() if req else {},
+    }))
     engine = ((req.engine if req else "") or "").strip().lower()
     active_backend = backend_manager.get_active_backend()
     active_backend_name = backend_manager.get_active_backend_name() or _ACTIVE_BACKEND
@@ -2013,6 +2041,11 @@ async def stop_backend_endpoint(backend: Optional[str] = None):
     """Stop a specific backend or the active one."""
     global _ACTIVE_BACKEND
 
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/backend/stop",
+        "payload": {"backend": backend},
+    }))
     active_name = backend_manager.get_active_backend_name()
     target = backend or active_name or _ACTIVE_BACKEND
     if not target:
@@ -2442,6 +2475,11 @@ async def reset_agent():
     - HEALTH_POLL_INTERVAL_S (default 1.5)
     - RESET_LOG_DIR (default ./logs)
     """
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/reset",
+        "payload": {},
+    }))
     t_reset_start = time.time()
     slog.info("reset_agent_start")
     notes = []
@@ -2692,6 +2730,11 @@ async def debug_logging():
 
 @app.post("/api/comfy/txt2img")
 async def comfy_txt2img(req: ComfyTxt2ImgRequest):
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/comfy/txt2img",
+        "payload": req.dict(),
+    }))
     job_id = str(uuid.uuid4())
 
     # Clean up old images to maintain retention policy
@@ -2902,6 +2945,11 @@ async def start_job(req: APIJobRequest):
     rewrite model IDs, or attempt fallback resolution.
     It simply executes the model string as provided.
     """
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/job",
+        "payload": req.dict(),
+    }))
     active_backend_name = _ACTIVE_BACKEND or backend_manager.get_active_backend_name() or "ollama"
     active_backend = backend_manager.get_active_backend()
     api_backend = "custom" if active_backend_name in {"mlx", "trtllm"} else active_backend_name
@@ -3077,6 +3125,12 @@ async def _job_runner_llm(job_id: str, req: LLMRequest):
                 "temperature": float(req.temperature),
             }
 
+            log.info("CALL_TO_WRAPPER %s", json.dumps({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "endpoint": f"{wrapper_base}/v1/chat/completions",
+                "payload": {k: v for k, v in payload.items() if k != "messages"},
+                "prompt_len": len(prompt),
+            }))
             gen_tokens = 0
             t0 = time.perf_counter()
             t_first = None
@@ -3845,6 +3899,11 @@ async def _job_runner_comfy(job_id: str, req: ComfyTxt2ImgRequest):
 
 @app.post("/api/comfy/sync_checkpoints")
 async def comfy_sync_checkpoints(req: ComfyCheckpointSyncRequest):
+    log.info("CALL_FROM_CENTRAL %s", json.dumps({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "endpoint": "/api/comfy/sync_checkpoints",
+        "payload": {"item_count": len(req.items)},
+    }))
     if not req.items:
         return {"error": "No checkpoint items provided"}, 400
     sync_id = str(uuid.uuid4())
