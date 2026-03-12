@@ -1,8 +1,8 @@
 """Tests for MLX backend streaming pipeline.
 
 Verifies that:
-- MLX server /infer endpoint yields tokens with \\n delimiter and text/event-stream content-type
-- MLX adapter infer_stream processes SSE lines via aiter_lines() for immediate delivery
+- MLX server /infer endpoint yields SSE frames with text/event-stream content-type
+- MLX adapter infer_stream processes SSE frames via aiter_bytes() for immediate delivery
 - Wrapper /v1/chat/completions wraps each token in a proper SSE data: frame
 """
 from __future__ import annotations
@@ -25,9 +25,7 @@ def test_mlx_server_infer_streaming_uses_event_stream_media_type():
     """The /infer endpoint must return text/event-stream when stream=True."""
     server = importlib.import_module("agent.backends.mlx.server")
 
-    tokens_yielded = []
-
-    def fake_stream_generate(model, tokenizer, prompt, max_tokens, temp):
+    def fake_stream_generate(model, tokenizer, prompt, max_tokens):
         class _Tok:
             def __init__(self, t):
                 self.text = t
@@ -57,14 +55,16 @@ def test_mlx_server_infer_streaming_uses_event_stream_media_type():
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers.get("content-type", "")
 
-        # Collect streamed body
+        # Parse SSE frames from body
         body = resp.content.decode("utf-8")
-        # Each token must be terminated by a newline so aiter_lines() can split
-        lines = [ln for ln in body.split("\n") if ln]
-        assert len(lines) >= 1
-        # First token should be "Hello", second incremental token "world" (delta)
-        assert lines[0] == "Hello"
-        assert lines[1] == " world"
+        frames = [ln for ln in body.split("\n\n") if ln.strip() and ln.strip() != "data: [DONE]"]
+        assert len(frames) >= 1
+
+        # First SSE frame carries delta "Hello", second carries " world"
+        first = json.loads(frames[0][len("data: "):])
+        assert first["text"] == "Hello"
+        second = json.loads(frames[1][len("data: "):])
+        assert second["text"] == " world"
     finally:
         server._state.model = orig_model
         server._state.tokenizer = orig_tokenizer
@@ -72,10 +72,10 @@ def test_mlx_server_infer_streaming_uses_event_stream_media_type():
 
 
 def test_mlx_server_infer_streaming_newline_delimiter():
-    """Each token yielded by token_stream must end with a newline character."""
+    """Each SSE frame yielded by token_stream must carry the correct incremental delta."""
     server = importlib.import_module("agent.backends.mlx.server")
 
-    def fake_stream_generate(model, tokenizer, prompt, max_tokens, temp):
+    def fake_stream_generate(model, tokenizer, prompt, max_tokens):
         class _Tok:
             def __init__(self, t):
                 self.text = t
@@ -106,16 +106,18 @@ def test_mlx_server_infer_streaming_newline_delimiter():
         assert resp.status_code == 200
         raw = resp.content.decode("utf-8")
 
-        # Every token chunk must end with "\n" so that httpx aiter_lines()
-        # can split tokens immediately without buffering the whole response.
-        for chunk in raw.split("\n"):
-            if chunk:
-                # Chunks are the individual token texts (newline stripped by split)
-                assert len(chunk) > 0
+        # Parse SSE frames and extract the "text" field (which is the delta)
+        token_texts = []
+        for frame in raw.split("\n\n"):
+            frame = frame.strip()
+            if not frame or frame == "data: [DONE]":
+                continue
+            assert frame.startswith("data: "), f"unexpected frame format: {frame!r}"
+            data = json.loads(frame[len("data: "):])
+            token_texts.append(data["text"])
 
-        # Verify we got all three incremental tokens
-        lines = [ln for ln in raw.split("\n") if ln]
-        assert lines == ["one", " two", " three"]
+        # Verify we got all three incremental deltas with correct spacing
+        assert token_texts == ["one", " two", " three"]
     finally:
         server._state.model = orig_model
         server._state.tokenizer = orig_tokenizer
@@ -163,8 +165,8 @@ def test_mlx_server_infer_non_streaming_returns_json():
 # MLX adapter streaming tests
 # ---------------------------------------------------------------------------
 
-class _SSEStreamResponse:
-    """Fake httpx streaming response that yields SSE-style text/event-stream lines."""
+class _SSEBytesStreamResponse:
+    """Fake httpx streaming response that yields SSE-style bytes via aiter_bytes()."""
 
     def __init__(self, tokens):
         self._tokens = tokens
@@ -182,9 +184,11 @@ class _SSEStreamResponse:
     def headers(self):
         return {"content-type": "text/event-stream"}
 
-    async def aiter_lines(self):
+    async def aiter_bytes(self):
         for tok in self._tokens:
-            yield tok
+            # Yield properly framed SSE bytes so the adapter's \n\n splitter works
+            frame = f"data: {json.dumps({'text': tok})}\n\n"
+            yield frame.encode("utf-8")
 
 
 class _FakeHTTPXClient:
@@ -204,11 +208,11 @@ class _FakeHTTPXClient:
         assert url.endswith("/infer")
         assert json is not None
         assert json["stream"] is True, "adapter must send stream=True to MLX server"
-        return _SSEStreamResponse(self._tokens)
+        return _SSEBytesStreamResponse(self._tokens)
 
 
-def test_mlx_adapter_infer_stream_uses_aiter_lines():
-    """infer_stream must send stream=True and iterate via aiter_lines for immediate delivery."""
+def test_mlx_adapter_infer_stream_uses_aiter_bytes():
+    """infer_stream must send stream=True and iterate via aiter_bytes for SSE frame delivery."""
     adapter_mod = importlib.import_module("agent.backends.wrapper.adapters.mlx_adapter")
     adapter = adapter_mod.MLXAdapter()
 
@@ -219,7 +223,12 @@ def test_mlx_adapter_infer_stream_uses_aiter_lines():
                           lambda **kw: _FakeHTTPXClient(tokens, **kw)):
             collected = []
             async for chunk in adapter.infer_stream("test-model", {"prompt": "hi", "max_tokens": 10}):
-                collected.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+                raw = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                # Each yielded chunk is a complete SSE frame; extract the text value
+                if raw.startswith("data: "):
+                    payload_str = raw[len("data: "):].strip()
+                    if payload_str != "[DONE]":
+                        collected.append(json.loads(payload_str)["text"])
         return collected
 
     result = asyncio.run(run())
@@ -247,8 +256,8 @@ def test_mlx_adapter_infer_stream_sends_stream_true():
         def headers(self):
             return {"content-type": "text/event-stream"}
 
-        async def aiter_lines(self):
-            yield "token_one"
+        async def aiter_bytes(self):
+            yield b"data: " + json.dumps({"text": "token_one"}).encode() + b"\n\n"
 
     class _CapturingClient:
         def __init__(self, **kw):
@@ -281,14 +290,14 @@ def test_mlx_adapter_infer_stream_sends_stream_true():
 # ---------------------------------------------------------------------------
 
 class _FakeStreamingMLXAdapter:
-    """Fake MLX adapter that yields raw token bytes, simulating real MLX streaming."""
+    """Fake MLX adapter that yields SSE-framed token bytes, simulating real MLX streaming."""
 
     backend_name = "mlx"
 
     async def infer_stream(self, model_id, payload):
-        # Simulate the MLX adapter yielding raw token bytes (after aiter_lines strips \n)
+        # Simulate the MLX adapter yielding complete SSE frames (as the real adapter does)
         for token in [" The", " sky", " is", " blue", "."]:
-            yield token.encode("utf-8")
+            yield f"data: {json.dumps({'text': token})}\n\n".encode("utf-8")
 
     async def list_models(self):
         return [{"id": "test-mlx-model", "object": "model", "owned_by": "mlx", "backend": "mlx"}]
