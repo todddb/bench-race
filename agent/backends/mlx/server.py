@@ -205,13 +205,13 @@ async def _stream_generate(
     t0 = time.perf_counter()
 
     try:
-        # Use canonical kwarg name; generate_step() rejects the 'temp' alias
+        # Streaming mode: do not forward temperature to stream_generate.
+        # generate_step() does not accept temperature/top_p/etc.
         for token_obj in _mlx_lm.stream_generate(
             _state.model,
             _state.tokenizer,
             prompt=prompt,
             max_tokens=max_tokens,
-            temperature=temperature,
         ):
             # mlx_lm.stream_generate yields objects with a .text attribute
             # (the incrementally-decoded string so far) and optionally
@@ -422,13 +422,13 @@ async def infer(req: InferRequest):
 
     def token_stream():
         full_text = ""
-        # Use canonical kwarg name; generate_step() rejects the 'temp' alias
+        # Streaming mode: do not forward temperature to stream_generate.
+        # generate_step() does not accept temperature/top_p/etc.
         for token_obj in _mlx_lm.stream_generate(
             _state.model,
             _state.tokenizer,
             prompt=req.prompt,
             max_tokens=req.max_tokens,
-            temperature=req.temperature,
         ):
             if hasattr(token_obj, "text"):
                 new_text = token_obj.text[len(full_text):]
