@@ -381,7 +381,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         created = int(time.time())
         model_id = payload.model
 
-        async def sse_generator() -> AsyncGenerator[str, None]:
+        async def sse_generator() -> AsyncGenerator[bytes, None]:
             try:
                 async for chunk in adapters[backend].infer_stream(model_id, infer_payload):
                     if await request.is_disconnected():
@@ -404,6 +404,9 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                         # Text-completion streaming format
                         elif "text" in choice:
                             token_text = choice.get("text", "") or ""
+                        # MLX native format: {"text": "..."} at the top level
+                        if not token_text:
+                            token_text = parsed.get("text", "") or ""
                         # Skip frames that contain no token content
                         if not token_text:
                             continue
@@ -424,7 +427,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                             }
                         ],
                     }
-                    yield f"data: {json.dumps(frame)}\n\n"
+                    yield f"data: {json.dumps(frame)}\n\n".encode("utf-8")
             except Exception as exc:
                 logger.exception("chat_completions_stream_failed", extra={
                     "endpoint": "/v1/chat/completions",
@@ -448,8 +451,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     }
                 ],
             }
-            yield f"data: {json.dumps(final_frame)}\n\n"
-            yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps(final_frame)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
 
         return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
