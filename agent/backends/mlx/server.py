@@ -435,7 +435,10 @@ async def infer(req: InferRequest):
                 new_text = str(token_obj)
                 full_text += new_text
             if new_text:
-                yield new_text
+                # Append newline so that the MLX adapter's aiter_lines() can
+                # split on individual tokens as they arrive, enabling true
+                # incremental streaming instead of buffering until stream end.
+                yield new_text + "\n"
 
     return StreamingResponse(token_stream(), media_type="text/event-stream")
 
